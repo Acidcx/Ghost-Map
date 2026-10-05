@@ -7,19 +7,61 @@ Ghost Map is a read-only device mapper and commissioning/debug tool for OT netwo
 - **What looks wrong.** It flags duplicate IPs, faulted devices, half duplex or a duplex mismatch, cabling/EMI error counters, firmware that is off-baseline or mixed, daisy-chained or unmanaged-switch ports, NAT'd devices, and switch data it couldn't read.
 - **What changed since last time.** It compares two scans: devices added or removed, swapped hardware (same IP, new serial), firmware or state changes, and new or resolved findings.
 
-It comes as a CLI and a local web UI. Both work fully offline (no CDNs) and run on Windows, Linux, and macOS with Python 3.10+.
+It comes as a local web UI and a CLI. It works fully offline (no CDNs). Use the single-file `GhostMap.exe` on Windows, or run it from source with Python 3.10+ on Windows, Linux, or macOS.
 
 > **Read-only by design.** Ghost Map only sends EtherNet/IP *ListIdentity* (the same unconnected query RSLinx/FactoryTalk Linx browsing uses), SNMP GET/GETBULK, and TCP connect checks. It has no write, set, or configuration code paths. See [docs/OT-SAFETY.md](docs/OT-SAFETY.md).
 
-## Quick start
+## Getting started on a laptop
+
+There are three ways to run Ghost Map. Each one opens the web UI in your browser at `http://127.0.0.1:8470`.
+
+### Option 1: GhostMap.exe (Windows, nothing to install)
+
+1. On GitHub, open the **Actions** tab, click the latest green **Build Windows exe** run, and download **GhostMap-windows** under *Artifacts*. Tagged versions (`v0.1.0`, ...) also attach `GhostMap.exe` to a **Release**.
+2. Unzip it and double-click `GhostMap.exe`.
+   - Windows SmartScreen may say "Windows protected your PC" because the exe isn't code-signed yet. Click **More info**, then **Run anyway**.
+   - If Windows Firewall asks, allow it on **Private** networks.
+3. A console window opens and your browser shows Ghost Map. **Closing the console window stops Ghost Map.**
+
+### Option 2: Start-GhostMap.bat (Windows, from the source code)
+
+Needs [Python 3.10+](https://www.python.org/downloads/). When installing Python, tick **Add python.exe to PATH**.
+
+1. On GitHub, use **Code > Download ZIP** (or `git clone`) and unzip it.
+2. Double-click **`Start-GhostMap.bat`**. The first run sets everything up (needs internet once, takes about a minute). After that it starts straight away.
+
+On macOS or Linux, run `./start-ghostmap.sh` instead.
+
+### Option 3: Command line
 
 ```bash
-pip install -e .              # or: pip install ghostmap-*.whl on an offline laptop
-
-ghostmap web --demo           # open http://127.0.0.1:8470 and explore a simulated machine cell
+pip install -e .
+ghostmap            # same as: ghostmap web --open
 ```
 
-A real machine network:
+## Your first scan
+
+1. **Try the demo first.** On the start screen click **Load demo machine** (or run `GhostMap.exe web --demo`). It loads a simulated packaging line with problems already planted, so you can see what every tab does.
+2. **Connect the laptop to the machine network.** Plug into a spare switch port. Give the laptop a static IP in the machine subnet that nobody else uses (e.g. `192.168.1.250 / 255.255.255.0`).
+3. **Click New scan** and fill in:
+   - **Targets**: the machine subnet, e.g. `192.168.1.0/24`.
+   - **Switch IPs** (optional): your Stratix, e.g. `192.168.1.2`. Any Stratix found by discovery is added automatically.
+   - **SNMP**: the switch's read-only community (v2c) or v3 user and keys. Without SNMP you still get the device list, firmware and faults, but no switch ports. See [Preparing a Stratix switch](#preparing-a-stratix-switch).
+4. **Start scan.** A /24 takes about 5 seconds. The results show up in these tabs:
+   - **Overview**: what's wrong, with a hint for each problem.
+   - **Devices**: the full inventory.
+   - **Switches**: port faceplate and counters.
+   - **Compare**: against an earlier scan (e.g. the as-commissioned scan).
+5. **Export CSV** gives you the device list for the machine documentation.
+
+If discovery finds nothing:
+- Check the laptop's IP and subnet mask.
+- Check that Windows Firewall allowed Ghost Map.
+- Try **Probe** on one known device IP.
+
+## Command line reference
+
+Everything in the UI is also available from the command line. With the exe, use `GhostMap.exe <command>` from a Command Prompt in the folder where the exe is.
 
 ```bash
 # Who's out there? (EtherNet/IP sweep, 200 packets/s by default)
@@ -96,6 +138,7 @@ The built-in CIP vendor table covers common automation vendors. To add the full 
 ```bash
 pip install -e ".[dev]"
 pytest
+python packaging/build_exe.py      # build dist/GhostMap.exe locally (pip install pyinstaller first)
 ```
 
 The switch collector, correlation, and diagnostics all run against an in-memory SNMP agent (`FakeSnmpClient`) built from the simulated machine in `ghostmap/sim/machine.py`, so features can be developed without hardware. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
@@ -109,4 +152,4 @@ Planned:
 - Logix backplane browse (modules, slots, firmware in each chassis)
 - Stratix specifics: DLR ring status, Device Manager/CIP port-to-device mappings, IOS-XE (Stratix 5800) MIB differences
 - Topology diagram view, PDF/Excel commissioning report
-- Windows single-file build (PyInstaller) for locked-down engineering laptops
+- Code-signed exe / installer

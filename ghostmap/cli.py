@@ -233,14 +233,30 @@ def cmd_diff(args) -> int:
 
 
 def cmd_web(args) -> int:
+    import socket
+    import threading
+    import webbrowser
+
     import uvicorn
 
     from ghostmap.web.app import create_app
 
+    url = f"http://{'127.0.0.1' if args.host in ('0.0.0.0', '::') else args.host}:{args.port}"
+    with socket.socket() as probe_sock:
+        probe_sock.settimeout(0.5)
+        already_running = probe_sock.connect_ex(("127.0.0.1", args.port)) == 0
+    if already_running:
+        print(f"Port {args.port} is already in use - Ghost Map is probably already running at {url}", file=sys.stderr)
+        if args.open:
+            webbrowser.open(url)
+        return 0
+
     if args.host not in ("127.0.0.1", "localhost", "::1"):
         print(f"WARNING: serving on {args.host} - anyone who can reach this port can run scans.", file=sys.stderr)
     app = create_app(data_dir=args.data_dir, demo=args.demo)
-    print(f"Ghost Map UI on http://{args.host}:{args.port}", file=sys.stderr)
+    print(f"Ghost Map is running at {url}  (close this window or press Ctrl+C to stop)", file=sys.stderr)
+    if args.open:
+        threading.Timer(1.5, webbrowser.open, args=(url,)).start()
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
     return 0
 
@@ -317,6 +333,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--port", type=int, default=8470)
     s.add_argument("--demo", action="store_true", help="preload the simulated demo machine scans")
+    s.add_argument("--open", action="store_true", help="open the UI in the default browser")
     s.set_defaults(func=cmd_web)
 
     s = sub.add_parser("simulate", help="run a fake EtherNet/IP machine on loopback for bench testing")
@@ -328,6 +345,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv:  # double-clicked / no arguments: start the web UI and open the browser
+        argv = ["web", "--open"]
     args = build_parser().parse_args(argv)
     return args.func(args)
 
