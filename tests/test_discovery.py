@@ -42,7 +42,9 @@ def test_discover_against_simulated_devices():
     async def run():
         transports = await serve({"127.0.0.1": _reply("127.0.0.1", "1756-L83E/B", 1)}, port)
         try:
-            replies, errors = await discover(["127.0.0.1", "127.0.0.2"], port=port, timeout=0.3, rate=0)
+            # 127.0.0.2 has no listener: it answers with ICMP port-unreachable, which on Windows used to
+            # stop the socket receiving (regression test for _disable_udp_connreset).
+            replies, errors = await discover(["127.0.0.2", "127.0.0.1"], port=port, timeout=0.3, rate=0)
             single = await probe("127.0.0.1", port=port, timeout=0.3)
         finally:
             for t in transports:

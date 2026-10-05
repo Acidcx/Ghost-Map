@@ -15,6 +15,7 @@ import asyncio
 import ipaddress
 import logging
 import socket
+import sys
 from typing import Callable, Iterable, Optional
 
 from ghostmap.models import DiscoveredIdentity
@@ -23,6 +24,34 @@ from ghostmap.protocols.enip import ENIP_PORT, EnipError, build_list_identity, p
 log = logging.getLogger(__name__)
 
 DEFAULT_MAX_HOSTS = 4096
+_SIO_UDP_CONNRESET = 0x9800000C
+
+
+def _disable_udp_connreset(sock: socket.socket) -> None:
+    """Windows: stop ICMP port-unreachable from breaking the UDP socket.
+
+    A sweep inevitably hits live hosts without EtherNet/IP (PCs, cameras).
+    Windows then reports WSAECONNRESET on the socket, and on some Python
+    versions the asyncio proactor stops receiving altogether, silently
+    dropping every later ListIdentity reply. ``socket.ioctl`` does not accept
+    this control code, hence ctypes.
+    """
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        wsa_ioctl = ctypes.windll.ws2_32.WSAIoctl
+        wsa_ioctl.argtypes = [ctypes.c_size_t, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p,
+                              wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p, ctypes.c_void_p]
+        flag = wintypes.BOOL(False)
+        returned = wintypes.DWORD(0)
+        if wsa_ioctl(sock.fileno(), _SIO_UDP_CONNRESET, ctypes.byref(flag), ctypes.sizeof(flag), None, 0,
+                     ctypes.byref(returned), None, None) != 0:
+            log.warning("could not disable SIO_UDP_CONNRESET (WSA error %s)", ctypes.windll.ws2_32.WSAGetLastError())
+    except Exception as exc:  # never block discovery on this
+        log.warning("could not disable SIO_UDP_CONNRESET: %s", exc)
 
 
 def expand_targets(specs: Iterable[str], max_hosts: int = DEFAULT_MAX_HOSTS) -> list[str]:
@@ -97,6 +126,7 @@ async def discover(
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     sock.bind(bind)
+    _disable_udp_connreset(sock)
     transport, proto = await loop.create_datagram_endpoint(_Collector, sock=sock)
     request = build_list_identity()
     interval = 1.0 / rate if rate > 0 else 0.0
