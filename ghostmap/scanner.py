@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
@@ -118,12 +117,16 @@ async def run_scan(
         result.switches = list(await asyncio.gather(*(one_switch(ip) for ip in switch_ips)))
 
     # 3. Correlate
+    # Only hosts we actually contacted: every swept host that answered ARP is a live
+    # device on the machine network, even if it doesn't speak EtherNet/IP.
     local_arp = arp_reader() if req.use_local_arp else {}
-    if hosts and local_arp:
-        nets = [ipaddress.ip_network(t, strict=False) for t in req.targets if "-" not in t]
-        local_arp = {ip: mac for ip, mac in local_arp.items()
-                     if not nets or any(ipaddress.ip_address(ip) in n for n in nets)}
-    result.devices = build_inventory(result.identities, result.switches, local_arp)
+    contacted = set(hosts) | {r.source_ip for r in result.identities}
+    local_arp = {ip: mac for ip, mac in local_arp.items() if ip in contacted}
+    non_cip = len(set(local_arp) - {r.source_ip for r in result.identities})
+    if non_cip:
+        say(f"  {non_cip} other hosts answered ARP (no EtherNet/IP reply)")
+    result.devices = build_inventory(result.identities, result.switches, local_arp,
+                                     local_ips=discovery.local_ips_for(hosts or req.broadcast))
 
     # 4. Diagnose
     result.findings = run_diagnostics(result.identities, result.devices, result.switches,

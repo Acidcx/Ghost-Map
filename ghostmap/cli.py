@@ -45,7 +45,10 @@ def print_scan(scan: ScanResult) -> None:
     rows = []
     for d in scan.devices:
         i = d.identity
-        rows.append((d.ip or "-", d.mac or "", i.vendor_name if i else "", i.product_name if i else "(non-CIP)",
+        product = i.product_name if i else "(no EtherNet/IP)"
+        if d.is_scanner:
+            product += "  [this computer]"
+        rows.append((d.ip or "-", d.mac or "", i.vendor_name if i else (f"{d.mac_vendor} (MAC)" if d.mac_vendor else ""), product,
                      i.revision if i else "", i.serial_hex if i else "", i.state_name if i else "",
                      f"{d.switch_name or d.switch_ip or ''} {d.switch_port or ''}".strip()))
     print(table(rows, ("ip", "mac", "vendor", "product", "fw", "serial", "state", "switch port")))

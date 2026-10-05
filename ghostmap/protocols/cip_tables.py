@@ -20,6 +20,7 @@ _BUILTIN_VENDORS: dict[int, str] = {
     43: "Balluff",
     48: "Turck",
     57: "Pepperl+Fuchs",
+    77: "Rockwell Software",
     90: "HMS Networks",
     108: "Beckhoff Automation",
     243: "Schneider Electric",
@@ -60,6 +61,7 @@ DEVICE_TYPES: dict[int, str] = {
 }
 
 DEVICE_TYPE_MANAGED_SWITCH = 0x2C
+VENDOR_ROCKWELL_SOFTWARE = 77  # RSLinx Classic / FactoryTalk Linx answering for a PC; product name = hostname
 
 # Identity attribute 8, "State".
 STATES: dict[int, str] = {
@@ -118,7 +120,9 @@ def vendor_name(vendor_id: int) -> str:
     return _vendors().get(vendor_id, f"Vendor {vendor_id}")
 
 
-def device_type_name(device_type: int) -> str:
+def device_type_name(device_type: int, vendor_id: int = 0) -> str:
+    if vendor_id == VENDOR_ROCKWELL_SOFTWARE:
+        return "Workstation (RSLinx / FactoryTalk Linx)"
     return DEVICE_TYPES.get(device_type, f"Device type 0x{device_type:02X}")
 
 

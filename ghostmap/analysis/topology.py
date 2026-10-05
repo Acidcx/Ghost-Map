@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Optional
 
 from ghostmap.models import Device, DiscoveredIdentity, Port, SwitchInfo
+from ghostmap.protocols.oui import mac_vendor
 
 
 def _ip_sort_key(ip: Optional[str]) -> tuple:
@@ -73,12 +74,19 @@ def build_inventory(
     local_arp: Optional[dict[str, str]] = None,
     *,
     include_non_cip: bool = True,
+    local_ips: frozenset[str] | set[str] = frozenset(),
 ) -> list[Device]:
+    """``local_arp`` must already be limited to the swept subnet(s): every host in it
+    answered ARP during the sweep, so it is listed even without a switch location.
+    Hosts only known from a switch's ARP table (which on an L3 switch can cover the
+    whole plant) are listed only when they sit on a scanned switch port.
+    """
     mark_inter_switch_links(switches)
+    local_arp = local_arp or {}
     ip_to_mac: dict[str, str] = {}
     for sw in switches:
         ip_to_mac.update(sw.arp)
-    ip_to_mac.update(local_arp or {})  # the scanner's own cache is the freshest
+    ip_to_mac.update(local_arp)  # the scanner's own cache is the freshest
     switch_macs = {p.mac for sw in switches for p in sw.ports if p.mac}
     switch_ips = {sw.ip for sw in switches}
     located = locate_macs(switches)
@@ -115,7 +123,7 @@ def build_inventory(
                 continue
             dev = Device(ip=ip, mac=mac, sources=["arp"])
             place(dev)
-            if dev.switch_port:  # only keep hosts we can tie to the machine network
+            if ip in local_arp or dev.switch_port:
                 devices[ip] = dev
                 known_macs.add(mac)
         # MACs learned on an edge port with no IP at all - "something is plugged in here".
@@ -127,4 +135,7 @@ def build_inventory(
                 vlan=port.vlan, sources=["fdb"],
             )
 
+    for dev in devices.values():
+        dev.mac_vendor = mac_vendor(dev.mac)
+        dev.is_scanner = bool(dev.ip and dev.ip in local_ips)
     return sorted(devices.values(), key=lambda d: (_ip_sort_key(d.ip), d.mac or ""))

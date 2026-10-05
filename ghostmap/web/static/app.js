@@ -94,7 +94,7 @@ function renderOverview() {
 
 // ------------------------------------------------------------------ devices
 const DEV_COLS = [
-  ["", null], ["IP", (d) => ipKey(d.ip)], ["MAC", (d) => d.mac || ""], ["Vendor", (d) => d.identity?.vendor_name || ""],
+  ["", null], ["IP", (d) => ipKey(d.ip)], ["MAC", (d) => d.mac || ""], ["Vendor", (d) => d.identity?.vendor_name || d.mac_vendor || ""],
   ["Product", (d) => d.identity?.product_name || ""], ["Type", (d) => d.identity?.device_type_name || ""],
   ["Firmware", (d) => d.identity?.revision || ""], ["Serial", (d) => d.identity?.serial_hex || ""],
   ["State", (d) => d.identity?.state_name || ""], ["Switch port", (d) => `${d.switch_name || d.switch_ip || ""} ${d.switch_port || ""}`],
@@ -122,7 +122,8 @@ function renderDevices() {
     return `<tr data-key="${esc(d.key)}" class="${state.selDevice === d.key ? "sel" : ""}">
       <td><span class="dot ${deviceHealth(d)}"></span></td>
       <td class="mono">${esc(d.ip || "-")}</td><td class="mono">${esc(d.mac || "")}</td>
-      <td>${esc(i?.vendor_name || "")}</td><td>${esc(i?.product_name || (d.ip ? "(non-CIP host)" : "(unknown MAC)"))}</td>
+      <td>${i ? esc(i.vendor_name) : d.mac_vendor ? `<span class="muted" title="From the MAC address - no EtherNet/IP reply">${esc(d.mac_vendor)}</span>` : ""}</td>
+      <td>${esc(i?.product_name || (d.ip ? "(no EtherNet/IP reply)" : "(unknown MAC)"))}${d.is_scanner ? ` <span class="chip" title="The computer running Ghost Map">this computer</span>` : ""}</td>
       <td>${esc(i?.device_type_name || "")}</td><td class="mono">${esc(i?.revision || "")}</td>
       <td class="mono">${esc(i?.serial_hex || "")}</td><td>${esc(i?.state_name || "")}</td>
       <td>${esc(d.switch_name || d.switch_ip || "")} <span class="mono">${esc(d.switch_port || "")}</span></td>
@@ -152,7 +153,7 @@ function renderDeviceDetail() {
   pane.parentElement.classList.toggle("open", !!d);
   if (!d) return;
   const i = d.identity;
-  const rows = [["IP", d.ip], ["MAC", d.mac], ["Switch", d.switch_name || d.switch_ip], ["Port", d.switch_port], ["VLAN", d.vlan],
+  const rows = [["IP", d.ip], ["MAC", d.mac], ["MAC vendor", d.mac_vendor || "-"], ["Switch", d.switch_name || d.switch_ip], ["Port", d.switch_port], ["VLAN", d.vlan],
     ["Seen via", d.sources.join(", ")]];
   if (i) rows.push(["Vendor", `${i.vendor_name} (${i.vendor_id})`], ["Device type", `${i.device_type_name} (0x${i.device_type.toString(16).toUpperCase().padStart(2, "0")})`],
     ["Product code", i.product_code], ["Firmware", i.revision], ["Serial", i.serial_hex], ["State", `${i.state_name} (${i.state})`],

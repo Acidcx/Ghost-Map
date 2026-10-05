@@ -139,6 +139,8 @@ class Device:
     switch_port: Optional[str] = None
     vlan: Optional[int] = None
     sources: list[str] = field(default_factory=list)
+    mac_vendor: str = ""  # manufacturer from the MAC address (IEEE OUI)
+    is_scanner: bool = False  # this is the computer running Ghost Map
 
     @property
     def key(self) -> str:

@@ -72,8 +72,8 @@ def load_scan_file(path: str | Path) -> ScanResult:
 
 
 INVENTORY_COLUMNS = (
-    "ip", "mac", "vendor", "product", "device_type", "product_code", "firmware", "serial",
-    "state", "status", "switch", "port", "vlan", "sources",
+    "ip", "mac", "mac_vendor", "vendor", "product", "device_type", "product_code", "firmware", "serial",
+    "state", "status", "switch", "port", "vlan", "sources", "note",
 )
 
 
@@ -84,6 +84,7 @@ def inventory_rows(scan: ScanResult) -> list[dict[str, Any]]:
         rows.append({
             "ip": d.ip or "",
             "mac": d.mac or "",
+            "mac_vendor": d.mac_vendor,
             "vendor": i.vendor_name if i else "",
             "product": i.product_name if i else "",
             "device_type": i.device_type_name if i else "",
@@ -96,6 +97,7 @@ def inventory_rows(scan: ScanResult) -> list[dict[str, Any]]:
             "port": d.switch_port or "",
             "vlan": d.vlan if d.vlan is not None else "",
             "sources": "+".join(d.sources),
+            "note": "this computer (scanner)" if d.is_scanner else "",
         })
     return rows
 

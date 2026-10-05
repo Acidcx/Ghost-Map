@@ -30,7 +30,7 @@ def test_scans_api(client):
 def test_csv_and_diff(client):
     csv = client.get("/api/scans/demo-today/inventory.csv")
     assert csv.status_code == 200
-    assert csv.text.splitlines()[0].startswith("ip,mac,vendor,product")
+    assert csv.text.splitlines()[0].startswith("ip,mac,mac_vendor,vendor,product")
     d = client.get("/api/diff", params={"old": "demo-baseline", "new": "demo-today"}).json()
     assert d["replaced"][0]["ip"] == "192.168.1.22"
 

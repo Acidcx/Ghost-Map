@@ -25,7 +25,7 @@ ghostmap = "ghostmap.cli:main"
 include = ["ghostmap*"]
 
 [tool.setuptools.package-data]
-ghostmap = ["web/static/*", "data/*.json"]
+ghostmap = ["web/static/*", "data/*.json", "data/*.gz"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

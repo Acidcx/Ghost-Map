@@ -96,7 +96,8 @@ def run_diagnostics(
     # ---------------------------------------------------------- firmware
     by_product: dict[tuple[int, int], dict[str, list[str]]] = defaultdict(lambda: defaultdict(list))
     for dev in devices:
-        if dev.identity:
+        # Rockwell Software entries are PCs running Linx: their "revision" is the Linx version.
+        if dev.identity and dev.identity.vendor_id != cip_tables.VENDOR_ROCKWELL_SOFTWARE:
             by_product[(dev.identity.vendor_id, dev.identity.product_code)][dev.identity.revision].append(dev.ip or "?")
     for (_vendor, _code), revs in by_product.items():
         if len(revs) > 1:

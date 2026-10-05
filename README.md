@@ -54,6 +54,13 @@ ghostmap            # same as: ghostmap web --open
    - **Compare**: against an earlier scan (e.g. the as-commissioned scan).
 5. **Export CSV** gives you the device list for the machine documentation.
 
+What you'll see in the device list:
+- **EtherNet/IP devices** with product, firmware, serial and status.
+- **PCs running RSLinx Classic or FactoryTalk Linx.** They answer too, as vendor *Rockwell Software*, type *Workstation*, with the PC's hostname as the product name. Your own laptop is tagged **this computer**.
+- **Everything else on the subnet that answered**, such as Moxa, Siemens and IT switches, cameras and PCs. These are listed with the manufacturer taken from the MAC address. They get no firmware or serial, because they don't speak EtherNet/IP.
+
+A device on a different subnet won't be seen. For example, Moxa switches ship with `192.168.127.253`. Give the laptop a second IP in that subnet and add it to Targets.
+
 If discovery finds nothing:
 - Check the laptop's IP and subnet mask.
 - Check that Windows Firewall allowed Ghost Map.
