@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ghostmap"
+version = "0.1.0"
+description = "Read-only OT network mapper and commissioning/debug tool for EtherNet/IP devices and Stratix switches."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Proprietary" }
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "pysnmp>=7.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[project.scripts]
+ghostmap = "ghostmap.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["ghostmap*"]
+
+[tool.setuptools.package-data]
+ghostmap = ["web/static/*", "data/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

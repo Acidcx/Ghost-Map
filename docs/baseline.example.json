@@ -1,0 +1,9 @@
+{
+  "_comment": "Expected firmware per product. Match by product_name (as reported by ListIdentity, case-insensitive) or by vendor_id + product_code. Revisions are major.minor; 11.002 and 11.2 are equivalent.",
+  "firmware": [
+    {"product_name": "1756-EN2T/D", "revision": "11.002"},
+    {"product_name": "1756-L83E/B", "revision": "33.011", "note": "Must match the Studio 5000 project revision."},
+    {"product_name": "PowerFlex 525", "revision": "7.001", "note": "Line standard per machine spec."},
+    {"vendor_id": 1, "product_code": 146, "revision": "6.012", "note": "1734-AENTR"}
+  ]
+}

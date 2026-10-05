@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ghost Map</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="logo">&#9672;</span> Ghost Map <span class="ver" id="ver"></span></div>
+    <div class="scanpick">
+      <label for="scanSelect">Scan</label>
+      <select id="scanSelect"></select>
+      <a id="csvLink" class="btn ghost" href="#" download>Export CSV</a>
+      <button id="newScanBtn" class="btn primary">New scan</button>
+    </div>
+  </header>
+
+  <nav class="tabs" id="tabs">
+    <button data-tab="overview" class="active">Overview</button>
+    <button data-tab="devices">Devices</button>
+    <button data-tab="switches">Switches</button>
+    <button data-tab="compare">Compare</button>
+    <button data-tab="probe">Probe</button>
+  </nav>
+
+  <main>
+    <section id="empty" class="panel hidden">
+      <h2>No scans yet</h2>
+      <p>Run a scan of the machine network, or load the simulated demo machine to look around.</p>
+      <p><button class="btn primary" id="emptyScan">New scan</button> <button class="btn" id="loadDemo">Load demo machine</button></p>
+      <p class="muted">Ghost Map is read-only: EtherNet/IP ListIdentity and SNMP GET/WALK only. It never writes to devices.</p>
+    </section>
+
+    <section id="tab-overview" class="tab">
+      <div class="tiles" id="tiles"></div>
+      <div class="panel">
+        <h2>Findings</h2>
+        <div id="findings"></div>
+      </div>
+      <details class="panel">
+        <summary>Scan log &amp; parameters</summary>
+        <pre id="scanLog"></pre>
+      </details>
+    </section>
+
+    <section id="tab-devices" class="tab hidden">
+      <div class="toolbar">
+        <input id="devFilter" type="search" placeholder="Filter: ip, product, vendor, port, serial...">
+        <label><input type="checkbox" id="devCipOnly"> EtherNet/IP only</label>
+      </div>
+      <div class="split">
+        <div class="tablewrap"><table id="devTable"></table></div>
+        <aside id="devDetail" class="panel detail hidden"></aside>
+      </div>
+    </section>
+
+    <section id="tab-switches" class="tab hidden">
+      <div id="switches"></div>
+    </section>
+
+    <section id="tab-compare" class="tab hidden">
+      <div class="panel">
+        <div class="toolbar">
+          <label>Before <select id="cmpOld"></select></label>
+          <label>After <select id="cmpNew"></select></label>
+          <button class="btn primary" id="cmpRun">Compare</button>
+        </div>
+        <div id="cmpOut" class="muted">Pick two scans, e.g. the as-commissioned scan and today's.</div>
+      </div>
+    </section>
+
+    <section id="tab-probe" class="tab hidden">
+      <div class="panel">
+        <div class="toolbar">
+          <input id="probeIp" placeholder="Device IP, e.g. 192.168.1.10">
+          <button class="btn primary" id="probeBtn">Probe</button>
+        </div>
+        <p class="muted">Sends a single ListIdentity and checks common TCP ports (44818 EtherNet/IP, 80/443 web, 502 Modbus, 102 S7, 22/23).</p>
+        <div id="probeOut"></div>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="scanDialog">
+    <form id="scanForm" method="dialog">
+      <h2>New scan</h2>
+      <label>Label <input name="label" placeholder="e.g. Line 1 - FAT"></label>
+      <label>Targets (CIDR, range or IP; comma or newline separated)
+        <textarea name="targets" rows="2" placeholder="192.168.1.0/24"></textarea></label>
+      <label>Broadcast addresses (optional)
+        <input name="broadcast" placeholder="192.168.1.255"></label>
+      <label>Stratix / managed switch IPs (optional)
+        <input name="switches" placeholder="192.168.1.2"></label>
+      <label class="inline"><input type="checkbox" name="auto_switches" checked> Also read discovered CIP switches over SNMP</label>
+      <fieldset>
+        <legend>SNMP (read-only)</legend>
+        <div class="row">
+          <label>Version <select name="snmp_version"><option value="2c">v2c</option><option value="3">v3</option></select></label>
+          <label class="v2">Community <input name="community" type="password" autocomplete="off"></label>
+          <label class="v3 hidden">User <input name="username" autocomplete="off"></label>
+        </div>
+        <div class="row v3 hidden">
+          <label>Auth <select name="auth_protocol"><option>sha</option><option>sha256</option><option>md5</option><option>none</option></select></label>
+          <label>Auth key <input name="auth_key" type="password" autocomplete="off"></label>
+          <label>Priv <select name="priv_protocol"><option>aes</option><option>aes256</option><option>des</option><option>none</option></select></label>
+          <label>Priv key <input name="priv_key" type="password" autocomplete="off"></label>
+        </div>
+        <p class="muted small">Credentials are used for this scan only and are never saved.</p>
+      </fieldset>
+      <div class="row">
+        <label>Rate (pkt/s) <input name="rate" type="number" value="200" min="1" max="2000"></label>
+        <label>Reply wait (s) <input name="timeout" type="number" value="2" step="0.5" min="0.2" max="30"></label>
+      </div>
+      <pre id="jobLog" class="hidden"></pre>
+      <div class="actions">
+        <button type="button" class="btn" id="scanCancel">Close</button>
+        <button type="submit" class="btn primary" id="scanGo">Start scan</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
