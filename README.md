@@ -109,7 +109,7 @@ Scans are stored as JSON in `~/.ghostmap/scans` (override with `--data-dir` or `
 
 ## Preparing a Stratix switch
 
-Ghost Map needs read-only SNMP. These are example IOS settings (Stratix 5400/5410/5700, or the equivalent in Device Manager):
+Ghost Map needs read-only SNMP. These are example IOS / IOS-XE settings (Stratix 5200/5400/5410/5700/5800, or the equivalent in Device Manager / the WebUI):
 
 ```
 ! v2c, restricted to the engineering laptop
@@ -122,6 +122,8 @@ snmp-server group GHOSTMAP v3 priv read GHOSTMAP
 snmp-server group GHOSTMAP v3 priv context vlan- match prefix read GHOSTMAP
 snmp-server user ghostmap GHOSTMAP v3 auth sha <auth-key> priv aes 128 <priv-key>
 ```
+
+**Several switches on one machine** (e.g. a line of Stratix 5200s, which run IOS-XE): list them all under *Switch IPs*, or just give SNMP credentials and let discovery add every Stratix it finds. All switches are read with the same credentials and at the same time. Ghost Map works out which ports link switches together (from LLDP/CDP, or from the switches' own MAC addresses when both are off), so each device is placed on the switch port it is actually plugged into.
 
 IOS exposes the MAC address table per VLAN, so Ghost Map reads the per-VLAN tables as well. It uses `community@<vlan>` indexing for v2c and the `vlan-<id>` context for v3, which is why the v3 group above includes the `vlan-` context. If the switch supports Q-BRIDGE-MIB, one walk is enough.
 

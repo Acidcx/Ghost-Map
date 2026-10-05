@@ -20,6 +20,35 @@ def _ip_sort_key(ip: Optional[str]) -> tuple:
         return (0, (ip,))
 
 
+def _short(name: str) -> str:
+    return name.split(".")[0].strip().lower()
+
+
+def mark_inter_switch_links(switches: list[SwitchInfo]) -> None:
+    """Mark ports that connect two scanned switches as uplinks.
+
+    The collector can only guess from neighbour names. With several switches
+    in one scan we know better: a port is a switch-to-switch link when its
+    LLDP/CDP neighbour is another scanned switch (by name or IP), or when it
+    has learned one of another scanned switch's own interface MACs (works
+    even with LLDP and CDP disabled).
+    """
+    if len(switches) < 2:
+        return
+    for sw in switches:
+        others = [o for o in switches if o is not sw]
+        other_names = {_short(o.sys_name) for o in others if o.sys_name}
+        other_ips = {o.ip for o in others}
+        other_macs = {p.mac for o in others for p in o.ports if p.mac}
+        for port in sw.ports:
+            if port.is_uplink:
+                continue
+            if any(_short(n.remote_name) in other_names or n.remote_address in other_ips for n in port.neighbors):
+                port.is_uplink = True
+            elif other_macs.intersection(port.macs):
+                port.is_uplink = True
+
+
 def locate_macs(switches: list[SwitchInfo]) -> dict[str, tuple[SwitchInfo, Port]]:
     """MAC -> (switch, edge port).
 
@@ -45,6 +74,7 @@ def build_inventory(
     *,
     include_non_cip: bool = True,
 ) -> list[Device]:
+    mark_inter_switch_links(switches)
     ip_to_mac: dict[str, str] = {}
     for sw in switches:
         ip_to_mac.update(sw.arp)
