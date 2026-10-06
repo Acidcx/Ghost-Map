@@ -138,15 +138,34 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     ua_sessions: dict[str, list] = {}  # sid -> [UaBrowser, last_used, info]
     demo_ua: dict = {}
 
+    demo_ua_lock = asyncio.Lock()
+
+    async def start_demo_ua() -> Optional[str]:
+        """Start the simulated OPC UA gateway once; returns its endpoint, or None if it can't start."""
+        async with demo_ua_lock:
+            if "server" not in demo_ua:
+                try:
+                    from ghostmap.sim.opcua_server import SimUaServer
+
+                    demo_ua["server"] = await SimUaServer(port=demo_opcua_port).start()
+                except Exception:  # port taken or similar: everything else still works without it
+                    demo_ua.pop("server", None)
+                    return None
+            return demo_ua["server"].endpoint
+
+    async def resolve_ua_url(url: str) -> str:
+        """Typing "demo" as the endpoint starts the simulated gateway on demand."""
+        if url.strip().lower() != "demo":
+            return url
+        endpoint = await start_demo_ua()
+        if endpoint is None:
+            raise HTTPException(503, f"could not start the demo OPC UA server on port {demo_opcua_port}")
+        return endpoint
+
     @contextlib.asynccontextmanager
     async def lifespan(_app):
         if demo_opcua:
-            try:
-                from ghostmap.sim.opcua_server import SimUaServer
-
-                demo_ua["server"] = await SimUaServer(port=demo_opcua_port).start()
-            except Exception:  # port taken or similar: the demo still works without it
-                demo_ua.pop("server", None)
+            await start_demo_ua()
         yield
         for b, _, _ in list(ua_sessions.values()):
             await b.disconnect()
@@ -332,7 +351,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         from ghostmap.collectors.opcua import get_endpoints, normalize_endpoint
 
         try:
-            url = normalize_endpoint(body.url)
+            url = normalize_endpoint(await resolve_ua_url(body.url))
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         audit.write(client_of(request), who(request), "opcua.endpoints", url)
@@ -346,7 +365,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
             oldest = min(ua_sessions, key=lambda k: ua_sessions[k][1])
             await ua_sessions.pop(oldest)[0].disconnect()
         try:
-            browser = UaBrowser(body.url)
+            browser = UaBrowser(await resolve_ua_url(body.url))
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         info = await ua_call(browser.connect(body.security, body.mode, body.username, body.password,

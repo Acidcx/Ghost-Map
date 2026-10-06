@@ -93,7 +93,7 @@
     <section id="tab-opcua" class="tab hidden">
       <div class="panel">
         <form class="toolbar uaconn" id="uaForm" autocomplete="off">
-          <label class="grow">Endpoint <input name="url" list="uaRecent" placeholder="opc.tcp://127.0.0.1:4990 or just an IP"></label>
+          <label class="grow">Endpoint <input name="url" list="uaRecent" placeholder="opc.tcp://127.0.0.1:4990, just an IP, or demo"></label>
           <datalist id="uaRecent"></datalist>
           <label>Security <select name="security">
             <option>None</option><option>Basic256Sha256</option><option>Aes128Sha256RsaOaep</option><option>Aes256Sha256RsaPss</option></select></label>
@@ -104,7 +104,7 @@
           <button type="submit" class="btn primary" id="uaConnect">Connect</button>
           <button type="button" class="btn hidden" id="uaDisconnect">Disconnect</button>
         </form>
-        <div id="uaStatus" class="small muted">Read-only: Ghost Map only browses and reads. FactoryTalk Linx Gateway listens on port 4990 by default.</div>
+        <div id="uaStatus" class="small muted">Read-only: Ghost Map only browses and reads. FactoryTalk Linx Gateway listens on port 4990 by default. Type <b>demo</b> to try a simulated gateway.</div>
         <div id="uaEpList" class="hidden"></div>
       </div>
       <div class="uagrid hidden" id="uaMain">

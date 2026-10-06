@@ -105,3 +105,12 @@ def test_client_certificate_for_secure_endpoints(tmp_path):
     mtime = cert.stat().st_mtime
     asyncio.run(opcua.ensure_client_certificate(tmp_path / "pki"))  # reused, not regenerated
     assert cert.stat().st_mtime == mtime
+
+
+def test_typing_demo_starts_simulated_gateway(tmp_path):
+    with TestClient(create_app(data_dir=str(tmp_path), demo_opcua_port=free_port()), headers=H) as c:
+        assert c.get("/api/info").json()["demo_opcua"] is None  # not started until asked for
+        r = c.post("/api/opcua/connect", json={"url": " Demo "}).json()
+        assert r["url"].startswith("opc.tcp://127.0.0.1:") and r["sid"]
+        assert c.get("/api/info").json()["demo_opcua"] == r["url"]
+        assert c.post("/api/opcua/endpoints", json={"url": "demo"}).status_code == 200
