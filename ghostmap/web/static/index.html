@@ -62,7 +62,8 @@
           Or press <b>From CSV...</b> above and pick a tag export. Type <b>demo</b> as the endpoint to try it on a simulated leveler.</p>
       </div>
       <div class="tiles" id="mTiles"></div>
-      <div class="mgrid" id="mAreas"></div>
+      <nav class="mnav" id="mNav"></nav>
+      <div id="mAreas"></div>
     </section>
 
     <section id="tab-overview" class="tab">
@@ -169,6 +170,16 @@
         <button type="submit" class="btn primary">Save</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="mRunDialog">
+    <h2>Machine running</h2>
+    <p class="small muted">The Machine tile reads these tags. Pick the bit that is on while the machine runs (e.g. RunF, not a runout or command bit).</p>
+    <div id="mRunList"></div>
+    <p><button type="button" class="btn ghost small" id="mRunAdd">Add tag</button></p>
+    <label>Running when <select id="mRunMode"><option value="any">any of these is on</option><option value="all">all of these are on</option></select></label>
+    <p class="err" id="mRunErr"></p>
+    <div class="actions"><button type="button" class="btn" id="mRunCancel">Cancel</button><button type="button" class="btn primary" id="mRunSave">Save</button></div>
   </dialog>
 
   <dialog id="mPickDialog" class="wide">

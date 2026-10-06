@@ -113,11 +113,13 @@ def test_module_tags_big_arrays_and_long_lists_are_left_out():
     rows = [row("Local:1:I/Data", "Int32", "0", base="ns=2;s=[LINE]"),
             *[row(f"Feed/Len[{i}]", "Float", "0", base="ns=2;s=[LINE]Program:P.Recipe") for i in range(100)],
             *[row(f"Flt_Bits/Flt[{i}]", value="false") for i in range(70)],
-            *[row(f"Feed/Bit_{i:02d}", value="false", base="ns=2;s=[LINE]Program:P.IO") for i in range(40)]]
+            *[row(f"Feed/Auto_{i:02d}", value="false", base="ns=2;s=[LINE]Program:P.IO") for i in range(40)],
+            *[row(f"Feed/Bit_{i:02d}", value="false", base="ns=2;s=[LINE]Program:P.IO") for i in range(5)]]
     L = build_layout(rows)
     s = L["summary"]
     assert s["excluded"] == 1 + 100 + 6  # the module tag, the recipe array (no fault folder), Flt[64..69]
-    assert s["capped"] == 40 - 24
+    assert s["capped"] == 40 - 12        # status bits past 12 per area
+    assert s["unlisted"] == 5            # bits with no recognisable job stay searchable, off the screen
     assert L["notes"] and "Add any of them back" in L["notes"][0]
     flt = next(a for a in L["areas"] if a["id"] == "Flt_Bits")
     assert len(flt["alarms"]) == 64  # fault bit arrays stay, up to [63]
@@ -148,3 +150,54 @@ def test_clean_layout_checks_tags_against_the_export():
 def test_camel_case_names():
     assert humanize("BusUndervoltageFault") == "Bus Undervoltage Fault"
     assert humanize("CIPAxisState") == "CIP Axis State"
+
+
+def test_program_parameter_copies_of_controller_tags_are_dropped():
+    # Real-world: FT Linx shows a program's InOut parameters as tags of their own, so a full-controller export
+    # had one fault UDT ~13 times and one 12,000-tag structure 9 times. Copies of controller tags go; look-alike
+    # program-local tags stay.
+    def flags(prefix, node_prefix, on="false"):
+        return [{"path": f"{prefix}/{n}", "node_id": f"{node_prefix}.{n}", "type": "Boolean",
+                 "value": on if n == "Drive_Flt" else "false"} for n in
+                ("Drive_Flt", "E_Stop", "Guard_Open", "Pump_MS", "Low_Oil_Flt", "OverTemp", "Comms_Flt", "Air_Low")]
+    rows = (flags("Online/Faults/Zone1", "ns=2;s=[PLC]Faults.Zone1", on="true")
+            + flags("Online/Program:Main/FAULT/Zone1", "ns=2;s=::[PLC]Program:Main.FAULT.Zone1", on="true")
+            + flags("Online/Program:Other/Flts/Zone1", "ns=2;s=::[PLC]Program:Other.Flts.Zone1", on="true")
+            + flags("Online/Program:A/Local_Faults", "ns=2;s=::[PLC]Program:A.Local_Faults")
+            + flags("Online/Program:B/Local_Faults", "ns=2;s=::[PLC]Program:B.Local_Faults"))
+    L = build_layout(rows)
+    assert L["summary"]["duplicates"] == 16
+    by_section = sorted((a["section"], a["title"]) for a in L["areas"])
+    assert by_section == [("A", "Local_Faults"), ("B", "Local_Faults"), ("Controller", "Zone1")]
+
+
+def test_instruction_tags_and_strings_are_left_out():
+    base = "ns=2;s=[PLC]"
+    rows = [{"path": f"Read_Msg/{m}", "node_id": f"{base}Read_Msg.{m}", "type": "Boolean", "value": "false"}
+            for m in ("EN", "DN", "ER", "EW", "ST")]
+    rows += [{"path": "Name/LEN", "node_id": f"{base}Name.LEN", "type": "Int32", "value": "3"},
+             {"path": "Name/DATA/DATA[00]", "node_id": f"{base}Name.DATA[0]", "type": "SByte", "value": "65"}]
+    rows += [row("Feed/Drive_Flt")]
+    L = build_layout(rows)
+    assert [a["title"] for a in L["areas"]] == ["Feed"]
+
+
+def test_running_guess_prefers_a_plain_running_bit():
+    base = "ns=2;s=[PLC]Line."
+    names = ["Auto_Batch_Runout", "Run_Time_Hrs", "Line_Run_Enable", "Running", "Run"]
+    rows = [{"path": f"Line/{n}", "node_id": base + n, "type": "Boolean", "value": "false"} for n in names]
+    assert build_layout(rows)["machine"]["running"] == [base + "Running"]
+
+
+def test_clean_layout_checks_running_tags():
+    import pytest
+
+    from ghostmap.analysis.dashboard import clean_layout
+
+    L = build_layout(ROWS)
+    known = {r["node_id"] for r in ROWS}
+    L["machine"] = {"running": [ROWS[0]["node_id"]], "mode": "all"}
+    assert clean_layout(L, known)["machine"] == {"running": [ROWS[0]["node_id"]], "mode": "all"}
+    L["machine"]["running"] = ["ns=2;s=Made.Up"]
+    with pytest.raises(ValueError):
+        clean_layout(L, known)

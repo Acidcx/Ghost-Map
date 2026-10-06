@@ -63,7 +63,7 @@ LEVELER_AXIS = {"CIPAxisState": 4, "AxisFault": 0, "CIPAxisFaults": 0, "CIPAxisA
                 "MotorCapacity": 0.0, "TorqueLimitPositive": 200.0, "VelocityLoopBandwidth": 13.5,
                 "BusUndervoltageFault": False, "BusUndervoltageAlarm": False, "MotorOvertemperatureFault": False,
                 "ExcessivePositionErrorFault": False, "FeedbackSignalLossFLFault": False, "EnableInputDeactivatedAlarm": False}
-LEVELER_PRODUCTION = {"Line_Running": True, "Auto_Mode": True, "Line_Speed_FPM": 120.0,
+LEVELER_PRODUCTION = {"Auto_Batch_Runout": False, "Line_Running": True, "Auto_Mode": True, "Line_Speed_FPM": 120.0,
                       "Coil_Length_Ft": 0.0, "Footage_Count": 3_481_220, "Coil_Count": 1_874}
 
 

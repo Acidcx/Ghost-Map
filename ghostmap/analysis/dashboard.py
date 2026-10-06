@@ -33,21 +33,35 @@ AXIS_KEYS = ["CIPAxisState", "DriveEnableStatus", "ServoActionStatus", "AxisHome
              "AxisFault", "CIPAxisFaults", "CIPAxisAlarms", "ModuleFaults", "GuardFaults", "MotionFaultStatus",
              "CIPInitializationFaults", "CIPAPRFaults", "AxisSafetyFaults", "CIPStartInhibits"]
 AXES_AREA = "Motion axes"
+INSTRUCTION_MEMBERS = {"EN", "DN", "ER"}
 
 # Keep live reads small: per area at most this many status bits, values and counters (alarms are all kept).
-MAX_PER_AREA = 24
+MAX_PER_AREA = 12
+DEDUPE_MIN_TAGS = 8       # only structures this big are checked for program-parameter copies
 MAX_ARRAY_INDEX = 63      # array elements past this are skipped (recipe tables, data logs)
-_MODULE_TAG = re.compile(r"^[^:/]+:\d+:[IOCS]$|^Local:", re.I)  # I/O module tags like Rack1:3:I
+_MODULE_TAG = re.compile(r"^[^:/]+:(\d+:)?[IOCS]\d*$|^Local:", re.I)  # I/O module tags like Rack1:3:I
 _ARRAY_IDX = re.compile(r"\[(\d+)(?:,\d+)*\]")
-_RELEVANT_STATUS = re.compile(r"(run|auto|manual|mode|ready|enable|homed|state|cycle|start|stop|idle|hold)", re.I)
+# Outside fault folders only these status bits and values go on the dashboard by default; the rest can be
+# added with Edit. A whole controller has tens of thousands of bits and REALs that mean nothing on their own.
+_RELEVANT_STATUS = re.compile(r"(run|auto|manual|mode|ready|enable|homed|state|cycle|start|stop|idle|hold|"
+                              r"jog|thread|batch|in_?pos|complete|done|active|healthy|ok$)", re.I)
+_NOT_STATUS = re.compile(r"(runout|rundown|runtime|run_?time|rung|_cmd$|_pb$|^hmi_|req$|request)", re.I)
+_RELEVANT_VALUE = re.compile(r"(speed|fpm|rpm|length|feet|_ft$|count|cnt|total|temp|pressure|psi|current|amps?$|"
+                             r"torque|load|thick|width|gauge|weight|cycle|rate|percent|pct)", re.I)
+_RUNNING = [(re.compile(r"^(machine_?|line_?|mach_?)?running$|^runf$|^run_?fb$|^line_?run$|^mach_?run$", re.I), 3),
+            (re.compile(r"^run$", re.I), 2),
+            (re.compile(r"(^|_)running($|_)|autorun|auto_?running|in_?auto_?run", re.I), 2),
+            (re.compile(r"(^|_)run(ning)?($|_)", re.I), 1)]
 
 # An area where at least this share of the bits is on, and whose bit names
 # don't say "fault", may be using "on = healthy" (e.g. comms OK bits).
 INVERT_SHARE = 0.6
 INVERT_MIN_BITS = 4
 
-_FAULT_CONTEXT = re.compile(r"(fault|flt|alarm|alm|error|err\b|warn)", re.I)
-_FAULT_WORD = re.compile(r"(fault|flt|alarm|alm|error|warn)", re.I)
+# "Dflt" is "default", not a fault.
+_FAULT_CONTEXT = re.compile(r"(fault|(?<!d)flt|alarm|alm|error|err\b|warn)", re.I)
+_FAULT_WORD = re.compile(r"(fault|(?<!d)flt|alarm|alm|error|warn)", re.I)
+_AOI_INTERNAL = {"EnableIn", "EnableOut"}  # every Add-On Instruction instance has these
 _SPARE = re.compile(r"(^|[_./\[])spare", re.I)
 _COUNT_NAME = re.compile(r"(count|cnt|ctr|strokes?|fires?|cycles?|parts?)", re.I)
 
@@ -160,28 +174,103 @@ def _split(row: dict) -> tuple[list[str], str]:
 
 
 def _titles(areas: list[dict]) -> None:
-    """Short area titles: the folder name when it's unique, else the path without program prefixes."""
-    def trimmed(a):
-        return [p for p in a["id"].split("/") if not p.lower().startswith("program:")] or [a["id"]]
-    last = [trimmed(a)[-1] for a in areas]
-    for a, short in zip(areas, last):
-        a["title"] = short if last.count(short) == 1 else " / ".join(trimmed(a))
+    """Short area titles: the folder name when it's unique within its section, else the path without the
+    program segment (the section shows that) and without a root folder every area shares (FT Linx "Online")."""
+    paths = [a["id"].split("/") for a in areas]
+    root = paths[0][0] if paths and all(len(p) > 1 and p[0] == paths[0][0] for p in paths) else None
+
+    def trimmed(p):
+        p = p[1:] if root else p
+        return [s for s in p if not s.lower().startswith("program:")] or [_section("/".join(p))]
+    for a, p in zip(areas, paths):
+        a["_t"] = trimmed(p)
+    for a in areas:
+        same = [b for b in areas if b["_t"][-1] == a["_t"][-1] and _section(b["id"]) == _section(a["id"])]
+        a["title"] = a["_t"][-1] if len(same) == 1 else " / ".join(a["_t"])
+    for a in areas:
+        del a["_t"]
 
 
 def _excluded(row: dict) -> bool:
-    """I/O module tags and big array elements: thousands of tags that don't belong on a dashboard."""
+    """I/O module tags, arrays outside fault folders, big arrays: thousands of tags that don't belong on a
+    dashboard (recipe tables, queues, data logs)."""
     text = f"{row.get('path', '')}/{'/'.join(tag_path(row.get('node_id', '')))}"
     for seg in re.split(r"[/.]", text):
         if _MODULE_TAG.match(seg):
             return True
-    return any(int(m.group(1)) > MAX_ARRAY_INDEX for m in _ARRAY_IDX.finditer(text))
+    idx = [int(m.group(1)) for m in _ARRAY_IDX.finditer(text)]
+    return bool(idx) and (max(idx) > MAX_ARRAY_INDEX or not _FAULT_CONTEXT.search(text))
+
+
+def _dedupe(rows: list[dict]) -> tuple[list[dict], int]:
+    """Drop program-scope copies of controller-scope structures.
+
+    FT Linx Gateway shows a program's InOut parameters and aliases as tags of their own, so one UDT can show
+    up ten times (``OSg`` and ``Program:X/OS`` in every program). Two subtrees are the same tag when their
+    member names, types and BOOL values all match. Only program-scope copies of a controller-scope tag are
+    dropped; look-alike tags that are all program-local (two programs' own Matl_Props) are kept.
+    """
+    import hashlib
+    from collections import defaultdict
+
+    kids: dict = defaultdict(dict)
+    size: dict = defaultdict(int)
+    for r in rows:
+        parts = r["path"].split("/")
+        for i in range(1, len(parts)):
+            size["/".join(parts[:i])] += 1
+        t = _type(r)
+        kids["/".join(parts[:-1])][parts[-1]] = t + ("=" + str(_truthy(r.get("value"))) if t in BOOL_TYPES else "")
+    groups: dict = defaultdict(list)
+    for d in sorted(kids, key=lambda p: -p.count("/")):
+        h = hashlib.sha1(repr(sorted(kids[d].items())).encode()).hexdigest()
+        if d:
+            parent, _, leaf = d.rpartition("/")
+            kids[parent][leaf] = h
+        if size[d] >= DEDUPE_MIN_TAGS:
+            groups[h].append(d)
+    scoped = lambda d: any(seg.lower().startswith("program:") for seg in d.split("/"))  # noqa: E731
+    drop = set()
+    for members in groups.values():
+        if len(members) > 1 and any(not scoped(d) for d in members):
+            drop.update(d for d in members if scoped(d))
+    if not drop:
+        return rows, 0
+
+    def dropped(path):
+        parts = path.split("/")
+        return any("/".join(parts[:i]) in drop for i in range(1, len(parts)))
+    kept = [r for r in rows if not dropped(r["path"])]
+    return kept, len(rows) - len(kept)
+
+
+def _section(area_id: str) -> str:
+    """Programs become sections; controller-scope tags go under "Controller"."""
+    for seg in area_id.split("/"):
+        if seg.lower().startswith("program:"):
+            return seg.split(":", 1)[1]
+    return "Controller"
+
+
+def _running_score(name: str) -> int:
+    if _NOT_STATUS.search(name):
+        return 0
+    return next((score for rx, score in _RUNNING if rx.search(name)), 0)
 
 
 def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
     rows = [r for r in rows if r.get("node_id")]
     total = len(rows)
-    rows = [r for r in rows if not _excluded(r)]
+    # FT Linx diagnostics (@...), strings and their SINT characters aren't machine data.
+    rows = [r for r in rows if not _excluded(r) and _type(r) not in ("SByte", "Byte", "String")
+            and not str(r.get("path", "")).split("/")[-1].startswith("@")
+            and str(r.get("path", "")).split("/")[-1] not in _AOI_INTERNAL]
     excluded = total - len(rows)
+    rows, duplicates = _dedupe(rows)
+    # FT Linx puts everything under "Online"; a folder every tag shares adds nothing to area names.
+    firsts = {str(r.get("path", "")).split("/")[0] for r in rows}
+    if len(firsts) == 1 and all("/" in str(r.get("path", "")) for r in rows) and len(rows) > 1:
+        rows = [dict(r, path=r["path"].split("/", 1)[1]) for r in rows]
 
     # 0. Motion axes: a parent whose members look like an AXIS_CIP_DRIVE.
     groups: dict[tuple, dict] = {}
@@ -189,6 +278,13 @@ def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
         segs, leaf = _split(r)
         groups.setdefault(tuple(segs), {})[leaf] = r
     axes = {k: g for k, g in groups.items() if len(AXIS_SIGNATURE & set(g)) >= 4}
+    # Instruction tags (MSG, MAFR/MSO and other MOTION_INSTRUCTION, CONTROL): EN/DN/ER handshake bits that
+    # are internal to the logic. Leave them out rather than show "ER" as ten alarms per instruction.
+    instr = {k for k, g in groups.items() if INSTRUCTION_MEMBERS <= set(g)}
+    if instr:
+        before = len(rows)
+        rows = [r for r in rows if tuple(_split(r)[0]) not in instr]
+        excluded += before - len(rows)
     rows = [r for r in rows if tuple(_split(r)[0]) not in axes]
     # 1. Find Logix TIMER / COUNTER structures: a parent with ACC + PRE members.
     members: dict[tuple, dict] = {}
@@ -228,6 +324,8 @@ def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
         a = area_of(parent)
         (a["counters"] if is_counter else a["timers"]).append(item)
 
+    unlisted = 0
+    running: list[tuple[int, str, str]] = []
     for r in rows:
         segs, leaf = _split(r)
         if tuple(segs) in structs:
@@ -238,9 +336,6 @@ def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
             continue
         t = _type(r)
         full = "/".join(tag_path(r["node_id"])) + "/" + "/".join(segs)
-        if _ARRAY_IDX.search(leaf) and not _FAULT_CONTEXT.search(full):
-            excluded += 1  # recipe tables, data logs: arrays only belong on a dashboard as fault bits
-            continue
         a = area_of(segs)
         item = {"node_id": r["node_id"], "name": leaf, "label": humanize(label_src)}
         if t in BOOL_TYPES:
@@ -255,16 +350,27 @@ def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
                                 sample=_truthy(r.get("value")))
                     a["alarms"].append(item)
             else:
-                a["status"].append(item)
+                score = _running_score(leaf)
+                if score:
+                    running.append((score, "/".join(segs), r["node_id"]))
+                if _RELEVANT_STATUS.search(leaf) and not _NOT_STATUS.search(leaf):
+                    a["status"].append(item)
+                else:
+                    unlisted += 1
         elif t in INT_TYPES:
             if _FAULT_WORD.search(leaf):
                 a["words"].append(item)
             elif _COUNT_NAME.search(leaf):
                 a["counters"].append(item)
-            else:
+            elif _RELEVANT_VALUE.search(leaf):
                 a["values"].append(item)
+            else:
+                unlisted += 1
         elif t in REAL_TYPES:
-            a["values"].append(item)
+            if _RELEVANT_VALUE.search(leaf) or len(rows) < 500:  # small exports: show every REAL
+                a["values"].append(item)
+            else:
+                unlisted += 1
         else:
             skipped += 1
 
@@ -288,6 +394,11 @@ def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
     out_areas = [a for a in areas.values() if any(a.get(k) for k in ITEM_KINDS)]
     for a in out_areas:
         a.setdefault("axes", [])
+        a["section"] = _section(a["id"])
+    # Best guess at the machine's running bit: a plain name ("Running", "RunF") beats "Line_Run_Enable",
+    # and controller scope beats a program's copy. Changeable on the dashboard.
+    running.sort(key=lambda x: (-x[0], "program:" in x[1].lower(), len(x[1])))
+    machine = {"running": [nid for _, _, nid in running[:1]], "mode": "any"}
     summary = {
         "areas": len(out_areas),
         "alarms": sum(len(a["alarms"]) for a in out_areas),
@@ -297,19 +408,26 @@ def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
         "skipped": skipped,
         "excluded": excluded,
         "capped": capped,
+        "duplicates": duplicates,
+        "unlisted": unlisted,
     }
     notes = []
     left_out = []
+    if duplicates:
+        left_out.append(f"{duplicates} program-parameter copies of controller tags")
+    if unlisted:
+        left_out.append(f"{unlisted} status bits and values with no recognisable job (searchable in Add tag)")
     if excluded:
-        left_out.append(f"{excluded} I/O module tags and array elements (outside fault folders, or past [{MAX_ARRAY_INDEX}])")
+        left_out.append(f"{excluded} I/O module tags, instruction tags (MSG, motion), strings and array elements "
+                        f"(outside fault folders, or past [{MAX_ARRAY_INDEX}])")
     if capped:
         left_out.append(f"{capped} status bits and values past {MAX_PER_AREA} per area")
     if left_out:
-        notes.append(f"Left out to keep live reads light: {' and '.join(left_out)}. Add any of them back with Edit.")
+        notes.append(f"Left out to keep the dashboard readable: {'; '.join(left_out)}. Add any of them back with Edit.")
     if not summary["counters"] and not summary["axes"]:
         notes.append("No counters found, so this dashboard shows health and faults only. "
                      "Export the run/production tags to add counts, run state and OEE.")
-    return {"name": name, "areas": out_areas, "summary": summary, "notes": notes}
+    return {"name": name, "areas": out_areas, "summary": summary, "notes": notes, "machine": machine}
 
 
 def node_ids(layout: dict) -> list[str]:
@@ -354,6 +472,7 @@ def clean_layout(layout: dict, known_ids: Optional[set] = None) -> dict:
         if not isinstance(a, dict):
             raise ValueError("bad area")
         area = {"id": text(a.get("id")), "title": text(a.get("title", a.get("id"))),
+                "section": text(a.get("section") or _section(a.get("id", ""))),
                 "hints": [text(h, 500) for h in a.get("hints", [])][:5],
                 "suggest_invert": bool(a.get("suggest_invert"))}
         for k in ITEM_KINDS:
@@ -382,7 +501,12 @@ def clean_layout(layout: dict, known_ids: Optional[set] = None) -> dict:
     ids = [a["id"] for a in out]
     if len(ids) != len(set(ids)):
         raise ValueError("duplicate area id")
-    result = dict(layout, areas=out)
+    m = layout.get("machine") or {}
+    running = m.get("running") or []
+    if not isinstance(running, list) or len(running) > 16:
+        raise ValueError("bad running tags")
+    machine = {"running": [nid(x) for x in running], "mode": "all" if m.get("mode") == "all" else "any"}
+    result = dict(layout, areas=out, machine=machine)
     result["summary"] = dict(layout.get("summary", {}), areas=len(out),
                              alarms=sum(len(a["alarms"]) for a in out), timers=sum(len(a["timers"]) for a in out),
                              counters=sum(len(a["counters"]) for a in out), axes=sum(len(a["axes"]) for a in out))

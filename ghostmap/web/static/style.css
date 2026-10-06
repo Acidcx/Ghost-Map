@@ -216,3 +216,22 @@ dialog.wide { width: min(760px, 94vw); }
 #mPickQ { width: 100%; }
 .mtagfield { display: flex; align-items: center; gap: 8px; margin: 6px 0; min-width: 0; }
 .mtagfield .l { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* machine sub-navigation: overview, drives, one page per PLC program */
+.mnav { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 14px; }
+.mnav button { background: var(--panel); border: 1px solid var(--line); color: var(--text); border-radius: 16px;
+  padding: 4px 12px; cursor: pointer; font: inherit; font-size: 13px; display: inline-flex; align-items: center; gap: 6px; }
+.mnav button.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 15%, var(--panel)); }
+.click { cursor: pointer; }
+.panel.click:hover, .tile.click:hover { border-color: var(--accent); }
+.mwhere { max-width: 40%; overflow: hidden; text-overflow: ellipsis; }
+.msignals { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); }
+.msigh { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 2px; }
+.msig .mvals { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 2px 12px; }
+.msig .mval .n { font-size: 13px; }
+table.mdrives { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.mdrives th, table.mdrives td { padding: 5px 8px; border-bottom: 1px solid var(--line); text-align: left; white-space: nowrap; }
+table.mdrives td.l { max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+table.mdrives tr.bad td { background: color-mix(in srgb, var(--err) 8%, transparent); }
+.tile { position: relative; }
+.tile [data-editrun] { position: absolute; top: 8px; right: 8px; }
+details.small summary { cursor: pointer; }

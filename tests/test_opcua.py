@@ -182,6 +182,7 @@ def test_dashboard_from_simulated_leveler(ua):
     assert L["summary"]["excluded"] == 101  # Local:1:I and the Recipe_Length array
     assert not any("Recipe" in a["id"] for a in L["areas"])
     assert c.get("/api/dashboards").json()[0]["id"] == dash["id"]
+    assert L["machine"]["running"][0].endswith("Production.Line_Running")  # not Auto_Batch_Runout
 
     # Building from the server-side export job gives the same layout without uploading the tags.
     for _ in range(100):

@@ -15,6 +15,7 @@ const AXIS_STATES = ["Initializing", "Pre-charge", "Stopped", "Starting", "Runni
 const AXIS_FAULT_WORDS = ["AxisFault", "CIPAxisFaults", "ModuleFaults", "GuardFaults", "MotionFaultStatus",
   "CIPInitializationFaults", "CIPAPRFaults", "AxisSafetyFaults"];
 
+const shortId = (n) => String(n || "").replace(/^ns=\d+;s=/, "");
 const truthy = (v) => v === true || v === 1 || v === "true" || v === "1";
 // Full label plus the raw tag name, for the tooltip on truncated labels.
 const tip = (x) => esc([x.label, x.name !== x.label ? x.name : "", x.node_id || ""].filter(Boolean).join("\n"));
@@ -113,6 +114,34 @@ function fmtNum(x) {
 }
 
 // ------------------------------------------------------------------ rendering
+// Three levels so a whole controller stays readable: Overview (tiles, what's active now, one card per
+// program), Drives (every axis in one table), and one page per program with its area cards and signals.
+const ACTIVE_KINDS = ["alarms", "axes", "words", "timers"];
+const sectionName = (s) => (s === "Controller" ? "Controller tags" : s.replace(/_/g, " "));
+const hasHealth = (a) => ACTIVE_KINDS.some((k) => (a[k] || []).length);
+
+function machineView() {
+  try { return localStorage.getItem(`gm.dash.view.${mach.dash.id}`) || "overview"; } catch (_) { return "overview"; }
+}
+function machineSetView(view) {
+  try { localStorage.setItem(`gm.dash.view.${mach.dash.id}`, view); } catch (_) { /* ignore */ }
+  machineRender();
+  window.scrollTo(0, 0);
+}
+
+function runningState(L, v, known) {
+  const m = L.machine || {};
+  const ids = m.running || [];
+  if (!ids.length) {
+    const guess = L.areas.flatMap((a) => a.status).find((x) => RUN_RE.test(x.name));  // dashboards built before
+    if (guess) ids.push(guess.node_id);
+  }
+  if (!ids.length) return null;
+  const on = ids.map((n) => truthy(v[n]));
+  const running = m.mode === "all" ? on.every(Boolean) : on.some(Boolean);
+  return { ids, running, known: known && ids.some((n) => n in v) };
+}
+
 function machineRender() {
   const d = mach.dash;
   if (!d) return;
@@ -121,27 +150,26 @@ function machineRender() {
   const v = vals?.values || {};
 
   $("#mLive").innerHTML = !vals ? `reading <span class="mono">${esc(d.endpoint)}</span>...`
-    : vals.ok ? `<span class="chip okchip">live</span> <span class="mono">${esc(d.endpoint)}</span> &middot; ${esc(new Date(vals.at * 1000).toLocaleTimeString())}${
-      vals.bad.length ? ` &middot; <span class="errtext">${vals.bad.length} of ${Object.keys(vals.values).length} tags not readable (renamed, or not on this server?)</span>` : ""}`
+    : vals.ok ? `<span class="chip okchip">live</span> <span class="mono">${esc(d.endpoint)}</span> &middot; ${esc(new Date(vals.at * 1000).toLocaleTimeString())}
+      &middot; ${Object.keys(vals.values).length} tags${
+      vals.bad.length ? ` &middot; <span class="errtext">${vals.bad.length} not readable (renamed, or not on this server?)</span>` : ""}`
       : `<span class="chip errchip">no data</span> <span class="errtext">${esc(vals.error)}</span>`;
 
-  $("#mNotes").innerHTML = (L.notes || []).map((n) => `<p class="small muted">${esc(n)}</p>`).join("")
+  $("#mNotes").innerHTML = (L.notes || []).map((n) => `<details class="small muted"><summary>What was left out</summary>${esc(n)}</details>`).join("")
     + (mach.edit ? `<p class="small muted">Edit mode: click <b>Edit</b> on any item to rename it, change its tag or remove it.
       Tags are picked from what Ghost Map found when the dashboard was built. <button class="btn ghost small" data-addarea="1">Add area</button></p>` : "");
 
-  const states = L.areas.map((a) => ({ a, s: areaState(a) }));
-  const active = states.flatMap(({ s }) => s.active);
-  const faultedAxes = states.flatMap(({ s }) => s.faultedAxes);
+  const states = L.areas.map((a, ai) => ({ a, ai, s: areaState(a) }));
+  const active = states.flatMap(({ a, s }) => s.active.map((x) => ({ ...x, area: a })));
+  const faultedAxes = states.flatMap(({ a, s }) => s.faultedAxes.map((x) => ({ ...x, area: a })));
   const count = (pred) => active.filter(pred).length;
-  const checked = states.filter(({ a }) => a.alarms.length || (a.axes || []).length);
-  const okAreas = checked.filter(({ s }) => s.known && !s.active.length && !s.faultedAxes.length).length;
-  const runBit = L.areas.flatMap((a) => a.status).find((x) => RUN_RE.test(x.name));
   const known = vals?.ok && vals.bad.length < Object.keys(vals.values).length;
+  const run = runningState(L, v, known);
   const tiles = [];
-  if (runBit) {
-    const on = truthy(v[runBit.node_id]);
-    tiles.push({ n: !known ? "?" : on ? "Running" : "Stopped", l: "Machine", title: runBit.label, cls: on ? "ok" : "warn" });
-  }
+  tiles.push(run
+    ? { n: !run.known ? "?" : run.running ? "Running" : "Stopped", l: "Machine", cls: run.running ? "ok" : "warn",
+      title: `${run.ids.length} running tag${run.ids.length === 1 ? "" : "s"} (${(L.machine || {}).mode === "all" ? "all" : "any"} on = running)` }
+    : { n: "-", l: "Machine", title: "No running tag yet: tick Edit and set one" });
   const faults = count((x) => x.severity !== "warning") + faultedAxes.length;
   tiles.push(
     { n: known ? faults : "?", l: "Active faults", cls: faults ? "err" : "ok" },
@@ -150,16 +178,95 @@ function machineRender() {
     { n: known ? count((x) => x.category === "comms") : "?", l: "Comms faults", cls: count((x) => x.category === "comms") ? "err" : "ok" },
   );
   const axesTotal = states.reduce((n, { s }) => n + s.axes.length, 0);
-  if (axesTotal) tiles.push({ n: known ? `${axesTotal - faultedAxes.length}/${axesTotal}` : "?", l: "Axes OK", cls: faultedAxes.length ? "err" : "ok" });
-  tiles.push({ n: known ? `${okAreas}/${checked.length}` : "?", l: "Areas OK", cls: okAreas === checked.length ? "ok" : "warn" });
-  $("#mTiles").innerHTML = tiles.map((t) => `<div class="tile ${known ? t.cls : ""}"><div class="n">${esc(t.n)}</div><div class="l" title="${esc(t.title || t.l)}">${esc(t.l)}</div></div>`).join("");
+  if (axesTotal) tiles.push({ n: known ? `${axesTotal - faultedAxes.length}/${axesTotal}` : "?", l: "Axes OK", cls: faultedAxes.length ? "err" : "ok", view: "drives" });
+  $("#mTiles").innerHTML = tiles.map((t, i) => `<div class="tile ${known ? t.cls || "" : ""} ${t.view ? "click" : ""}" ${t.view ? `data-view="${t.view}"` : ""}>
+    <div class="n">${esc(t.n)}</div><div class="l" title="${esc(t.title || t.l)}">${esc(t.l)}</div>
+    ${i === 0 && mach.edit ? `<button class="btn ghost small" data-editrun="1">Edit</button>` : ""}</div>`).join("");
 
-  // Area cards: worst first; within a card, active alarms on top.
-  const rank = ({ s }) => (s.active.some((x) => x.severity === "critical") ? 0
-    : s.active.some((x) => x.severity === "fault") || s.faultedAxes.length ? 1 : s.active.length ? 2 : 3);
-  const order = mach.edit ? states : [...states].sort((x, y) => rank(x) - rank(y));
-  $("#mAreas").innerHTML = order.filter(({ a }) => mach.edit || KINDS.some((k) => (a[k] || []).length))
-    .map(({ a, s }) => areaCard(a, s, v, L.areas.indexOf(a))).join("");
+  // Sections (one per PLC program) for the sub-navigation.
+  const sections = [];
+  for (const st of states) {
+    const name = st.a.section || "Controller";
+    let sec = sections.find((x) => x.name === name);
+    if (!sec) sections.push(sec = { name, states: [] });
+    sec.states.push(st);
+  }
+  const secInfo = (sec) => {
+    const act = sec.states.reduce((n, { s }) => n + s.active.length + s.faultedAxes.length, 0);
+    const worst = sec.states.some(({ s }) => s.active.some((x) => x.severity !== "warning") || s.faultedAxes.length) ? "err"
+      : act ? "warn" : known ? "ok" : "";
+    return { act, worst, alarms: sec.states.reduce((n, { s }) => n + s.alarms.length, 0) };
+  };
+  let view = machineView();
+  if (view.startsWith("sec:") && !sections.some((x) => `sec:${x.name}` === view)) view = "overview";
+  if (view === "drives" && !axesTotal) view = "overview";
+  const dotFor = (w) => (w === "ok" ? "okon" : w === "err" ? "erron" : w === "warn" ? "warnon" : "unk");
+  $("#mNav").innerHTML = [["overview", "Overview", null], ...(axesTotal ? [["drives", `Drives (${axesTotal})`, faultedAxes.length ? "err" : known ? "ok" : ""]] : []),
+    ...sections.map((sec) => [`sec:${sec.name}`, sectionName(sec.name), secInfo(sec).worst])]
+    .map(([id, label, w]) => `<button class="${view === id ? "active" : ""}" data-view="${esc(id)}">${w !== null ? `<span class="dot ${dotFor(w)}"></span> ` : ""}${esc(label)}</button>`).join("");
+
+  let html = "";
+  if (view === "overview") {
+    const rows = [...faultedAxes.map((x) => `<div class="malarm on"><span class="dot erron"></span><span class="l" title="${tip(x)}">${esc(x.label)}</span>
+        <span class="sev error">axis ${esc(AXIS_STATES[x.st.state] || "fault")}</span><a href="#" class="small" data-view="drives">Drives</a></div>`),
+      ...active.map((x) => `<div class="malarm on"><span class="dot ${x.severity === "warning" ? "warnon" : "erron"}"></span>
+        <span class="l" title="${tip(x)}">${esc(x.label)}</span>
+        <a href="#" class="small muted nowrap mwhere" data-view="sec:${esc(x.area.section || "Controller")}" title="${esc(x.area.title)}">${esc(sectionName(x.area.section || "Controller"))} &rsaquo; ${esc(x.area.title)}</a>
+        <span class="sev ${x.severity === "warning" ? "warning" : "error"}">${esc(SEV_LABEL[x.severity] || x.severity)}</span>
+        <span class="small muted nowrap">${esc(fmtSince(x.node_id))}</span></div>`)];
+    html += `<div class="panel"><h3>Active now</h3>${!known ? `<p class="muted small">Waiting for data.</p>`
+      : rows.length ? rows.join("") : `<p class="small"><span class="dot okon"></span> Nothing active.</p>`}</div>`;
+    html += `<div class="mgrid">${sections.map((sec) => {
+      const i = secInfo(sec);
+      const axes = sec.states.reduce((n, { s }) => n + s.axes.length, 0);
+      const health = sec.states.filter(({ a }) => hasHealth(a)).length;
+      return `<div class="panel marea ${i.worst} click" data-view="sec:${esc(sec.name)}">
+        <div class="uahead"><h3 title="${esc(sec.name)}"><span class="dot ${dotFor(i.worst)}"></span> ${esc(sectionName(sec.name))}</h3>
+          <span class="small muted nowrap">${i.act ? `${i.act} active` : known ? "OK" : ""}</span></div>
+        <div class="small muted">${[i.alarms && `${i.alarms} alarms`, axes && `${axes} ${axes === 1 ? "axis" : "axes"}`,
+          `${sec.states.length} areas`, health !== sec.states.length && `${sec.states.length - health} with signals only`].filter(Boolean).join(" &middot; ")}</div>
+      </div>`;
+    }).join("")}</div>`;
+  } else if (view === "drives") {
+    html = drivesTable(states, v, known);
+  } else {
+    const sec = sections.find((x) => `sec:${x.name}` === view);
+    const rank = ({ s }) => (s.active.some((x) => x.severity === "critical") ? 0
+      : s.active.some((x) => x.severity === "fault") || s.faultedAxes.length ? 1 : s.active.length ? 2 : 3);
+    const cards = mach.edit ? sec.states : sec.states.filter(({ a }) => hasHealth(a)).sort((x, y) => rank(x) - rank(y));
+    const signals = mach.edit ? [] : sec.states.filter(({ a }) => !hasHealth(a));
+    html = `<div class="mgrid">${cards.map(({ a, s, ai }) => areaCard(a, s, v, ai)).join("")}</div>`;
+    if (signals.length) {
+      html += `<div class="panel"><h3>Signals</h3><p class="small muted">Status bits, counters and values from areas with no alarms.</p>
+        <div class="msignals">${signals.map(({ a }) => `<div class="msig"><div class="small muted msigh" title="${esc(a.id)}">${esc(a.title)}</div>
+          <div class="mvals">${[...a.counters, ...a.values, ...a.status].map((x) => `<div class="mval"><span class="l" title="${tip(x)}">${esc(x.label)}</span>${a.status.includes(x)
+            ? `<span class="dot ${truthy(v[x.node_id]) ? "on" : ""}"></span>`
+            : `<span class="n">${esc(fmtNum(x.node_id ? v[x.node_id] : v[(x.members || {}).ACC]))}</span>`}</div>`).join("")}</div></div>`).join("")}</div></div>`;
+    }
+  }
+  $("#mAreas").innerHTML = html;
+}
+
+function drivesTable(states, v, known) {
+  const axes = states.flatMap(({ a, s, ai }) => s.axes.map((x, i) => ({ x, a, ai, i })));
+  const n = (x, k) => (x.members[k] && known ? esc(fmtNum(v[x.members[k]])) : "-");
+  const flag = (x, k) => (x.members[k] ? `<span class="dot ${truthy(v[x.members[k]]) ? "on" : ""}"></span>` : "");
+  return `<div class="panel"><div class="tablewrap"><table class="mdrives"><thead><tr><th>Axis</th><th>State</th><th title="Drive enabled">En</th><th title="Servo action">Servo</th>
+    <th>Homed</th><th>Position</th><th>Velocity</th><th>Motor %</th><th>Current</th><th>DC bus V</th><th>Fault words</th><th></th></tr></thead><tbody>
+    ${axes.map(({ x, ai, i }) => {
+      const st = x.st;
+      const detail = mach.axisDetail[`${mach.dash.id}|${x.name}`];
+      return `<tr class="${st.faulted ? "bad" : ""}"><td class="l" title="${tip(x)}"><b>${esc(x.label)}</b></td>
+        <td><span class="chip ${st.faulted ? "errchip" : st.state === 4 ? "okchip" : ""}">${st.state === null ? "-" : esc(AXIS_STATES[st.state] || `state ${st.state}`)}</span></td>
+        <td>${flag(x, "DriveEnableStatus")}</td><td>${flag(x, "ServoActionStatus")}</td><td>${flag(x, "AxisHomedStatus")}</td>
+        <td class="mono">${n(x, "ActualPosition")}</td><td class="mono">${n(x, "ActualVelocity")}</td><td class="mono">${n(x, "MotorCapacity")}</td>
+        <td class="mono">${n(x, "CurrentFeedback")}</td><td class="mono">${n(x, "DCBusVoltage")}</td>
+        <td class="small ${st.faultWords.length ? "errtext" : "muted"}">${st.faultWords.length ? st.faultWords.map((k) => `${esc(k)}=${esc(fmtNum(v[x.members[k]]))}`).join(" ") : known ? "none" : "-"}</td>
+        <td class="nowrap"><button class="btn ghost small" data-axis="${esc(x.name)}">${detail ? "Check again" : "Which faults?"}</button>${editBtn(ai, "axes", i)}</td></tr>
+        ${detail ? `<tr><td colspan="12" class="small">${detail.error ? `<span class="errtext">${esc(detail.error)}</span>`
+          : detail.active.length ? detail.active.map((f) => `<span class="sev ${f.kind === "fault" ? "error" : "warning"}" title="${esc(f.name)}">${esc(f.label)}</span>`).join(" ")
+            : `<span class="muted">none of ${detail.checked} fault, alarm and inhibit bits are on</span>`}</td></tr>` : ""}`;
+    }).join("")}</tbody></table></div></div>`;
 }
 
 function editBtn(ai, kind, i) {
@@ -168,7 +275,7 @@ function editBtn(ai, kind, i) {
 
 function areaCard(a, s, v, ai) {
   const bad = new Set(mach.vals?.bad || []);
-  const known = mach.vals?.ok && (s.known || (!s.alarms.length && !s.axes.length));
+  const known = mach.vals?.ok && s.known;
   const worst = s.active.some((x) => x.severity !== "warning") || s.faultedAxes.length ? "err" : s.active.length ? "warn" : known ? "ok" : "";
   const idx = (kind, x) => a[kind].indexOf(a[kind].find((y) => y.name === x.name && y.node_id === x.node_id));
   const alarmRow = (x) => `<div class="malarm ${x.active ? "on" : ""}">
@@ -219,7 +326,7 @@ function areaCard(a, s, v, ai) {
   const counts = [s.alarms.length && plural(s.alarms.length, "alarm"), s.axes.length && plural(s.axes.length, "axis").replace("axiss", "axes")].filter(Boolean).join(", ");
   return `<div class="panel marea ${worst}">
     <div class="uahead"><h3 title="${esc(a.title)}"><span class="dot ${worst === "ok" ? "okon" : worst === "err" ? "erron" : worst === "warn" ? "warnon" : "unk"}"></span> ${esc(a.title)}</h3>
-      <span class="small muted nowrap">${s.active.length ? `${s.active.length} active` : s.faultedAxes.length ? "axis fault" : known ? "OK" : "no data"}${counts ? ` &middot; ${counts}` : ""}${s.inv ? " &middot; on = healthy" : ""}</span></div>
+      <span class="small muted nowrap">${s.active.length ? `${s.active.length} active` : s.faultedAxes.length ? "axis fault" : known ? "OK" : counts ? "no data" : ""}${counts ? ` &middot; ${counts}` : ""}${s.inv ? " &middot; on = healthy" : ""}</span></div>
     ${(a.hints || []).filter(() => !s.inv).map((h) => `<p class="hint small">${esc(h)}</p>`).join("")}
     ${mach.edit ? `<div class="medit small"><label><input type="checkbox" data-invert="${esc(a.id)}" ${s.inv ? "checked" : ""}> On means healthy (flip)</label>
       <button class="btn ghost small" data-addtag="${ai}">Add tag</button> <button class="btn ghost small" data-renamearea="${ai}">Rename</button>
@@ -262,9 +369,18 @@ $("#mAreas").addEventListener("change", (e) => {
   if (id !== undefined) machineSaveOverrides((ov) => { ov.invert[id] = e.target.checked; });
 });
 document.querySelector("#tab-machine").addEventListener("click", async (e) => {
+  const el = e.target.closest("[data-view],[data-editrun]");
+  if (el?.dataset.view && !e.target.dataset.axis && !e.target.closest("button[data-edit]")) {
+    e.preventDefault();
+    machineSetView(el.dataset.view);
+    return;
+  }
   const t = e.target.dataset;
   try {
-    if (t.edit) {
+    if (t.editrun) {
+      e.stopPropagation();
+      runningDialog();
+    } else if (t.edit) {
       const [ai, kind, i] = t.edit.split("|");
       itemDialog(Number(ai), kind, Number(i));
     } else if (t.addtag) {
@@ -308,6 +424,35 @@ $("#mDelete").addEventListener("click", async () => {
   await machineLoadList();
 });
 
+// Which tags say the machine is running (any or all of them on).
+function runningDialog() {
+  const L = layoutCopy();
+  L.machine = { running: [...((L.machine || {}).running || [])], mode: (L.machine || {}).mode || "any" };
+  const dlg = $("#mRunDialog");
+  const draw = () => {
+    $("#mRunList").innerHTML = L.machine.running.length ? L.machine.running.map((n, i) => `<div class="mtagfield">
+      <span class="mono small l" title="${esc(n)}">${esc(shortId(n))}</span><button type="button" class="btn ghost small" data-rmrun="${i}">Remove</button></div>`).join("")
+      : `<p class="small muted">No running tag. The Machine tile shows "-".</p>`;
+  };
+  draw();
+  $("#mRunMode").value = L.machine.mode;
+  $("#mRunErr").textContent = "";
+  $("#mRunList").onclick = (e) => {
+    const i = e.target.dataset.rmrun;
+    if (i !== undefined) { L.machine.running.splice(Number(i), 1); draw(); }
+  };
+  $("#mRunAdd").onclick = async () => {
+    const tag = await pickTag("Pick a tag that is on while the machine runs", "running");
+    if (tag && !L.machine.running.includes(tag.node_id)) { L.machine.running.push(tag.node_id); draw(); }
+  };
+  $("#mRunCancel").onclick = () => dlg.close();
+  $("#mRunSave").onclick = async () => {
+    L.machine.mode = $("#mRunMode").value;
+    try { await machineSaveLayout(L); dlg.close(); } catch (err) { $("#mRunErr").textContent = err.message; }
+  };
+  dlg.showModal();
+}
+
 // Item editor: label, tag(s) picked from the dashboard's own tag export, alarm severity/category, remove.
 function itemDialog(ai, kind, i) {
   const L = layoutCopy();
@@ -324,7 +469,7 @@ function itemDialog(ai, kind, i) {
   const current = (k) => (item.members ? item.members[k] : item.node_id) || "";
   const renderTags = () => {
     $("#mItemTags").innerHTML = fields.map((k) => `<div class="mtagfield"><span class="small muted">${item.members ? esc(k) : "Tag"}</span>
-      <span class="mono small l" title="${esc(current(k))}">${esc(current(k)) || "-"}</span>
+      <span class="mono small l" title="${esc(current(k))}">${esc(shortId(current(k))) || "-"}</span>
       <button type="button" class="btn ghost small" data-pick="${esc(k)}">Change</button></div>`).join("");
   };
   renderTags();
@@ -359,6 +504,7 @@ function pickTag(title, query = "") {
   input.value = query;
   let timer = null;
   const search = async () => {
+    $("#mPickList").innerHTML = `<tr><td class="muted small">Searching...</td></tr>`;
     try {
       const rows = await api(`api/dashboards/${encodeURIComponent(mach.dash.id)}/tags?q=${encodeURIComponent(input.value)}&limit=200`);
       $("#mPickList").innerHTML = rows.length ? rows.map((r, n) => `<tr data-n="${n}"><td class="l" title="${esc(r.node_id)}">${esc(r.path)}</td>

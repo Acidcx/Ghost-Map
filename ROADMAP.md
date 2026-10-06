@@ -77,6 +77,7 @@ Then the service:
 - [ ] Machine dashboard: an andon-style status screen on the HMI, plus the same page via IXON
   - [x] First version: layout generated from a tag export (areas, alarms with severity and category, timers, fault words, counters, run state), live values, per-area "on = healthy" flip and hidden tags
   - [x] Editing: rename, remove, re-point items to other discovered tags, add tags and areas; motion axes as one item; whole-controller builds trimmed (I/O module tags, arrays, long status lists)
+  - [x] Whole-controller dashboards: Overview / Drives / per-program pages; program-parameter copies, AOI internals and instruction tags dropped; editable Machine running tags
   - [ ] Fault text from the L5X, first-out fault, alarm history (needs the resident service and SQLite)
 
 ## Phase 5: cross-layer correlation ("the brain")
