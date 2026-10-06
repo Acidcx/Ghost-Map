@@ -56,6 +56,13 @@ LEVELER_FAULTS = {
     "Comms": {"Entry_Rack": True, "Exit_Rack": True, "Leveler_VFD": True, "Uncoiler_VFD": True,
               "Safety_PLC": True, "HMI": True},
 }
+# A Kinetix-style AXIS_CIP_DRIVE (a small subset of its ~600 members) at controller scope.
+LEVELER_AXIS = {"CIPAxisState": 4, "AxisFault": 0, "CIPAxisFaults": 0, "CIPAxisAlarms": 0, "ModuleFaults": 0,
+                "DriveEnableStatus": True, "ServoActionStatus": True, "AxisHomedStatus": True,
+                "ActualPosition": 0.0, "ActualVelocity": 0.0, "CurrentFeedback": 0.0, "DCBusVoltage": 650.0,
+                "MotorCapacity": 0.0, "TorqueLimitPositive": 200.0, "VelocityLoopBandwidth": 13.5,
+                "BusUndervoltageFault": False, "BusUndervoltageAlarm": False, "MotorOvertemperatureFault": False,
+                "ExcessivePositionErrorFault": False, "FeedbackSignalLossFLFault": False, "EnableInputDeactivatedAlarm": False}
 LEVELER_PRODUCTION = {"Line_Running": True, "Auto_Mode": True, "Line_Speed_FPM": 120.0,
                       "Coil_Length_Ft": 0.0, "Footage_Count": 3_481_220, "Coil_Count": 1_874}
 
@@ -148,7 +155,17 @@ class SimUaServer:
         nodes = {}
         for name, v in LEVELER_PRODUCTION.items():
             nodes[name] = await self._var(prod, ns, f"{base}.Production.{name}", name, v)
-        self._lev = {"bits": bits, "prod": nodes, "active": None, "ft": float(LEVELER_PRODUCTION["Footage_Count"]),
+        # Controller-scope axis, an I/O module tag and a long recipe array (the last two should be left out).
+        axis = await obj(folder, f"{sc}Ax_Leveler_Roll", "Ax_Leveler_Roll")
+        axis_nodes = {}
+        for name, v in LEVELER_AXIS.items():
+            axis_nodes[name] = await self._var(axis, ns, f"{sc}Ax_Leveler_Roll.{name}", name, v)
+        mod = await obj(folder, f"{sc}Local:1:I", "Local:1:I")
+        await self._var(mod, ns, f"{sc}Local:1:I.Data", "Data", 0)
+        recipe = await obj(prod, f"{base}.Production.Recipe_Length", "Recipe_Length")
+        for i in range(100):
+            await self._var(recipe, ns, f"{base}.Production.Recipe_Length[{i}]", f"Recipe_Length[{i}]", 0.0)
+        self._lev = {"axis": axis_nodes, "bits": bits, "prod": nodes, "active": None, "ft": float(LEVELER_PRODUCTION["Footage_Count"]),
                      "coil_ft": 0.0, "coils": LEVELER_PRODUCTION["Coil_Count"]}
 
     async def _tick_leveler(self, n: int):
@@ -174,6 +191,17 @@ class SimUaServer:
         await p["Footage_Count"].write_value(ua.Variant(int(lev["ft"]), ua.VariantType.Int32))
         await p["Coil_Count"].write_value(ua.Variant(lev["coils"], ua.VariantType.Int32))
         await p["Coil_Length_Ft"].write_value(ua.Variant(lev["coil_ft"], ua.VariantType.Float))
+        ax = lev["axis"]
+        faulted = n % 60 >= 45  # the roll axis faults on motor over-temperature for 15 s each minute
+        await ax["CIPAxisState"].write_value(ua.Variant(8 if faulted else 4, ua.VariantType.Int32))
+        await ax["AxisFault"].write_value(ua.Variant(1 if faulted else 0, ua.VariantType.Int32))
+        await ax["MotorOvertemperatureFault"].write_value(ua.Variant(faulted, ua.VariantType.Boolean))
+        vel = 0.0 if faulted or not running else speed * 0.2
+        lev.setdefault("pos", 0.0)
+        lev["pos"] = (lev["pos"] + vel) % 360
+        await ax["ActualVelocity"].write_value(ua.Variant(vel, ua.VariantType.Float))
+        await ax["ActualPosition"].write_value(ua.Variant(lev["pos"], ua.VariantType.Float))
+        await ax["MotorCapacity"].write_value(ua.Variant(35.0 + random.uniform(-2, 2) if vel else 0.0, ua.VariantType.Float))
 
     async def _tick(self):
         counts = {node: start for node, start in self._counters}

@@ -88,3 +88,63 @@ def test_counters_and_values_outside_fault_folders():
 def test_node_ids_cover_every_item_once():
     ids = node_ids(build_layout(ROWS))
     assert len(ids) == len(set(ids)) == len(ROWS) - 1  # all but the spare
+
+
+def axis_rows(name="Ax_Feed"):
+    base = f"ns=2;s=[LINE]{name}"
+    members = {"ActualPosition": "Float", "ActualVelocity": "Float", "CIPAxisState": "Int16", "AxisFault": "Int32",
+               "DriveEnableStatus": "Boolean", "CIPAxisFaults": "Int64", "VelocityLoopBandwidth": "Float",
+               "BusUndervoltageFault": "Boolean", "BusUndervoltageAlarm": "Boolean", "AxisHomedStatus": "Boolean"}
+    return [{"path": m, "node_id": f"{base}.{m}", "type": t, "value": "0"} for m, t in members.items()]
+
+
+def test_motion_axis_collapses_to_one_item():
+    # Real-world: exporting one AXIS_CIP_DRIVE gave ~580 members (~190 *Fault bits); it becomes one axis.
+    L = build_layout(axis_rows())
+    assert [a["title"] for a in L["areas"]] == ["Motion axes"]
+    ax = L["areas"][0]["axes"][0]
+    assert ax["name"] == "Ax_Feed" and ax["base"] == "ns=2;s=[LINE]Ax_Feed"
+    assert {"CIPAxisState", "ActualPosition", "AxisFault", "CIPAxisFaults"} <= set(ax["members"])
+    assert "BusUndervoltageFault" not in ax["members"]  # fault bits are read on request, not every second
+    assert not L["areas"][0]["alarms"] and len(node_ids(L)) == 7
+
+
+def test_module_tags_big_arrays_and_long_lists_are_left_out():
+    rows = [row("Local:1:I/Data", "Int32", "0", base="ns=2;s=[LINE]"),
+            *[row(f"Feed/Len[{i}]", "Float", "0", base="ns=2;s=[LINE]Program:P.Recipe") for i in range(100)],
+            *[row(f"Flt_Bits/Flt[{i}]", value="false") for i in range(70)],
+            *[row(f"Feed/Bit_{i:02d}", value="false", base="ns=2;s=[LINE]Program:P.IO") for i in range(40)]]
+    L = build_layout(rows)
+    s = L["summary"]
+    assert s["excluded"] == 1 + 100 + 6  # the module tag, the recipe array (no fault folder), Flt[64..69]
+    assert s["capped"] == 40 - 24
+    assert L["notes"] and "Add any of them back" in L["notes"][0]
+    flt = next(a for a in L["areas"] if a["id"] == "Flt_Bits")
+    assert len(flt["alarms"]) == 64  # fault bit arrays stay, up to [63]
+
+
+def test_logic_timers_outside_fault_folders_are_skipped():
+    rows = timer("Seq/Step_Tmr", acc="5")
+    for r in rows:
+        r["node_id"] = r["node_id"].replace("FAULT.", "Logic.")
+    assert not build_layout(rows)["areas"]
+
+
+def test_clean_layout_checks_tags_against_the_export():
+    import pytest
+
+    from ghostmap.analysis.dashboard import clean_layout
+
+    L = build_layout(ROWS)
+    known = {r["node_id"] for r in ROWS}
+    assert clean_layout(L, known)["summary"]["alarms"] == L["summary"]["alarms"]
+    L["areas"][0]["alarms"][0]["node_id"] = "ns=2;s=Typed.By.Hand"
+    with pytest.raises(ValueError):
+        clean_layout(L, known)
+    with pytest.raises(ValueError):
+        clean_layout({"areas": [{"id": "a", "alarms": [{"name": "x"}]}]})
+
+
+def test_camel_case_names():
+    assert humanize("BusUndervoltageFault") == "Bus Undervoltage Fault"
+    assert humanize("CIPAxisState") == "CIP Axis State"

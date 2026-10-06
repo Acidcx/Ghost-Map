@@ -62,7 +62,6 @@
           Or press <b>From CSV...</b> above and pick a tag export. Type <b>demo</b> as the endpoint to try it on a simulated leveler.</p>
       </div>
       <div class="tiles" id="mTiles"></div>
-      <div id="mProd"></div>
       <div class="mgrid" id="mAreas"></div>
     </section>
 
@@ -152,6 +151,32 @@
       </div>
     </section>
   </main>
+
+  <dialog id="mItemDialog">
+    <form id="mItemForm" method="dialog">
+      <h2 id="mItemTitle">Item</h2>
+      <label>Label <input name="label" maxlength="200"></label>
+      <div id="mItemTags"></div>
+      <div class="row hidden" id="mItemAlarm">
+        <label>Severity <select name="severity"><option value="critical">critical (E-stop)</option><option value="fault">fault</option><option value="warning">warning</option></select></label>
+        <label>Category <select name="category"></select></label>
+      </div>
+      <p class="err" id="mItemErr"></p>
+      <div class="actions">
+        <button type="button" class="btn" id="mItemRemove">Remove from dashboard</button>
+        <span class="grow"></span>
+        <button type="button" class="btn" id="mItemCancel">Cancel</button>
+        <button type="submit" class="btn primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="mPickDialog" class="wide">
+    <h2 id="mPickTitle">Pick a tag</h2>
+    <input id="mPickQ" type="search" placeholder="Search tag names, e.g. hpu temp" autocomplete="off">
+    <div class="tablewrap mpick"><table><tbody id="mPickList"></tbody></table></div>
+    <div class="actions"><button type="button" class="btn" id="mPickCancel">Cancel</button></div>
+  </dialog>
 
   <dialog id="mImportDialog">
     <form id="mImportForm" method="dialog">

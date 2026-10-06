@@ -25,6 +25,22 @@ BOOL_TYPES = {"Boolean"}
 INT_TYPES = {"SByte", "Byte", "Int16", "UInt16", "Int32", "UInt32", "Int64", "UInt64"}
 REAL_TYPES = {"Float", "Double"}
 
+# Logix AXIS_CIP_DRIVE (and similar) structures: recognised by their members, shown as one axis
+# with its state, a few values and fault words instead of ~600 separate tags.
+AXIS_SIGNATURE = {"ActualPosition", "ActualVelocity", "CIPAxisState", "AxisFault", "DriveEnableStatus", "CIPAxisFaults"}
+AXIS_KEYS = ["CIPAxisState", "DriveEnableStatus", "ServoActionStatus", "AxisHomedStatus", "ActualPosition",
+             "ActualVelocity", "CurrentFeedback", "DCBusVoltage", "MotorCapacity", "InverterCapacity",
+             "AxisFault", "CIPAxisFaults", "CIPAxisAlarms", "ModuleFaults", "GuardFaults", "MotionFaultStatus",
+             "CIPInitializationFaults", "CIPAPRFaults", "AxisSafetyFaults", "CIPStartInhibits"]
+AXES_AREA = "Motion axes"
+
+# Keep live reads small: per area at most this many status bits, values and counters (alarms are all kept).
+MAX_PER_AREA = 24
+MAX_ARRAY_INDEX = 63      # array elements past this are skipped (recipe tables, data logs)
+_MODULE_TAG = re.compile(r"^[^:/]+:\d+:[IOCS]$|^Local:", re.I)  # I/O module tags like Rack1:3:I
+_ARRAY_IDX = re.compile(r"\[(\d+)(?:,\d+)*\]")
+_RELEVANT_STATUS = re.compile(r"(run|auto|manual|mode|ready|enable|homed|state|cycle|start|stop|idle|hold)", re.I)
+
 # An area where at least this share of the bits is on, and whose bit names
 # don't say "fault", may be using "on = healthy" (e.g. comms OK bits).
 INVERT_SHARE = 0.6
@@ -63,8 +79,12 @@ _WORDS = {
 
 
 def humanize(name: str) -> str:
-    """``EN_Motor_OverTemp_Warn`` -> ``EN Motor Over Temp Warning``. The raw name stays as a tooltip."""
+    """``EN_Motor_OverTemp_Warn`` -> ``EN Motor Over Temp Warning``. The raw name stays as a tooltip.
+
+    CamelCase is split too: ``BusUndervoltageFault`` -> ``Bus Undervoltage Fault``.
+    """
     out = []
+    name = re.sub(r"(?<=[a-z0-9])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])", "_", name) if "_" not in name else name
     for part in re.split(r"[_.]+", name):
         if not part:
             continue
@@ -148,8 +168,28 @@ def _titles(areas: list[dict]) -> None:
         a["title"] = short if last.count(short) == 1 else " / ".join(trimmed(a))
 
 
+def _excluded(row: dict) -> bool:
+    """I/O module tags and big array elements: thousands of tags that don't belong on a dashboard."""
+    text = f"{row.get('path', '')}/{'/'.join(tag_path(row.get('node_id', '')))}"
+    for seg in re.split(r"[/.]", text):
+        if _MODULE_TAG.match(seg):
+            return True
+    return any(int(m.group(1)) > MAX_ARRAY_INDEX for m in _ARRAY_IDX.finditer(text))
+
+
 def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
     rows = [r for r in rows if r.get("node_id")]
+    total = len(rows)
+    rows = [r for r in rows if not _excluded(r)]
+    excluded = total - len(rows)
+
+    # 0. Motion axes: a parent whose members look like an AXIS_CIP_DRIVE.
+    groups: dict[tuple, dict] = {}
+    for r in rows:
+        segs, leaf = _split(r)
+        groups.setdefault(tuple(segs), {})[leaf] = r
+    axes = {k: g for k, g in groups.items() if len(AXIS_SIGNATURE & set(g)) >= 4}
+    rows = [r for r in rows if tuple(_split(r)[0]) not in axes]
     # 1. Find Logix TIMER / COUNTER structures: a parent with ACC + PRE members.
     members: dict[tuple, dict] = {}
     for r in rows:
@@ -168,11 +208,21 @@ def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
         return areas[key]
 
     skipped = 0
+    for key, mem in sorted(axes.items()):
+        a = area_of(list(key[:-1]) or [AXES_AREA])
+        any_nid = next(iter(mem.values()))["node_id"]
+        a.setdefault("axes", []).append({
+            "name": key[-1], "label": humanize(key[-1]), "base": any_nid.rsplit(".", 1)[0],
+            "members": {k: mem[k]["node_id"] for k in AXIS_KEYS if k in mem}})
     for key, mem in sorted(structs.items()):
         parent, sname = list(key[:-1]), key[-1]
         if not parent:  # export rooted at the struct's folder: take the area from the NodeId
             parent = tag_path(next(iter(mem.values()))["node_id"])[-3:-2] or ["Tags"]
         is_counter = "CU" in mem or "CD" in mem or bool(_COUNT_NAME.search(sname))
+        ctx = "/".join(tag_path(next(iter(mem.values()))["node_id"]))
+        if not is_counter and not _FAULT_CONTEXT.search(ctx):
+            skipped += 1  # logic timers outside fault folders aren't dashboard material
+            continue
         item = {"name": sname, "label": humanize(sname),
                 "members": {m: r["node_id"] for m, r in sorted(mem.items())}}
         a = area_of(parent)
@@ -186,9 +236,12 @@ def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
         if _SPARE.search(f"/{'/'.join(segs)}/{leaf}"):
             skipped += 1
             continue
-        a = area_of(segs)
         t = _type(r)
         full = "/".join(tag_path(r["node_id"])) + "/" + "/".join(segs)
+        if _ARRAY_IDX.search(leaf) and not _FAULT_CONTEXT.search(full):
+            excluded += 1  # recipe tables, data logs: arrays only belong on a dashboard as fault bits
+            continue
+        a = area_of(segs)
         item = {"node_id": r["node_id"], "name": leaf, "label": humanize(label_src)}
         if t in BOOL_TYPES:
             in_fault_context = bool(_FAULT_CONTEXT.search(full)) or bool(_FAULT_WORD.search(leaf))
@@ -215,7 +268,13 @@ def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
         else:
             skipped += 1
 
+    capped = 0
     for a in areas.values():
+        a["status"].sort(key=lambda x: (not _RELEVANT_STATUS.search(x["name"]), x["name"].lower()))
+        for k in ("status", "values", "counters"):
+            if len(a[k]) > MAX_PER_AREA:
+                capped += len(a[k]) - MAX_PER_AREA
+                del a[k][MAX_PER_AREA:]
         bits = [x for x in a["alarms"] if not x["says_fault"]]
         on = sum(1 for x in bits if x["sample"])
         a["suggest_invert"] = len(bits) >= INVERT_MIN_BITS and on / len(bits) >= INVERT_SHARE
@@ -226,16 +285,28 @@ def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
         a["alarms"].sort(key=lambda x: (sev_rank.get(x["severity"], 3), x["name"].lower()))
 
     _titles(list(areas.values()))
-    out_areas = [a for a in areas.values() if any(a[k] for k in ("alarms", "timers", "counters", "words", "values", "status"))]
+    out_areas = [a for a in areas.values() if any(a.get(k) for k in ITEM_KINDS)]
+    for a in out_areas:
+        a.setdefault("axes", [])
     summary = {
         "areas": len(out_areas),
         "alarms": sum(len(a["alarms"]) for a in out_areas),
         "timers": sum(len(a["timers"]) for a in out_areas),
         "counters": sum(len(a["counters"]) for a in out_areas),
+        "axes": sum(len(a["axes"]) for a in out_areas),
         "skipped": skipped,
+        "excluded": excluded,
+        "capped": capped,
     }
     notes = []
-    if not summary["counters"]:
+    left_out = []
+    if excluded:
+        left_out.append(f"{excluded} I/O module tags and array elements (outside fault folders, or past [{MAX_ARRAY_INDEX}])")
+    if capped:
+        left_out.append(f"{capped} status bits and values past {MAX_PER_AREA} per area")
+    if left_out:
+        notes.append(f"Left out to keep live reads light: {' and '.join(left_out)}. Add any of them back with Edit.")
+    if not summary["counters"] and not summary["axes"]:
         notes.append("No counters found, so this dashboard shows health and faults only. "
                      "Export the run/production tags to add counts, run state and OEE.")
     return {"name": name, "areas": out_areas, "summary": summary, "notes": notes}
@@ -245,13 +316,74 @@ def node_ids(layout: dict) -> list[str]:
     """Every NodeId the dashboard reads, in a stable order."""
     seen: "OrderedDict[str, None]" = OrderedDict()
     for a in layout.get("areas", []):
-        for k in ("alarms", "words", "values", "status", "counters"):
-            for item in a[k]:
-                if "node_id" in item:
+        for k in ITEM_KINDS:
+            for item in a.get(k, []):
+                if item.get("node_id"):
                     seen[item["node_id"]] = None
                 for nid in item.get("members", {}).values():
                     seen[nid] = None
-        for t in a["timers"]:
-            for nid in t["members"].values():
-                seen[nid] = None
     return list(seen)
+
+
+ITEM_KINDS = ("alarms", "axes", "timers", "counters", "words", "values", "status")
+SEVERITIES = ("critical", "fault", "warning")
+MAX_LAYOUT_ITEMS = 20000
+
+
+def clean_layout(layout: dict, known_ids: Optional[set] = None) -> dict:
+    """Validate a layout edited in the UI; keep only known fields. Raises ValueError.
+
+    ``known_ids``: NodeIds from the dashboard's tag export. When given, every tag on the dashboard must be one
+    of them, so edits pick from what was discovered instead of free-typed NodeIds.
+    """
+    def text(v, n=200):
+        if not isinstance(v, str) or len(v) > n:
+            raise ValueError("bad text field")
+        return v
+
+    def nid(v):
+        text(v, 1000)
+        if known_ids is not None and v not in known_ids:
+            raise ValueError(f"{v} is not in this dashboard's tag export")
+        return v
+
+    if not isinstance(layout, dict) or not isinstance(layout.get("areas"), list):
+        raise ValueError("layout needs a list of areas")
+    out, count = [], 0
+    for a in layout["areas"]:
+        if not isinstance(a, dict):
+            raise ValueError("bad area")
+        area = {"id": text(a.get("id")), "title": text(a.get("title", a.get("id"))),
+                "hints": [text(h, 500) for h in a.get("hints", [])][:5],
+                "suggest_invert": bool(a.get("suggest_invert"))}
+        for k in ITEM_KINDS:
+            items = []
+            for it in a.get(k, []):
+                count += 1
+                item = {"name": text(it.get("name", "")), "label": text(it.get("label", it.get("name", "")))}
+                if it.get("node_id"):
+                    item["node_id"] = nid(it["node_id"])
+                if isinstance(it.get("members"), dict):
+                    item["members"] = {text(m, 64): nid(v) for m, v in it["members"].items() if v}
+                if k == "axes":
+                    item["base"] = text(it.get("base", ""), 1000)
+                if k == "alarms":
+                    item["severity"] = it.get("severity") if it.get("severity") in SEVERITIES else "fault"
+                    item["category"] = it.get("category") if it.get("category") in CATEGORY_TITLES else "other"
+                    item["says_fault"] = bool(it.get("says_fault"))
+                    item["sample"] = bool(it.get("sample"))
+                if not item.get("node_id") and not item.get("members"):
+                    raise ValueError(f"{item['label'] or k} has no tag")
+                items.append(item)
+            area[k] = items
+        out.append(area)
+    if count > MAX_LAYOUT_ITEMS:
+        raise ValueError("too many items")
+    ids = [a["id"] for a in out]
+    if len(ids) != len(set(ids)):
+        raise ValueError("duplicate area id")
+    result = dict(layout, areas=out)
+    result["summary"] = dict(layout.get("summary", {}), areas=len(out),
+                             alarms=sum(len(a["alarms"]) for a in out), timers=sum(len(a["timers"]) for a in out),
+                             counters=sum(len(a["counters"]) for a in out), axes=sum(len(a["axes"]) for a in out))
+    return result

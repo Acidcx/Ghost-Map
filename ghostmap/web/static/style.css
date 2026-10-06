@@ -195,3 +195,24 @@ dialog .err { color: var(--err); min-height: 1.2em; font-size: 13px; }
 .mval { display: flex; justify-content: space-between; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); padding: 4px 0; }
 .mval .l { color: var(--muted); font-size: 12px; }
 .mval .n { font-family: var(--mono); font-size: 16px; font-weight: 600; }
+/* long tag names: one line with an ellipsis; the full name and raw tag are in the tooltip */
+.malarm .l, .mtimer .l, .mval .l, .marea h3, .tile .l { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.marea .uahead { min-width: 0; }
+.marea h3 { flex: 1 1 auto; }
+.nowrap { white-space: nowrap; }
+.marea .mvals { margin-top: 6px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+.marea .mval .n { font-size: 14px; }
+.medit { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0 8px; }
+.maxis { padding: 6px 0; border-top: 1px solid var(--line); }
+.maxisrow { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; padding-left: 18px; margin-top: 2px; }
+.flag { font-size: 11px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--line); color: var(--muted); }
+.flag.on { border-color: var(--ok); color: var(--ok); }
+dialog.wide { width: min(760px, 94vw); }
+.mpick { max-height: 50vh; overflow: auto; margin-top: 8px; }
+.mpick table { width: 100%; table-layout: fixed; }
+.mpick td { cursor: pointer; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+.mpick td.l { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 65%; }
+.mpick tr:hover td { background: var(--panel-2); }
+#mPickQ { width: 100%; }
+.mtagfield { display: flex; align-items: center; gap: 8px; margin: 6px 0; min-width: 0; }
+.mtagfield .l { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

@@ -245,7 +245,7 @@ async function uaRunExport(verb) {
     const j = await api(`api/opcua/export/${job}`);
     uaStatus(`${verb} ${esc(ua.sel.name)}: ${j.visited} nodes browsed, ${j.tags} tags found...`);
     if (j.status === "failed") throw new Error(j.error);
-    if (j.status === "done") return j.result;
+    if (j.status === "done") return { ...j.result, job };
   }
 }
 
@@ -273,11 +273,12 @@ $("#uaDashboard").addEventListener("click", () => uaBusyButton($("#uaDashboard")
   if (!name) return;
   try {
     const r = await uaRunExport("Reading tags under");
+    // Built from the export that's already on the server, so a whole controller isn't sent back up.
     const d = await api("api/dashboards", { method: "POST", body: JSON.stringify({
-      name, endpoint: ua.typed || ua.url, source: ua.sel.node_id,
-      tags: r.tags.map((t) => ({ path: t.path, node_id: t.node_id, type: t.variant_type, value: t.value })) }) });
-    uaStatus(`Built dashboard <b>${esc(d.name)}</b> from ${r.tags.length} tags: ${d.layout.summary.areas} areas,
-      ${d.layout.summary.alarms} alarms. It's on the Machine tab.`);
+      name, endpoint: ua.typed || ua.url, source: ua.sel.node_id, job: r.job }) });
+    const sm = d.layout.summary;
+    uaStatus(`Built dashboard <b>${esc(d.name)}</b> from ${r.tags.length} tags: ${sm.areas} areas, ${sm.alarms} alarms${
+      sm.axes ? `, ${sm.axes} ${sm.axes === 1 ? "axis" : "axes"}` : ""}. It's on the Machine tab.`);
     if (window.machineOpen) window.machineOpen(d.id);
   } catch (e) {
     uaStatus(`Could not build a dashboard: ${esc(e.message)}`, "errtext");

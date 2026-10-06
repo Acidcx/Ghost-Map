@@ -168,19 +168,49 @@ def test_dashboard_from_simulated_leveler(ua):
     c, url, sid, d = ua
     gw = find(c, sid, None, "FactoryTalk Linx Gateway")
     lev = find(c, sid, gw["node_id"], "LEVELER_01")
+    job = c.post("/api/opcua/export", json={"sid": sid, "node_id": lev["node_id"]}).json()["job"]
     tags = run_export(c, sid, lev["node_id"])["tags"]
     rows = [{"path": t["path"], "node_id": t["node_id"], "type": t["variant_type"], "value": t["value"]} for t in tags]
     dash = c.post("/api/dashboards", json={"name": "Leveler 1", "endpoint": url, "tags": rows}).json()
-    areas = {a["title"]: a for a in dash["layout"]["areas"]}
-    assert {"General", "Entry", "Leveler", "Hydraulics", "Comms", "Production"} <= set(areas)
+    L = dash["layout"]
+    areas = {a["title"]: a for a in L["areas"]}
+    assert {"General", "Entry", "Leveler", "Hydraulics", "Comms", "Production", "Motion axes"} <= set(areas)
     assert areas["Comms"]["suggest_invert"]
     assert areas["Hydraulics"]["timers"] and areas["Production"]["counters"]
+    axis = areas["Motion axes"]["axes"][0]
+    assert axis["name"] == "Ax_Leveler_Roll" and "CIPAxisState" in axis["members"]
+    assert L["summary"]["excluded"] == 101  # Local:1:I and the Recipe_Length array
+    assert not any("Recipe" in a["id"] for a in L["areas"])
     assert c.get("/api/dashboards").json()[0]["id"] == dash["id"]
+
+    # Building from the server-side export job gives the same layout without uploading the tags.
+    for _ in range(100):
+        if c.get(f"/api/opcua/export/{job}").json()["status"] == "done":
+            break
+    by_job = c.post("/api/dashboards", json={"name": "Leveler 1b", "endpoint": url, "job": job}).json()
+    assert by_job["layout"]["summary"] == L["summary"]
+    c.delete(f"/api/dashboards/{by_job['id']}")
 
     vals = c.get(f"/api/dashboards/{dash['id']}/values").json()
     assert vals["ok"], vals
     estop = next(a for a in areas["General"]["alarms"] if a["name"] == "E_Stop_Flt")
-    assert estop["node_id"] in vals["values"]
+    assert estop["node_id"] in vals["values"] and axis["members"]["ActualPosition"] in vals["values"]
+    detail = c.get(f"/api/dashboards/{dash['id']}/axis", params={"name": "Ax_Leveler_Roll"}).json()
+    assert detail["ok"] and detail["checked"] == 6
+
+    # Editing: tags are picked from the dashboard's own export, not typed in.
+    found = c.get(f"/api/dashboards/{dash['id']}/tags", params={"q": "coil count"}).json()
+    assert [t["path"].split("/")[-1] for t in found] == ["Coil_Count"]
+    assert c.get(f"/api/dashboards/{dash['id']}/tags", params={"q": "estop"}).json()[0]["path"].endswith("E_Stop_Flt")
+    edited = dict(L)
+    gen = next(a for a in edited["areas"] if a["title"] == "General")
+    gen["alarms"][0]["label"] = "Emergency stop pressed somewhere on the line"
+    gen["values"].append({"name": "Coil_Count", "label": "Coils", "node_id": found[0]["node_id"]})
+    r = c.post(f"/api/dashboards/{dash['id']}/layout", json={"layout": edited})
+    assert r.status_code == 200, r.text
+    assert any(v["label"] == "Coils" for a in r.json()["layout"]["areas"] for v in a["values"])
+    gen["values"].append({"name": "x", "label": "x", "node_id": "ns=2;s=NotDiscovered"})
+    assert c.post(f"/api/dashboards/{dash['id']}/layout", json={"layout": edited}).status_code == 400
 
     hidden = areas["General"]["alarms"][-1]["node_id"]
     r = c.post(f"/api/dashboards/{dash['id']}/overrides", json={"invert": {areas["Comms"]["id"]: True}, "hidden": [hidden]})
@@ -189,6 +219,7 @@ def test_dashboard_from_simulated_leveler(ua):
 
     assert c.delete(f"/api/dashboards/{dash['id']}").json() == {"ok": True}
     assert c.get(f"/api/dashboards/{dash['id']}").status_code == 404
+    assert not (d / "dashboards" / f"{dash['id']}.tags.json").exists()
 
 
 def test_dashboard_unreachable_gateway_and_bad_input(tmp_path):

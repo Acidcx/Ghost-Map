@@ -89,7 +89,12 @@ class DashboardIn(BaseModel):
     name: str = Field(..., min_length=1, max_length=80)
     endpoint: str = Field(..., max_length=300)
     source: str = Field("", max_length=1000)  # what was exported, e.g. the root node
-    tags: list[dict] = Field(..., max_length=50000)
+    tags: Optional[list[dict]] = Field(None, max_length=250000)
+    job: Optional[str] = Field(None, max_length=40)  # or: build from a finished Tag Browser export
+
+
+class LayoutIn(BaseModel):
+    layout: dict
 
 
 class OverridesIn(BaseModel):
@@ -472,10 +477,19 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         """Build a dashboard from a tag export (rows with path, node_id, type, value)."""
         from ghostmap.analysis.dashboard import build_layout
 
-        layout = build_layout(body.tags, name=body.name)
+        if body.job:  # the export already sits on the server: no need to send a whole controller back up
+            job = ua_exports.get(body.job)
+            if job is None or job["status"] != "done":
+                raise HTTPException(404, "export not found or not finished")
+            tags = [{"path": t["path"], "node_id": t["node_id"], "type": t.get("variant_type"), "value": t.get("value")}
+                    for t in job["result"]["tags"]]
+        else:
+            tags = body.tags or []
+        layout = build_layout(tags, name=body.name)
         if not layout["areas"]:
             raise HTTPException(400, "no usable tags in that export")
         dash = dashboards.create(body.name, body.endpoint.strip(), body.source, layout)
+        dashboards.save_tags(dash["id"], tags)
         audit.write(client_of(request), who(request), "dashboard.create", f"{dash['id']} {body.endpoint}")
         return dash
 
@@ -492,6 +506,61 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         dashboards.save(dash)
         audit.write(client_of(request), who(request), "dashboard.overrides", dash_id)
         return dash
+
+    @app.post("/api/dashboards/{dash_id}/layout")
+    def set_layout(dash_id: str, body: LayoutIn, request: Request):
+        """Save a layout edited in the UI. Tags must come from the dashboard's own export."""
+        from ghostmap.analysis.dashboard import clean_layout
+
+        dash = load_dashboard(dash_id)
+        catalog = dashboards.load_tags(dash_id)
+        try:
+            dash["layout"] = clean_layout(body.layout, {t[1] for t in catalog} if catalog else None)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        dashboards.save(dash)
+        audit.write(client_of(request), who(request), "dashboard.layout", dash_id)
+        return dash
+
+    @app.get("/api/dashboards/{dash_id}/tags")
+    def dashboard_tags(dash_id: str, request: Request, q: str = "", limit: int = 200):
+        """Search the tags discovered when the dashboard was built (for picking tags while editing)."""
+        require_admin(request)
+        load_dashboard(dash_id)
+        squash = str.maketrans("", "", "_-. :/[]")  # "estop" finds E_Stop, "hpu temp" finds HPU_OverTemp
+        words = [w.translate(squash) for w in q.lower().split()]
+        out = []
+        for path, nid, typ, value in dashboards.load_tags(dash_id):
+            hay = f"{path} {nid}".lower().translate(squash)
+            if all(w in hay for w in words):
+                out.append({"path": path, "node_id": nid, "type": typ, "value": value})
+                if len(out) >= min(max(limit, 1), 500):
+                    break
+        return out
+
+    @app.get("/api/dashboards/{dash_id}/axis")
+    async def axis_detail(dash_id: str, name: str):
+        """Which of an axis's fault, alarm and inhibit bits are on right now (read once, on request)."""
+        import re as _re
+
+        from ghostmap.analysis.dashboard import humanize
+
+        dash = load_dashboard(dash_id)
+        axis = next((x for a in dash["layout"]["areas"] for x in a.get("axes", []) if x["name"] == name), None)
+        if axis is None:
+            raise HTTPException(404, "no such axis")
+        prefix = axis["base"] + "."
+        bits = [nid for _, nid, typ, _ in dashboards.load_tags(dash_id)
+                if typ == "Boolean" and nid.startswith(prefix)
+                and _re.search(r"(Fault|Alarm|Inhibit)$", nid[len(prefix):])][:600]
+        r = await live.read_once(dash, bits)
+        if not r["ok"]:
+            return r
+        on = [nid for nid in bits if r["values"].get(nid) is True]
+        return {"ok": True, "error": None, "checked": len(bits), "active": [
+            {"node_id": nid, "name": nid[len(prefix):], "label": humanize(nid[len(prefix):]),
+             "kind": "fault" if nid.endswith("Fault") else "alarm" if nid.endswith("Alarm") else "inhibit"}
+            for nid in on]}
 
     @app.delete("/api/dashboards/{dash_id}")
     async def delete_dashboard(dash_id: str, request: Request):

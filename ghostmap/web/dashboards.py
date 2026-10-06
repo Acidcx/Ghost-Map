@@ -19,7 +19,7 @@ import secrets
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Optional
 
 CACHE_S = 1.0
 IDLE_S = 300
@@ -38,6 +38,8 @@ class DashboardStore:
     def list(self) -> list[dict]:
         out = []
         for p in sorted(self.dir.glob("*.json")):
+            if p.name.endswith(".tags.json"):
+                continue
             try:
                 d = json.loads(p.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -59,6 +61,19 @@ class DashboardStore:
         tmp.write_text(json.dumps(dash, indent=1), encoding="utf-8")
         tmp.replace(p)
 
+    def save_tags(self, dash_id: str, rows: list[dict]) -> None:
+        """The full tag export behind a dashboard, so edits pick tags from what was discovered."""
+        p = self._path(dash_id).with_suffix(".tags.json")
+        slim = [[r.get("path", ""), r["node_id"], r.get("type") or r.get("variant_type") or "", r.get("value")]
+                for r in rows if r.get("node_id")]
+        p.write_text(json.dumps(slim), encoding="utf-8")
+
+    def load_tags(self, dash_id: str) -> list[list]:
+        p = self._path(dash_id).with_suffix(".tags.json")
+        if not p.exists():
+            return []
+        return json.loads(p.read_text(encoding="utf-8"))
+
     def create(self, name: str, endpoint: str, source: str, layout: dict) -> dict:
         slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40] or "machine"
         dash = {"id": f"{slug}-{secrets.token_hex(3)}", "name": name, "endpoint": endpoint, "source": source,
@@ -72,6 +87,7 @@ class DashboardStore:
         if not p.exists():
             raise KeyError(dash_id)
         p.unlink()
+        p.with_suffix(".tags.json").unlink(missing_ok=True)
 
 
 class LiveValues:
@@ -83,8 +99,6 @@ class LiveValues:
         self._locks: dict[str, asyncio.Lock] = {}
 
     async def read(self, dash: dict, node_ids: list[str]) -> dict:
-        from ghostmap.collectors.opcua import MAX_READ, UaBrowser
-
         did = dash["id"]
         lock = self._locks.setdefault(did, asyncio.Lock())
         async with lock:
@@ -95,18 +109,8 @@ class LiveValues:
                 s["used"] = now
                 return s["result"]
             try:
-                if s is None or s.get("browser") is None:
-                    url = await self.resolve_url(dash["endpoint"])
-                    browser = UaBrowser(url)
-                    await asyncio.wait_for(browser.connect(), timeout=15)
-                    s = self._s[did] = {"browser": browser, "since": {}, "last": {}, "at": 0, "result": None}
-                values, bad = {}, []
-                for i in range(0, len(node_ids), MAX_READ):
-                    chunk = node_ids[i:i + MAX_READ]
-                    for r in await asyncio.wait_for(s["browser"].read(chunk), timeout=15):
-                        values[r["node_id"]] = r["value"]
-                        if r["status"] != "Good":
-                            bad.append(r["node_id"])
+                s = await self._ensure(dash, s)
+                values, bad = await self._read_all(s, node_ids)
             except Exception as exc:
                 if s and s.get("browser"):
                     await s["browser"].disconnect()
@@ -122,6 +126,43 @@ class LiveValues:
                       "watching_since": s.setdefault("started", now), "at": now}
             s.update(at=now, used=now, result=result)
             return result
+
+    async def _ensure(self, dash: dict, s: Optional[dict]) -> dict:
+        from ghostmap.collectors.opcua import UaBrowser
+
+        if s is None or s.get("browser") is None:
+            browser = UaBrowser(await self.resolve_url(dash["endpoint"]))
+            await asyncio.wait_for(browser.connect(), timeout=15)
+            s = self._s[dash["id"]] = {"browser": browser, "since": {}, "last": {}, "at": 0, "result": None,
+                                       "used": time.time()}
+        return s
+
+    @staticmethod
+    async def _read_all(s: dict, node_ids: list[str]) -> tuple[dict, list]:
+        from ghostmap.collectors.opcua import MAX_READ
+
+        values, bad = {}, []
+        for i in range(0, len(node_ids), MAX_READ):
+            for r in await asyncio.wait_for(s["browser"].read(node_ids[i:i + MAX_READ]), timeout=15):
+                values[r["node_id"]] = r["value"]
+                if r["status"] != "Good":
+                    bad.append(r["node_id"])
+        return values, bad
+
+    async def read_once(self, dash: dict, node_ids: list[str]) -> dict:
+        """A one-off read on the dashboard's session (e.g. an axis's fault bits when someone opens it)."""
+        lock = self._locks.setdefault(dash["id"], asyncio.Lock())
+        async with lock:
+            s = self._s.get(dash["id"])
+            try:
+                s = await self._ensure(dash, s)
+                values, bad = await self._read_all(s, node_ids)
+            except Exception as exc:
+                if s and s.get("browser"):
+                    await s["browser"].disconnect()
+                    s["browser"] = None
+                return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "values": {}, "bad": []}
+            return {"ok": True, "error": None, "values": values, "bad": bad}
 
     async def _drop_idle(self, keep: str) -> None:
         now = time.time()
