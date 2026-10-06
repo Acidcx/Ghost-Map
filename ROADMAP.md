@@ -63,7 +63,9 @@ Then the service:
 
 ## Phase 4: machine data, OEE and maintenance (OPC UA)
 
-- [ ] OPC UA client to FactoryTalk Linx Gateway: browse, read and subscribe only, with a read-only user and certificate trust
+- [x] OPC UA Tag Browser (UaExpert-style): endpoints, browse, attributes, live watch, tag-list CSV export; Security None or signed/encrypted with a self-signed client certificate
+- [ ] Server certificate trust list (accept once, then pin)
+- [ ] Background OPC UA subscriptions for the resident service
 - [ ] **L5X import**: read the Studio 5000 project export for fault UDTs, member descriptions and fault message text, so no fault tables are typed by hand
 - [ ] **Machine profiles** (see below), with automatic profile and variant detection from the OPC UA browse
 - [ ] OEE: availability × performance × quality per shift, day and week

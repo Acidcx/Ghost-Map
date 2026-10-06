@@ -39,9 +39,13 @@ function findingHtml(f) {
 // ------------------------------------------------------------------ tabs
 document.querySelectorAll("#tabs button").forEach((b) =>
   b.addEventListener("click", () => showTab(b.dataset.tab)));
+const SCANLESS_TABS = ["opcua"];  // tabs that work without any scan loaded
 function showTab(name) {
+  const free = SCANLESS_TABS.includes(name);
   document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
-  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("hidden", t.id !== `tab-${name}` || !state.scan));
+  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("hidden", t.id !== `tab-${name}` || (!state.scan && !free)));
+  $("#empty").classList.toggle("hidden", !!state.scan || free);
+  $("#scanpickScan")?.classList.toggle("hidden", free);
   try { localStorage.setItem("gm.tab", name); } catch (_) { /* ignore */ }
 }
 
@@ -57,7 +61,13 @@ async function refreshScans(selectId) {
   $("#cmpNew").innerHTML = opts;
   if (state.scans.length > 1) $("#cmpOld").value = state.scans[1].id;
   $("#empty").classList.toggle("hidden", state.scans.length > 0);
-  if (!state.scans.length) { state.scan = null; showTab("overview"); return; }
+  if (!state.scans.length) {
+    state.scan = null;
+    let tab = "overview";
+    try { tab = SCANLESS_TABS.includes(localStorage.getItem("gm.tab")) ? localStorage.getItem("gm.tab") : tab; } catch (_) { /* ignore */ }
+    showTab(tab);
+    return;
+  }
   const id = selectId || state.scans[0].id;
   $("#scanSelect").value = id;
   await loadScan(id);
@@ -328,6 +338,43 @@ form.addEventListener("submit", async (e) => {
   }
 });
 
+// ------------------------------------------------------------------ login setup & users
+const setupDlg = $("#setupDialog");
+$("#setupBtn").addEventListener("click", () => { $("#setupErr").textContent = ""; setupDlg.showModal(); });
+$("#setupCancel").addEventListener("click", () => setupDlg.close());
+$("#setupForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const f = ev.target;
+  if (f.password.value !== f.password2.value) { $("#setupErr").textContent = "Passwords don't match."; return; }
+  try {
+    await api("api/users/setup", { method: "POST", body: JSON.stringify({ name: f.name.value, password: f.password.value }) });
+    location.reload();
+  } catch (e) { $("#setupErr").textContent = e.message; }
+});
+
+const usersDlg = $("#usersDialog");
+async function renderUsers() {
+  const list = await api("api/users");
+  $("#usersTable").innerHTML = `<tr><th>User</th><th>Role</th><th></th></tr>` + list.map((u) =>
+    `<tr><td>${esc(u.name)}</td><td>${esc(u.role)}</td><td><button type="button" class="btn ghost small" data-rm="${esc(u.name)}">Remove</button></td></tr>`).join("");
+  $("#usersTable").querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm(`Remove ${b.dataset.rm}?`)) return;
+    try { await api(`api/users/${encodeURIComponent(b.dataset.rm)}`, { method: "DELETE" }); await renderUsers(); } catch (e) { $("#usersErr").textContent = e.message; }
+  }));
+}
+$("#usersBtn").addEventListener("click", async () => { $("#usersErr").textContent = ""; await renderUsers(); usersDlg.showModal(); });
+$("#usersClose").addEventListener("click", () => usersDlg.close());
+$("#usersForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const f = ev.target;
+  try {
+    await api("api/users", { method: "POST", body: JSON.stringify({ name: f.name.value, role: f.role.value, password: f.password.value }) });
+    f.name.value = f.password.value = "";
+    $("#usersErr").textContent = "";
+    await renderUsers();
+  } catch (e) { $("#usersErr").textContent = e.message; }
+});
+
 $("#logoutBtn").addEventListener("click", async () => { await api("api/logout", { method: "POST" }); location.href = "login"; });
 $("#loadDemo").addEventListener("click", async () => { await api("api/demo", { method: "POST" }); await refreshScans("demo-today"); });
 
@@ -336,10 +383,14 @@ $("#loadDemo").addEventListener("click", async () => { await api("api/demo", { m
   try {
     const info = await api("api/info");
     $("#ver").textContent = "v" + info.version;
+    state.info = info;
     document.body.classList.toggle("viewer", info.role !== "admin");
     if (info.user) {
       $("#whoName").textContent = `${info.user} (${info.role})`;
       $("#who").classList.remove("hidden");
+    } else if (!info.auth) {
+      $("#unsecured").classList.remove("hidden");
+      $("#setupBtn").classList.toggle("hidden", !info.local);
     }
   } catch (_) { /* ignore */ }
   await refreshScans();

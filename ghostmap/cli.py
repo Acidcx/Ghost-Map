@@ -273,6 +273,9 @@ def cmd_web(args) -> int:
                   "  ghostmap user add <name> --role admin", file=sys.stderr)
             return 2
         print(f"Serving on {args.host}; clients allowed: localhost, {', '.join(map(str, allow))}", file=sys.stderr)
+    import logging
+
+    logging.getLogger("asyncua").setLevel(logging.ERROR)  # its connect-time warnings are noise on the console
     app = create_app(data_dir=args.data_dir, demo=args.demo, allow=allow)
     print(f"Ghost Map is running at {url}  (close this window or press Ctrl+C to stop)", file=sys.stderr)
     if args.open:

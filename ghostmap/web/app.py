@@ -12,6 +12,8 @@ requests, and an audit log.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +33,10 @@ from ghostmap.scanner import ScanRequest, run_scan
 from ghostmap.store import ScanStore, inventory_csv
 from ghostmap.web.auth import AuditLog, Lockout, Sessions, UserStore, client_allowed
 
+UA_IDLE_S = 600        # drop OPC UA sessions nobody has used for 10 minutes
+UA_MAX_SESSIONS = 4
+DEMO_UA_PORT = 4899    # not 4990, so the demo never collides with a real FT Linx Gateway on the HMI
+
 STATIC = Path(__file__).parent / "static"
 SESSION_COOKIE = "gm_session"
 CSRF_HEADER = "x-ghostmap"  # set by app.js on every request; a cross-site form can't add it
@@ -48,6 +54,34 @@ SECURITY_HEADERS = {
 class LoginIn(BaseModel):
     user: str = Field("", max_length=64)
     password: str = Field("", max_length=256)
+
+
+class UserIn(BaseModel):
+    name: str = Field(..., max_length=32)
+    password: str = Field(..., max_length=256)
+    role: str = Field("viewer", pattern="^(viewer|admin)$")
+
+
+class UaConnectIn(BaseModel):
+    url: str = Field(..., max_length=300)
+    security: str = Field("None", max_length=40)
+    mode: str = Field("SignAndEncrypt", pattern="^(Sign|SignAndEncrypt)$")
+    username: str = Field("", max_length=128)
+    password: str = Field("", max_length=256)
+
+
+class UaUrlIn(BaseModel):
+    url: str = Field(..., max_length=300)
+
+
+class UaNodeIn(BaseModel):
+    sid: str
+    node_id: Optional[str] = Field(None, max_length=1000)
+
+
+class UaReadIn(BaseModel):
+    sid: str
+    node_ids: list[str] = Field(..., max_length=200)
 
 
 class SnmpIn(BaseModel):
@@ -80,6 +114,10 @@ class Job:
     error: Optional[str] = None
 
 
+def _is_loopback(host: str) -> bool:
+    return client_allowed(host, [])
+
+
 def _needs_admin(request: Request) -> bool:
     """Anything that sends traffic or changes data."""
     path = request.url.path
@@ -89,9 +127,34 @@ def _needs_admin(request: Request) -> bool:
 
 
 def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=None,
-               allow: Optional[list] = None) -> FastAPI:
-    """``allow``: client networks besides loopback that may connect. ``None`` disables the check (tests)."""
-    app = FastAPI(title="Ghost Map", version=__version__, docs_url=None, redoc_url=None, openapi_url=None)
+               allow: Optional[list] = None, demo_opcua: Optional[bool] = None,
+               demo_opcua_port: int = DEMO_UA_PORT) -> FastAPI:
+    """``allow``: client networks besides loopback that may connect. ``None`` disables the check (tests).
+
+    ``demo_opcua`` (default: same as ``demo``) also starts the simulated OPC UA server for the Tag Browser.
+    """
+    if demo_opcua is None:
+        demo_opcua = demo
+    ua_sessions: dict[str, list] = {}  # sid -> [UaBrowser, last_used, info]
+    demo_ua: dict = {}
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app):
+        if demo_opcua:
+            try:
+                from ghostmap.sim.opcua_server import SimUaServer
+
+                demo_ua["server"] = await SimUaServer(port=demo_opcua_port).start()
+            except Exception:  # port taken or similar: the demo still works without it
+                demo_ua.pop("server", None)
+        yield
+        for b, _, _ in list(ua_sessions.values()):
+            await b.disconnect()
+        if "server" in demo_ua:
+            await demo_ua["server"].stop()
+
+    app = FastAPI(title="Ghost Map", version=__version__, docs_url=None, redoc_url=None, openapi_url=None,
+                  lifespan=lifespan)
     store = ScanStore(data_dir)
     users = UserStore(store.root)
     sessions = Sessions()
@@ -183,7 +246,143 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         s = request.state.session
         auth = users.has_users()
         return {"version": __version__, "data_dir": str(store.root), "auth": auth,
-                "user": s.user if s else None, "role": s.role if s else ("admin" if not auth else None)}
+                "user": s.user if s else None, "role": s.role if s else ("admin" if not auth else None),
+                "local": _is_loopback(client_of(request)),
+                "demo_opcua": demo_ua["server"].endpoint if "server" in demo_ua else None}
+
+    # ------------------------------------------------------------- users
+    @app.post("/api/users/setup")
+    def setup_first_admin(body: UserIn, request: Request, response: Response):
+        """Create the first admin from the UI. Only from the machine itself, and only while no users exist."""
+        client = client_of(request)
+        if not _is_loopback(client):
+            raise HTTPException(403, "the first login can only be created on the machine itself")
+        if users.has_users():
+            raise HTTPException(409, "logins are already set up")
+        try:
+            users.set(body.name, body.password, "admin")
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        token = sessions.create(body.name, "admin")
+        response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="strict", path="/")
+        audit.write(client, body.name, "user.setup", "admin")
+        return {"user": body.name, "role": "admin"}
+
+    def require_admin(request: Request):
+        s = request.state.session
+        if users.has_users() and (s is None or s.role != "admin"):
+            raise HTTPException(403, "admin role required")
+
+    @app.get("/api/users")
+    def list_users(request: Request):
+        require_admin(request)
+        return users.list()
+
+    @app.post("/api/users")
+    def add_user(body: UserIn, request: Request):
+        require_admin(request)
+        if not users.has_users():
+            raise HTTPException(409, "create the first admin with setup")
+        try:
+            users.set(body.name, body.password, body.role)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        audit.write(client_of(request), who(request), "user.set", f"{body.name} {body.role}")
+        return users.list()
+
+    @app.delete("/api/users/{name}")
+    def remove_user(name: str, request: Request):
+        require_admin(request)
+        current = users.list()
+        admins = [u["name"] for u in current if u["role"] == "admin"]
+        if admins == [name]:
+            raise HTTPException(409, "can't remove the last admin")
+        try:
+            users.remove(name)
+        except KeyError:
+            raise HTTPException(404, "no such user")
+        audit.write(client_of(request), who(request), "user.remove", name)
+        return users.list()
+
+    # ------------------------------------------------------------- OPC UA tag browser (read-only)
+    def ua_get(sid: str):
+        now = time.time()
+        for k, (b, last, _) in list(ua_sessions.items()):
+            if now - last > UA_IDLE_S:
+                ua_sessions.pop(k, None)
+                asyncio.create_task(b.disconnect())
+        entry = ua_sessions.get(sid)
+        if entry is None:
+            raise HTTPException(404, "OPC UA session closed; connect again")
+        entry[1] = now
+        return entry[0]
+
+    async def ua_call(coro):
+        try:
+            return await asyncio.wait_for(coro, timeout=60)
+        except HTTPException:
+            raise
+        except (ValueError, asyncio.TimeoutError, OSError) as exc:
+            raise HTTPException(502, f"{type(exc).__name__}: {exc}")
+        except Exception as exc:  # asyncua raises its own error types (BadNodeIdUnknown, ...)
+            raise HTTPException(502, f"{type(exc).__name__}: {exc}")
+
+    @app.post("/api/opcua/endpoints")
+    async def ua_endpoints(body: UaUrlIn, request: Request):
+        from ghostmap.collectors.opcua import get_endpoints, normalize_endpoint
+
+        try:
+            url = normalize_endpoint(body.url)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        audit.write(client_of(request), who(request), "opcua.endpoints", url)
+        return await ua_call(get_endpoints(url))
+
+    @app.post("/api/opcua/connect")
+    async def ua_connect(body: UaConnectIn, request: Request):
+        from ghostmap.collectors.opcua import UaBrowser
+
+        if len(ua_sessions) >= UA_MAX_SESSIONS:
+            oldest = min(ua_sessions, key=lambda k: ua_sessions[k][1])
+            await ua_sessions.pop(oldest)[0].disconnect()
+        try:
+            browser = UaBrowser(body.url)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        info = await ua_call(browser.connect(body.security, body.mode, body.username, body.password,
+                                             pki_dir=store.root / "pki"))
+        sid = uuid.uuid4().hex
+        ua_sessions[sid] = [browser, time.time(), info]
+        audit.write(client_of(request), who(request), "opcua.connect",
+                    f"{browser.url} security={body.security} user={body.username or 'anonymous'}")
+        return {"sid": sid, **info}
+
+    @app.post("/api/opcua/disconnect")
+    async def ua_disconnect(body: UaNodeIn):
+        entry = ua_sessions.pop(body.sid, None)
+        if entry:
+            await entry[0].disconnect()
+        return {"ok": True}
+
+    @app.post("/api/opcua/browse")
+    async def ua_browse(body: UaNodeIn):
+        return await ua_call(ua_get(body.sid).browse(body.node_id))
+
+    @app.post("/api/opcua/attributes")
+    async def ua_attributes(body: UaNodeIn):
+        if not body.node_id:
+            raise HTTPException(400, "node_id required")
+        return await ua_call(ua_get(body.sid).attributes(body.node_id))
+
+    @app.post("/api/opcua/read")
+    async def ua_read(body: UaReadIn):
+        return await ua_call(ua_get(body.sid).read(body.node_ids))
+
+    @app.post("/api/opcua/export")
+    async def ua_export(body: UaNodeIn, request: Request):
+        browser = ua_get(body.sid)
+        audit.write(client_of(request), who(request), "opcua.export", f"{browser.url} {body.node_id or 'Objects'}")
+        return await ua_call(browser.export(body.node_id))
 
     @app.get("/api/scans")
     def list_scans():

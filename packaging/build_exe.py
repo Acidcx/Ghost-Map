@@ -26,6 +26,8 @@ PyInstaller.__main__.run([
     "--add-data", f"{ROOT / 'ghostmap' / 'data'}{os.pathsep}ghostmap/data",
     "--collect-all", "pysnmp",  # MIB modules are loaded dynamically
     "--collect-submodules", "uvicorn",
+    "--collect-submodules", "asyncua",  # OPC UA tag browser; some modules are imported dynamically
+    "--collect-data", "asyncua",
     "--distpath", str(ROOT / "dist"),
     "--workpath", str(ROOT / "build"),
     "--specpath", str(ROOT / "build"),

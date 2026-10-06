@@ -11,11 +11,17 @@
   <header class="topbar">
     <div class="brand"><span class="logo">&#9672;</span> Ghost Map <span class="ver" id="ver"></span></div>
     <div class="scanpick">
-      <label for="scanSelect">Scan</label>
-      <select id="scanSelect"></select>
-      <a id="csvLink" class="btn ghost" href="#" download>Export CSV</a>
+      <span id="scanpickScan" class="scanpick">
+        <label for="scanSelect">Scan</label>
+        <select id="scanSelect"></select>
+        <a id="csvLink" class="btn ghost" href="#" download>Export CSV</a>
+      </span>
       <button id="newScanBtn" class="btn primary admin-only">New scan</button>
-      <span id="who" class="who hidden"><span id="whoName"></span> <button id="logoutBtn" class="btn ghost">Log out</button></span>
+      <span id="who" class="who hidden"><span id="whoName"></span>
+        <button id="usersBtn" class="btn ghost admin-only">Users</button>
+        <button id="logoutBtn" class="btn ghost">Log out</button></span>
+      <span id="unsecured" class="who hidden"><span class="chip warnchip" title="Anyone who can open this page can use it">&#128275; No login</span>
+        <button id="setupBtn" class="btn ghost hidden">Set up login</button></span>
     </div>
   </header>
 
@@ -25,6 +31,7 @@
     <button data-tab="switches">Switches</button>
     <button data-tab="compare">Compare</button>
     <button data-tab="probe" class="admin-only">Probe</button>
+    <button data-tab="opcua" class="admin-only">Tags (OPC UA)</button>
   </nav>
 
   <main>
@@ -83,7 +90,76 @@
         <div id="probeOut"></div>
       </div>
     </section>
+    <section id="tab-opcua" class="tab hidden">
+      <div class="panel">
+        <form class="toolbar uaconn" id="uaForm" autocomplete="off">
+          <label class="grow">Endpoint <input name="url" list="uaRecent" placeholder="opc.tcp://127.0.0.1:4990 or just an IP"></label>
+          <datalist id="uaRecent"></datalist>
+          <label>Security <select name="security">
+            <option>None</option><option>Basic256Sha256</option><option>Aes128Sha256RsaOaep</option><option>Aes256Sha256RsaPss</option></select></label>
+          <label class="uasec hidden">Mode <select name="mode"><option>SignAndEncrypt</option><option>Sign</option></select></label>
+          <label>User <input name="username" placeholder="anonymous" size="10"></label>
+          <label>Password <input name="password" type="password" size="10"></label>
+          <button type="button" class="btn" id="uaEndpoints">Endpoints</button>
+          <button type="submit" class="btn primary" id="uaConnect">Connect</button>
+          <button type="button" class="btn hidden" id="uaDisconnect">Disconnect</button>
+        </form>
+        <div id="uaStatus" class="small muted">Read-only: Ghost Map only browses and reads. FactoryTalk Linx Gateway listens on port 4990 by default.</div>
+        <div id="uaEpList" class="hidden"></div>
+      </div>
+      <div class="uagrid hidden" id="uaMain">
+        <div class="panel uatreebox">
+          <div class="uahead"><h3>Address space</h3>
+            <button class="btn ghost small" id="uaExport" disabled title="List every tag under the selected node with its current value">Export tags</button></div>
+          <div id="uaTree" class="uatree"></div>
+        </div>
+        <div class="panel uawatchbox">
+          <div class="uahead"><h3>Data access</h3>
+            <span class="small muted">Refresh <select id="uaRate"><option value="1000">1 s</option><option value="2000" selected>2 s</option><option value="5000">5 s</option><option value="0">paused</option></select></span>
+            <button class="btn ghost small" id="uaWatchCsv">CSV</button></div>
+          <div class="tablewrap"><table id="uaWatch"><thead><tr><th>Tag</th><th>Value</th><th>Type</th><th>Status</th><th>Source time</th><th></th></tr></thead><tbody></tbody></table></div>
+          <p class="small muted" id="uaWatchHint">Double-click a tag in the tree (or use Add to watch) to monitor it here.</p>
+        </div>
+        <div class="panel uaattrbox">
+          <div class="uahead"><h3>Attributes</h3><button class="btn ghost small hidden" id="uaAddWatch">Add to watch</button></div>
+          <div id="uaAttrs" class="muted small">Select a node.</div>
+        </div>
+      </div>
+    </section>
   </main>
+
+  <dialog id="setupDialog">
+    <form id="setupForm" method="dialog">
+      <h2>Set up login</h2>
+      <p class="small muted">Creates the first admin. From then on every page needs a login. This only works on the machine itself.</p>
+      <label>User name <input name="name" required autocomplete="username"></label>
+      <label>Password (10+ characters) <input name="password" type="password" required minlength="10" autocomplete="new-password"></label>
+      <label>Repeat password <input name="password2" type="password" required minlength="10" autocomplete="new-password"></label>
+      <p class="err" id="setupErr"></p>
+      <div class="actions">
+        <button type="button" class="btn" id="setupCancel">Cancel</button>
+        <button type="submit" class="btn primary">Create admin</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="usersDialog">
+    <form id="usersForm" method="dialog">
+      <h2>Users</h2>
+      <table id="usersTable"></table>
+      <h3>Add or change a user</h3>
+      <div class="row">
+        <label>Name <input name="name" required autocomplete="off"></label>
+        <label>Role <select name="role"><option value="viewer">viewer (look only)</option><option value="admin">admin (scan, probe, tags)</option></select></label>
+      </div>
+      <label>Password (10+ characters) <input name="password" type="password" required minlength="10" autocomplete="new-password"></label>
+      <p class="err" id="usersErr"></p>
+      <div class="actions">
+        <button type="button" class="btn" id="usersClose">Close</button>
+        <button type="submit" class="btn primary">Save user</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="scanDialog">
     <form id="scanForm" method="dialog">
@@ -124,5 +200,6 @@
   </dialog>
 
   <script src="static/app.js"></script>
+  <script src="static/opcua.js"></script>
 </body>
 </html>

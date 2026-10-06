@@ -17,7 +17,7 @@ def fast_hash(monkeypatch):
 
 @pytest.fixture
 def client(tmp_path):
-    with TestClient(create_app(data_dir=str(tmp_path), demo=True), headers=H) as c:
+    with TestClient(create_app(data_dir=str(tmp_path), demo=True, demo_opcua=False), headers=H) as c:
         yield c
 
 
@@ -26,7 +26,7 @@ def secured(tmp_path):
     users = UserStore(tmp_path)
     users.set("boss", "admin-password", "admin")
     users.set("op", "viewer-password", "viewer")
-    with TestClient(create_app(data_dir=str(tmp_path), demo=True), headers=H) as c:
+    with TestClient(create_app(data_dir=str(tmp_path), demo=True, demo_opcua=False), headers=H) as c:
         yield c
 
 
@@ -81,7 +81,9 @@ def test_scan_job_runs(client):
 def test_relative_urls_for_ixon_proxy(client):
     html = client.get("/").text
     assert 'href="static/' in html and 'src="static/' in html
-    assert '"/static' not in html and '"/api' not in client.get("/static/app.js").text
+    assert '"/static' not in html
+    for js in ("app.js", "opcua.js", "login.js"):
+        assert '"/api' not in client.get(f"/static/{js}").text and "`/api" not in client.get(f"/static/{js}").text
 
 
 def test_security_headers(client):
@@ -163,3 +165,30 @@ def test_client_allow_list(tmp_path):
         parse_allow(["not-an-ip"])
     with TestClient(create_app(data_dir=str(tmp_path), allow=allow)) as c:  # TestClient's peer is "testclient"
         assert c.get("/api/scans").status_code == 403
+
+
+def test_first_admin_setup_from_ui(tmp_path):
+    with TestClient(create_app(data_dir=str(tmp_path)), headers=H) as c:
+        info = c.get("/api/info").json()
+        assert info["auth"] is False and info["local"] is False  # TestClient's peer isn't loopback
+        r = c.post("/api/users/setup", json={"name": "boss", "password": "admin-password"})
+        assert r.status_code == 403  # only from the machine itself
+    with TestClient(create_app(data_dir=str(tmp_path)), headers=H, client=("127.0.0.1", 5555)) as c:
+        assert c.post("/api/users/setup", json={"name": "boss", "password": "short"}).status_code == 400
+        r = c.post("/api/users/setup", json={"name": "boss", "password": "admin-password"})
+        assert r.json()["role"] == "admin" and "gm_session" in r.headers["set-cookie"]
+        assert c.get("/api/info").json()["user"] == "boss"  # logged straight in
+        assert c.post("/api/users/setup", json={"name": "x", "password": "admin-password"}).status_code == 409
+
+
+def test_manage_users(secured, tmp_path):
+    assert secured.get("/api/users").status_code == 401
+    login(secured, "op", "viewer-password")
+    assert secured.get("/api/users").status_code == 403
+    login(secured, "boss", "admin-password")
+    assert [u["name"] for u in secured.get("/api/users").json()] == ["boss", "op"]
+    r = secured.post("/api/users", json={"name": "tech", "password": "tech-password", "role": "viewer"})
+    assert {"name": "tech", "role": "viewer"} in r.json()
+    assert secured.delete("/api/users/op").status_code == 200
+    assert secured.delete("/api/users/boss").status_code == 409  # last admin
+    assert "user.set\ttech viewer" in (tmp_path / "audit.log").read_text()

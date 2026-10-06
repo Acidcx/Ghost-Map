@@ -109,6 +109,7 @@ ghostmap discover 127.0.10.0/24
 - **Switches**: a port faceplate coloured by health, a port table, and per-port detail (counters, neighbours, MACs mapped to devices).
 - **Compare**: the diff of any two scans.
 - **Probe**: a single-device check.
+- **Tags (OPC UA)**: a read-only tag browser in the style of UaExpert, for FactoryTalk Linx Gateway or any OPC UA server. Type an endpoint (a bare IP works; FT Linx Gateway's default port 4990 is added), optionally pick a security policy and login, and connect. Browse the address space, see a node's attributes, double-click tags to watch them live, and **Export tags** to get every tag under a node as CSV, which is handy for comparing naming between machines. `ghostmap web --demo` also starts a simulated gateway with two presses whose tag names drift.
 
 **Export CSV** downloads the device inventory.
 
@@ -116,7 +117,7 @@ Scans are stored as JSON in `~/.ghostmap/scans` (override with `--data-dir` or `
 
 ### Logins and remote access (IXON)
 
-On a laptop, the UI is open to whoever sits at it. To make it reachable from the network, for example through the IXON IXrouter's HTTP service, add a login and allow only the IXrouter:
+On a laptop, the UI is open to whoever sits at it, and the top bar shows **No login**. Click **Set up login** there to create the first admin (this only works on the machine itself), or use the command line. Admins manage further users from the **Users** button. To make it reachable from the network, for example through the IXON IXrouter's HTTP service, add a login and allow only the IXrouter:
 
 ```bash
 ghostmap user add maint --role admin      # prompts for a password; any user turns login on
