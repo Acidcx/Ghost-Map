@@ -154,6 +154,8 @@ The switch collector, correlation, and diagnostics all run against an in-memory 
 
 ## Status and roadmap
 
+The full plan (resident HMI service, IXON access, OEE and machine profiles) is in [ROADMAP.md](ROADMAP.md).
+
 v0.1 has been tested against the built-in simulators and a real SNMP agent (snmpsim) serving the simulated Stratix. **It has not yet been validated against physical Stratix or Logix hardware.** The first site test should start with `discover` and `switch` on one device.
 
 Planned:
