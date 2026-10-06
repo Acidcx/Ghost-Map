@@ -168,3 +168,30 @@ dialog .err { color: var(--err); min-height: 1.2em; font-size: 13px; }
 .uaattrbox dt { color: var(--muted); }
 .uaattrbox dd { margin: 0; word-break: break-all; }
 #uaWatch td, #uaWatch th { padding: 4px 8px; font-size: 13px; }
+
+/* ---------------------------------------------------------------- machine dashboards */
+.errchip { border-color: var(--err); color: var(--err); }
+.grow { flex: 1 1 auto; }
+.tile.ok .n { color: var(--ok); }
+.mgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap: 12px; align-items: start; }
+.mgrid .panel { margin-bottom: 0; }
+.marea { border-left: 4px solid var(--line); }
+.marea.ok { border-left-color: var(--ok); }
+.marea.warn { border-left-color: var(--warn); }
+.marea.err { border-left-color: var(--err); }
+.marea .hint { color: var(--warn); margin: 4px 0 8px; }
+.marea details { margin-top: 6px; }
+.malarm, .mtimer { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 13px; }
+.malarm .l, .mtimer .l { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.malarm.on .l { font-weight: 600; }
+.dot { display: inline-block; flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--down); }
+.dot.on, .dot.okon { background: var(--ok); }
+.dot.erron { background: var(--err); }
+.dot.warnon { background: var(--warn); }
+.dot.unk { background: transparent; border: 1px dashed var(--muted); }
+.mtimer .bar { flex: 0 0 90px; height: 8px; border-radius: 4px; background: var(--panel-2); overflow: hidden; }
+.mtimer .bar span { display: block; height: 100%; background: var(--accent); }
+.mvals { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px 16px; }
+.mval { display: flex; justify-content: space-between; align-items: center; gap: 8px; border-bottom: 1px solid var(--line); padding: 4px 0; }
+.mval .l { color: var(--muted); font-size: 12px; }
+.mval .n { font-family: var(--mono); font-size: 16px; font-weight: 600; }

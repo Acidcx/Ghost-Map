@@ -67,6 +67,7 @@ uaForm.addEventListener("submit", async (ev) => {
     uaForm.password.value = "";
     ua.sid = r.sid;
     ua.url = r.url;
+    ua.typed = uaForm.url.value.trim().toLowerCase() === "demo" ? "demo" : "";
     uaRemember(r.url);
     uaStatus(`<span class="chip okchip">connected</span> <span class="mono">${esc(r.url)}</span> &middot; ${esc(r.server || "OPC UA server")}
       &middot; security ${esc(r.security)}${r.security !== "None" ? ` (${esc(r.mode)})` : ""} &middot; ${esc(r.user)}
@@ -146,6 +147,7 @@ async function uaSelect(node, row) {
   row.classList.add("sel");
   ua.sel = node;
   $("#uaExport").disabled = false;
+  $("#uaDashboard").disabled = false;
   $("#uaAddWatch").classList.toggle("hidden", node.node_class !== "Variable");
   const box = $("#uaAttrs");
   box.innerHTML = `<span class="muted">reading...</span>`;
@@ -235,32 +237,52 @@ const safeName = (s) => s.replace(/[^A-Za-z0-9_.-]+/g, "_").slice(0, 60);
 $("#uaWatchCsv").addEventListener("click", () => csvDownload("ghostmap-watch.csv", ["tag", "node_id", "value", "type", "status", "source_time"],
   [...ua.watch.values()].map((w) => [w.name, w.node_id, w.value, w.variant_type, w.status, w.source_time])));
 
-$("#uaExport").addEventListener("click", async () => {
-  if (!ua.sel) return;
-  const btn = $("#uaExport");
-  btn.disabled = true;
-  btn.textContent = "Exporting...";
-  try {
-    const { job } = await api("api/opcua/export", { method: "POST", body: JSON.stringify({ sid: ua.sid, node_id: ua.sel.node_id }) });
-    let j;
-    for (;;) {
-      await new Promise((res) => setTimeout(res, 800));
-      j = await api(`api/opcua/export/${job}`);
-      uaStatus(`Exporting ${esc(ua.sel.name)}: ${j.visited} nodes browsed, ${j.tags} tags found...`);
-      if (j.status !== "running") break;
-    }
+// Export runs as a background job on the server (whole controllers take minutes); poll for progress.
+async function uaRunExport(verb) {
+  const { job } = await api("api/opcua/export", { method: "POST", body: JSON.stringify({ sid: ua.sid, node_id: ua.sel.node_id }) });
+  for (;;) {
+    await new Promise((res) => setTimeout(res, 800));
+    const j = await api(`api/opcua/export/${job}`);
+    uaStatus(`${verb} ${esc(ua.sel.name)}: ${j.visited} nodes browsed, ${j.tags} tags found...`);
     if (j.status === "failed") throw new Error(j.error);
-    const r = j.result;
+    if (j.status === "done") return j.result;
+  }
+}
+
+async function uaBusyButton(btn, label, fn) {
+  if (!ua.sel) return;
+  const text = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = label;
+  try { await fn(); } finally { btn.disabled = false; btn.textContent = text; }
+}
+
+$("#uaExport").addEventListener("click", () => uaBusyButton($("#uaExport"), "Exporting...", async () => {
+  try {
+    const r = await uaRunExport("Exporting");
     csvDownload(`ghostmap-tags-${safeName(ua.sel.name)}.csv`, ["path", "node_id", "type", "value", "status"],
       r.tags.map((t) => [t.path, t.node_id, t.variant_type, t.value, t.status]));
     uaStatus(`Exported ${r.tags.length} tags under ${esc(ua.sel.name)}${r.truncated ? " (stopped at the size limit)" : ""}.`);
   } catch (e) {
     uaStatus(`Export failed: ${esc(e.message)}`, "errtext");
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "Export tags";
   }
-});
+}));
+
+$("#uaDashboard").addEventListener("click", () => uaBusyButton($("#uaDashboard"), "Building...", async () => {
+  const name = prompt("Machine name for this dashboard", ua.sel.name.replace(/^::\[|\]$/g, "").replace(/^\[|\]$/g, ""));
+  if (!name) return;
+  try {
+    const r = await uaRunExport("Reading tags under");
+    const d = await api("api/dashboards", { method: "POST", body: JSON.stringify({
+      name, endpoint: ua.typed || ua.url, source: ua.sel.node_id,
+      tags: r.tags.map((t) => ({ path: t.path, node_id: t.node_id, type: t.variant_type, value: t.value })) }) });
+    uaStatus(`Built dashboard <b>${esc(d.name)}</b> from ${r.tags.length} tags: ${d.layout.summary.areas} areas,
+      ${d.layout.summary.alarms} alarms. It's on the Machine tab.`);
+    if (window.machineOpen) window.machineOpen(d.id);
+  } catch (e) {
+    uaStatus(`Could not build a dashboard: ${esc(e.message)}`, "errtext");
+  }
+}));
 
 // Prefill: the demo's simulated server, else the last endpoint used.
 (async () => {

@@ -10,6 +10,7 @@ Ghost Map runs on live control networks, so it is deliberately conservative.
 | SNMP GET / GETBULK (UDP 161) | Switch inventory, ports, MAC/ARP tables, neighbours | Read-only. The code has no `set` method. |
 | TCP connect (probe only) | Port reachability check | Connects and closes immediately; no payload is sent. Runs only when you probe a single device. |
 | OPC UA Browse / Read / GetEndpoints (TCP, default 4990 for FT Linx Gateway) | Tags (OPC UA) tab: browse the address space, read attributes and values, export tag lists | Only when an admin connects in the Tags tab. Watched tags are read every 1-5 s (or paused) and polling stops while the tab is hidden. The client code has no write, method-call or node-management calls, and a test checks that. Sessions close after 10 minutes idle. Server certificates are shown (SHA-1) but not yet checked against a trust list. |
+| OPC UA Read (same server) | Machine tab: live values for a saved dashboard | Only while someone has a Machine tab open: the browser polls every 2 s and stops when the tab is hidden. The server reads the dashboard's tags at most once a second, shared by all viewers, over one anonymous session per dashboard that closes after 5 minutes unused. |
 | OS ARP | IP to MAC mapping | A side effect of contacting hosts on the local subnet. Ghost Map reads the OS ARP cache afterwards. |
 
 It never sends CIP writes, OPC UA writes or method calls, resets, firmware updates, SNMP SET, or configuration changes.

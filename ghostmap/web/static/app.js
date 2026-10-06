@@ -39,7 +39,7 @@ function findingHtml(f) {
 // ------------------------------------------------------------------ tabs
 document.querySelectorAll("#tabs button").forEach((b) =>
   b.addEventListener("click", () => showTab(b.dataset.tab)));
-const SCANLESS_TABS = ["opcua"];  // tabs that work without any scan loaded
+const SCANLESS_TABS = ["opcua", "machine"];  // tabs that work without any scan loaded
 function showTab(name) {
   const free = SCANLESS_TABS.includes(name);
   document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
@@ -47,6 +47,7 @@ function showTab(name) {
   $("#empty").classList.toggle("hidden", !!state.scan || free);
   $("#scanpickScan")?.classList.toggle("hidden", free);
   try { localStorage.setItem("gm.tab", name); } catch (_) { /* ignore */ }
+  document.dispatchEvent(new CustomEvent("gm:tab", { detail: name }));
 }
 
 // ------------------------------------------------------------------ scans

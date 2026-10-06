@@ -6,6 +6,11 @@ machines do: ``PRESS_01`` uses ``PressFireCount`` / ``MachineState`` /
 ``Mach_State`` / ``Fault_Log[]`` (variant B, with an extra ``Station`` member).
 Counters tick while the server runs. Everything is read-only.
 
+``LEVELER_01`` is shaped like a real FT Linx Gateway project: NodeIds of the
+form ``::[LEVELER_01]Program:MainProgram.FAULT.<Area>.<Tag>``, alarm BOOLs
+grouped by area, TON timers, a Comms area where "on" means healthy, and a
+Production area with run state and counters. The tag names are invented.
+
 This is an approximation for demos and tests, not a copy of FT Linx Gateway's
 real address space.
 """
@@ -35,6 +40,25 @@ MACHINES = {
     },
 }
 
+# area -> {tag: initial value}; a dict value is a Logix TIMER (members EN/TT/DN/ACC/PRE).
+_TMR = {"EN": True, "TT": False, "DN": True, "ACC": 2000, "PRE": 2000}
+LEVELER_FAULTS = {
+    "General": {"E_Stop_Flt": False, "Guard_Door_Open": False, "Low_Air_Pressure": False,
+                "Control_Power_Off": False, "PLC_Battery_Low": False, "PLC_Minor_Flts": 0},
+    "Entry": {"Uncoiler_Drive_Flt": False, "Uncoiler_MS": False, "Uncoiler_Motor_OverTemp": False,
+              "Coil_Car_OverTravel": False, "Entry_VFD_Comms_Flt": False, "Uncoiler_Brake_Sts": True},
+    "Leveler": {"Roll_Drive_Flt": False, "Roll_Motor_OverTemp": False, "Roll_Motor_OverTemp_Warn": False,
+                "Work_Roll_Lube_Low": False, "Gap_Encoder_Flt": False, "Cool_Fan_MS": False,
+                "Cool_Fan_MS_Tmr": dict(_TMR)},
+    "Hydraulics": {"HPU_MS": False, "HPU_Low_Oil_Level": False, "HPU_OverTemp": False, "HPU_OverTemp_Warn": False,
+                   "HPU_Filter_Plugged": False, "HPU_Low_Pressure": False, "HPU_MS_Tmr": dict(_TMR)},
+    # Comms OK bits: on = healthy. The dashboard generator should suggest flipping this area.
+    "Comms": {"Entry_Rack": True, "Exit_Rack": True, "Leveler_VFD": True, "Uncoiler_VFD": True,
+              "Safety_PLC": True, "HMI": True},
+}
+LEVELER_PRODUCTION = {"Line_Running": True, "Auto_Mode": True, "Line_Speed_FPM": 120.0,
+                      "Coil_Length_Ft": 0.0, "Footage_Count": 3_481_220, "Coil_Count": 1_874}
+
 
 def _vt(value):
     if isinstance(value, bool):
@@ -53,6 +77,7 @@ class SimUaServer:
         self._task: Optional[asyncio.Task] = None
         self._counters: list[tuple] = []
         self._states: list = []
+        self._lev: dict = {}
 
     async def _var(self, parent, ns, sid, name, value):
         node = await parent.add_variable(ua.NodeId(sid, ns), ua.QualifiedName(name, ns),
@@ -90,14 +115,73 @@ class SimUaServer:
                                            ua.QualifiedName("Program:MainProgram", ns))
             for name, v in m["program"].items():
                 await self._var(prog, ns, f"[{shortcut}]Program:MainProgram.{name}", name, v)
+        await self._add_leveler(root, ns)
         await self.server.start()
         self._task = asyncio.create_task(self._tick())
         return self
 
+    async def _add_leveler(self, root, ns):
+        sc = "::[LEVELER_01]"
+        folder = await root.add_folder(ua.NodeId(sc, ns), ua.QualifiedName("LEVELER_01", ns))
+        prog = await folder.add_object(ua.NodeId(f"{sc}Program:MainProgram", ns),
+                                       ua.QualifiedName("Program:MainProgram", ns))
+
+        async def obj(parent, sid, name):
+            return await parent.add_object(ua.NodeId(sid, ns), ua.QualifiedName(name, ns))
+
+        base = f"{sc}Program:MainProgram"
+        fault = await obj(prog, f"{base}.FAULT", "FAULT")
+        bits = []
+        for area, tags in LEVELER_FAULTS.items():
+            a = await obj(fault, f"{base}.FAULT.{area}", area)
+            for name, v in tags.items():
+                sid = f"{base}.FAULT.{area}.{name}"
+                if isinstance(v, dict):
+                    t = await obj(a, sid, name)
+                    for m, mv in v.items():
+                        await self._var(t, ns, f"{sid}.{m}", m, mv)
+                    continue
+                node = await self._var(a, ns, sid, name, v)
+                if isinstance(v, bool) and area != "Comms" and not name.endswith("_Sts"):
+                    bits.append(node)
+        prod = await obj(prog, f"{base}.Production", "Production")
+        nodes = {}
+        for name, v in LEVELER_PRODUCTION.items():
+            nodes[name] = await self._var(prod, ns, f"{base}.Production.{name}", name, v)
+        self._lev = {"bits": bits, "prod": nodes, "active": None, "ft": float(LEVELER_PRODUCTION["Footage_Count"]),
+                     "coil_ft": 0.0, "coils": LEVELER_PRODUCTION["Coil_Count"]}
+
+    async def _tick_leveler(self, n: int):
+        lev = self._lev
+        if not lev:
+            return
+        # Every 20 s raise one random fault for about 12 s, so the dashboard has something to show.
+        if n % 20 == 0:
+            lev["active"] = random.choice(lev["bits"])
+            await lev["active"].write_value(ua.Variant(True, ua.VariantType.Boolean))
+        elif n % 20 == 12 and lev["active"] is not None:
+            await lev["active"].write_value(ua.Variant(False, ua.VariantType.Boolean))
+            lev["active"] = None
+        running = lev["active"] is None
+        p = lev["prod"]
+        await p["Line_Running"].write_value(ua.Variant(running, ua.VariantType.Boolean))
+        speed = 120.0 + random.uniform(-3, 3) if running else 0.0
+        await p["Line_Speed_FPM"].write_value(ua.Variant(speed, ua.VariantType.Float))
+        lev["ft"] += speed / 60
+        lev["coil_ft"] += speed / 60
+        if lev["coil_ft"] > 1500:
+            lev["coil_ft"], lev["coils"] = 0.0, lev["coils"] + 1
+        await p["Footage_Count"].write_value(ua.Variant(int(lev["ft"]), ua.VariantType.Int32))
+        await p["Coil_Count"].write_value(ua.Variant(lev["coils"], ua.VariantType.Int32))
+        await p["Coil_Length_Ft"].write_value(ua.Variant(lev["coil_ft"], ua.VariantType.Float))
+
     async def _tick(self):
         counts = {node: start for node, start in self._counters}
+        n = 0
         while True:
             await asyncio.sleep(1.0)
+            n += 1
+            await self._tick_leveler(n)
             for node in counts:
                 if random.random() < 0.8:
                     counts[node] += 1

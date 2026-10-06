@@ -104,6 +104,7 @@ ghostmap discover 127.0.10.0/24
 
 `ghostmap web` serves on `127.0.0.1:8470` by default. It has these tabs:
 
+- **Machine**: a dashboard for the machine, laid out automatically from its PLC tags (see below). Viewers can watch it; admins build and edit it.
 - **Overview**: counts and all findings, with a hint for each.
 - **Devices**: a sortable, filterable inventory. Click a device for its full CIP identity, decoded status word, related findings, and a one-click probe.
 - **Switches**: a port faceplate coloured by health, a port table, and per-port detail (counters, neighbours, MACs mapped to devices).
@@ -112,6 +113,10 @@ ghostmap discover 127.0.10.0/24
 - **Tags (OPC UA)**: a read-only tag browser in the style of UaExpert, for FactoryTalk Linx Gateway or any OPC UA server. Type an endpoint (a bare IP works; FT Linx Gateway's default port 4990 is added), optionally pick a security policy and login, and connect. Browse the address space, see a node's attributes, double-click tags to watch them live, and **Export tags** to get every tag under a node as CSV, which is handy for comparing naming between machines. Type `demo` as the endpoint (or start with `ghostmap web --demo`) to connect to a simulated gateway with two presses whose tag names drift.
 
 **Export CSV** downloads the device inventory.
+
+### Machine dashboards
+
+In **Tags (OPC UA)**, connect, select the controller (or just its fault folder) and press **Build dashboard**. Ghost Map reads every tag under it and lays out a dashboard: one card per folder (area) with its alarms, worst first, plus timers, fault words, counters and run state. Or press **From CSV...** on the Machine tab and pick an **Export tags** file. Tag names drift between machines, so the layout leans on structure first (TIMER and COUNTER members, data types, the folder a tag sits in) and on names second (`_Warn`, `E_Stop`, `_MS`, `Comms_Flt`, `OverTemp`...). Where it isn't sure it says so: for example, an area whose bits are mostly on when exported may use "on = healthy" (comms OK bits). Tick **Edit** to flip such an area or hide tags that aren't alarms. Live values are read by the Ghost Map service (read-only, at most once a second, shared by everyone watching). Dashboards are saved in `~/.ghostmap/dashboards`.
 
 Scans are stored as JSON in `~/.ghostmap/scans` (override with `--data-dir` or `GHOSTMAP_DATA`). SNMP credentials are never written to disk.
 

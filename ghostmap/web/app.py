@@ -32,6 +32,7 @@ from ghostmap.protocols.snmp import SnmpCredentials
 from ghostmap.scanner import ScanRequest, run_scan
 from ghostmap.store import ScanStore, inventory_csv
 from ghostmap.web.auth import AuditLog, Lockout, Sessions, UserStore, client_allowed
+from ghostmap.web.dashboards import DashboardStore, LiveValues, visible_node_ids
 
 UA_IDLE_S = 600        # drop OPC UA sessions nobody has used for 10 minutes
 UA_MAX_SESSIONS = 4
@@ -82,6 +83,19 @@ class UaNodeIn(BaseModel):
 class UaReadIn(BaseModel):
     sid: str
     node_ids: list[str] = Field(..., max_length=200)
+
+
+class DashboardIn(BaseModel):
+    name: str = Field(..., min_length=1, max_length=80)
+    endpoint: str = Field(..., max_length=300)
+    source: str = Field("", max_length=1000)  # what was exported, e.g. the root node
+    tags: list[dict] = Field(..., max_length=50000)
+
+
+class OverridesIn(BaseModel):
+    invert: dict[str, bool] = {}
+    hidden: list[str] = Field([], max_length=50000)
+    name: Optional[str] = Field(None, max_length=80)
 
 
 class SnmpIn(BaseModel):
@@ -169,6 +183,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         yield
         for b, _, _ in list(ua_sessions.values()):
             await b.disconnect()
+        await live.close()
         if "server" in demo_ua:
             await demo_ua["server"].stop()
 
@@ -180,6 +195,8 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     lockout = Lockout()
     audit = AuditLog(store.root)
     jobs: dict[str, Job] = {}
+    dashboards = DashboardStore(store.root)
+    live = LiveValues(resolve_ua_url)
     tasks: set[asyncio.Task] = set()
 
     def client_of(request: Request) -> str:
@@ -438,6 +455,59 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         if job is None:
             raise HTTPException(404, "export not found")
         return job
+
+    # ------------------------------------------------------------- machine dashboards
+    def load_dashboard(dash_id: str) -> dict:
+        try:
+            return dashboards.load(dash_id)
+        except KeyError:
+            raise HTTPException(404, "dashboard not found")
+
+    @app.get("/api/dashboards")
+    def list_dashboards():
+        return dashboards.list()
+
+    @app.post("/api/dashboards")
+    def create_dashboard(body: DashboardIn, request: Request):
+        """Build a dashboard from a tag export (rows with path, node_id, type, value)."""
+        from ghostmap.analysis.dashboard import build_layout
+
+        layout = build_layout(body.tags, name=body.name)
+        if not layout["areas"]:
+            raise HTTPException(400, "no usable tags in that export")
+        dash = dashboards.create(body.name, body.endpoint.strip(), body.source, layout)
+        audit.write(client_of(request), who(request), "dashboard.create", f"{dash['id']} {body.endpoint}")
+        return dash
+
+    @app.get("/api/dashboards/{dash_id}")
+    def get_dashboard(dash_id: str):
+        return load_dashboard(dash_id)
+
+    @app.post("/api/dashboards/{dash_id}/overrides")
+    async def set_overrides(dash_id: str, body: OverridesIn, request: Request):
+        dash = load_dashboard(dash_id)
+        dash["overrides"] = {"invert": {k: v for k, v in body.invert.items() if v}, "hidden": body.hidden}
+        if body.name:
+            dash["name"] = body.name
+        dashboards.save(dash)
+        audit.write(client_of(request), who(request), "dashboard.overrides", dash_id)
+        return dash
+
+    @app.delete("/api/dashboards/{dash_id}")
+    async def delete_dashboard(dash_id: str, request: Request):
+        load_dashboard(dash_id)
+        dashboards.delete(dash_id)
+        await live.forget(dash_id)
+        audit.write(client_of(request), who(request), "dashboard.delete", dash_id)
+        return {"ok": True}
+
+    @app.get("/api/dashboards/{dash_id}/values")
+    async def dashboard_values(dash_id: str):
+        """Current values (read-only OPC UA reads, cached for a second and shared by all viewers)."""
+        from ghostmap.analysis.dashboard import node_ids
+
+        dash = load_dashboard(dash_id)
+        return await live.read(dash, visible_node_ids(dash, node_ids(dash["layout"])))
 
     @app.get("/api/scans")
     def list_scans():

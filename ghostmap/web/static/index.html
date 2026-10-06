@@ -26,6 +26,7 @@
   </header>
 
   <nav class="tabs" id="tabs">
+    <button data-tab="machine">Machine</button>
     <button data-tab="overview" class="active">Overview</button>
     <button data-tab="devices">Devices</button>
     <button data-tab="switches">Switches</button>
@@ -40,6 +41,29 @@
       <p>Run a scan of the machine network, or load the simulated demo machine to look around.</p>
       <p><button class="btn primary admin-only" id="emptyScan">New scan</button> <button class="btn admin-only" id="loadDemo">Load demo machine</button></p>
       <p class="muted">Ghost Map is read-only: EtherNet/IP ListIdentity and SNMP GET/WALK only. It never writes to devices.</p>
+    </section>
+
+    <section id="tab-machine" class="tab hidden">
+      <div class="panel">
+        <div class="toolbar">
+          <label>Dashboard <select id="mSelect"></select></label>
+          <span id="mLive" class="small muted"></span>
+          <span class="grow"></span>
+          <label class="admin-only small"><input type="checkbox" id="mEdit"> Edit</label>
+          <button class="btn ghost small admin-only" id="mImport" title="Build a dashboard from a tag export CSV">From CSV...</button>
+          <button class="btn ghost small admin-only hidden" id="mDelete">Delete</button>
+        </div>
+        <div id="mNotes"></div>
+      </div>
+      <div id="mEmpty" class="panel hidden">
+        <h2>No machine dashboards yet</h2>
+        <p>Ghost Map lays out a dashboard from the PLC's tags: alarms grouped by area, timers, counters and run state.</p>
+        <p>In <b>Tags (OPC UA)</b>, connect to the gateway, select the controller or its fault folder, and press <b>Build dashboard</b>.
+          Or press <b>From CSV...</b> above and pick a tag export. Type <b>demo</b> as the endpoint to try it on a simulated leveler.</p>
+      </div>
+      <div class="tiles" id="mTiles"></div>
+      <div id="mProd"></div>
+      <div class="mgrid" id="mAreas"></div>
     </section>
 
     <section id="tab-overview" class="tab">
@@ -110,7 +134,8 @@
       <div class="uagrid hidden" id="uaMain">
         <div class="panel uatreebox">
           <div class="uahead"><h3>Address space</h3>
-            <button class="btn ghost small" id="uaExport" disabled title="List every tag under the selected node with its current value">Export tags</button></div>
+            <button class="btn ghost small" id="uaExport" disabled title="List every tag under the selected node with its current value">Export tags</button>
+            <button class="btn ghost small" id="uaDashboard" disabled title="Read every tag under the selected node and lay out a machine dashboard from it">Build dashboard</button></div>
           <div id="uaTree" class="uatree"></div>
         </div>
         <div class="panel uawatchbox">
@@ -127,6 +152,21 @@
       </div>
     </section>
   </main>
+
+  <dialog id="mImportDialog">
+    <form id="mImportForm" method="dialog">
+      <h2>Dashboard from a tag export</h2>
+      <p class="small muted">Use a CSV from <b>Export tags</b> in the Tags tab (columns path, node_id, type, value).</p>
+      <label>Machine name <input name="name" required maxlength="80"></label>
+      <label>OPC UA endpoint to read from <input name="endpoint" required placeholder="opc.tcp://127.0.0.1:4990, an IP, or demo"></label>
+      <label>Tag export CSV <input name="file" type="file" accept=".csv,text/csv" required></label>
+      <p class="err" id="mImportErr"></p>
+      <div class="actions">
+        <button type="button" class="btn" id="mImportCancel">Cancel</button>
+        <button type="submit" class="btn primary">Build dashboard</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="setupDialog">
     <form id="setupForm" method="dialog">
@@ -201,5 +241,6 @@
 
   <script src="static/app.js"></script>
   <script src="static/opcua.js"></script>
+  <script src="static/machine.js"></script>
 </body>
 </html>

@@ -162,3 +162,59 @@ def test_browse_follows_continuation_points():
     b.client.uaclient = FakeUaClient()
     kids = asyncio.run(b._browse_many(["ns=2;s=x"]))
     assert [k["name"] for k in kids[0]] == ["a", "b", "c"]
+
+
+def test_dashboard_from_simulated_leveler(ua):
+    c, url, sid, d = ua
+    gw = find(c, sid, None, "FactoryTalk Linx Gateway")
+    lev = find(c, sid, gw["node_id"], "LEVELER_01")
+    tags = run_export(c, sid, lev["node_id"])["tags"]
+    rows = [{"path": t["path"], "node_id": t["node_id"], "type": t["variant_type"], "value": t["value"]} for t in tags]
+    dash = c.post("/api/dashboards", json={"name": "Leveler 1", "endpoint": url, "tags": rows}).json()
+    areas = {a["title"]: a for a in dash["layout"]["areas"]}
+    assert {"General", "Entry", "Leveler", "Hydraulics", "Comms", "Production"} <= set(areas)
+    assert areas["Comms"]["suggest_invert"]
+    assert areas["Hydraulics"]["timers"] and areas["Production"]["counters"]
+    assert c.get("/api/dashboards").json()[0]["id"] == dash["id"]
+
+    vals = c.get(f"/api/dashboards/{dash['id']}/values").json()
+    assert vals["ok"], vals
+    estop = next(a for a in areas["General"]["alarms"] if a["name"] == "E_Stop_Flt")
+    assert estop["node_id"] in vals["values"]
+
+    hidden = areas["General"]["alarms"][-1]["node_id"]
+    r = c.post(f"/api/dashboards/{dash['id']}/overrides", json={"invert": {areas["Comms"]["id"]: True}, "hidden": [hidden]})
+    assert r.json()["overrides"]["invert"] == {areas["Comms"]["id"]: True}
+    assert (d / "dashboards" / f"{dash['id']}.json").exists()
+
+    assert c.delete(f"/api/dashboards/{dash['id']}").json() == {"ok": True}
+    assert c.get(f"/api/dashboards/{dash['id']}").status_code == 404
+
+
+def test_dashboard_unreachable_gateway_and_bad_input(tmp_path):
+    with TestClient(create_app(data_dir=str(tmp_path), demo_opcua=False), headers=H) as c:
+        assert c.post("/api/dashboards", json={"name": "x", "endpoint": "1.2.3.4", "tags": []}).status_code == 400
+        rows = [{"path": "A/Flt", "node_id": "ns=2;s=FAULT.A.Flt", "type": "Boolean", "value": "false"}]
+        dash = c.post("/api/dashboards", json={"name": "x", "endpoint": f"127.0.0.1:{free_port()}", "tags": rows}).json()
+        v = c.get(f"/api/dashboards/{dash['id']}/values").json()
+        assert v["ok"] is False and v["error"]
+        assert c.get("/api/dashboards/..%2Fusers").status_code == 404
+
+
+def test_dashboards_viewers_watch_admins_edit(tmp_path, monkeypatch):
+    from ghostmap.web import auth
+
+    monkeypatch.setattr(auth, "PBKDF2_ITERATIONS", 1000)
+    users = auth.UserStore(tmp_path)
+    users.set("boss", "adminpassword", "admin")
+    users.set("op", "viewerpassword", "viewer")
+    rows = [{"path": "A/Flt", "node_id": "ns=2;s=FAULT.A.Flt", "type": "Boolean", "value": "false"}]
+    with TestClient(create_app(data_dir=str(tmp_path), demo_opcua=False), headers=H) as c:
+        c.post("/api/login", json={"user": "boss", "password": "adminpassword"})
+        dash = c.post("/api/dashboards", json={"name": "x", "endpoint": "demo", "tags": rows}).json()
+        c.post("/api/logout")
+        c.post("/api/login", json={"user": "op", "password": "viewerpassword"})
+        assert c.get(f"/api/dashboards/{dash['id']}").status_code == 200
+        assert c.post(f"/api/dashboards/{dash['id']}/overrides", json={}).status_code == 403
+        assert c.delete(f"/api/dashboards/{dash['id']}").status_code == 403
+        assert c.post("/api/dashboards", json={"name": "y", "endpoint": "demo", "tags": rows}).status_code == 403
