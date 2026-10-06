@@ -23,7 +23,9 @@ from asyncua.crypto import security_policies
 
 DEFAULT_PORT = 4990
 MAX_READ = 200            # nodes per read request from the UI
-MAX_EXPORT_NODES = 20000  # nodes visited per tag-list export
+MAX_EXPORT_NODES = 200000  # nodes visited per tag-list export
+EXPORT_BATCH = 50          # nodes per Browse request
+BROWSE_MAX_REFS = 1000     # children per node per response; the rest come via BrowseNext
 MAX_EXPORT_DEPTH = 16
 MAX_ARRAY_PREVIEW = 64
 
@@ -220,41 +222,86 @@ class UaBrowser:
             attrs["Value"] = (await self.read([node_id]))[0]
         return attrs
 
-    async def export(self, node_id: Optional[str] = None) -> dict:
+    async def _browse_many(self, node_ids: list[str]) -> list[list[dict]]:
+        """Browse several nodes in one Browse request (plus BrowseNext for long child lists)."""
+        params = ua.BrowseParameters()
+        params.RequestedMaxReferencesPerNode = BROWSE_MAX_REFS
+        for nid in node_ids:
+            d = ua.BrowseDescription()
+            d.NodeId = ua.NodeId.from_string(nid)
+            d.BrowseDirection = ua.BrowseDirection.Forward
+            d.ReferenceTypeId = ua.NodeId(ua.ObjectIds.HierarchicalReferences)
+            d.IncludeSubtypes = True
+            d.NodeClassMask = ua.NodeClass.Object | ua.NodeClass.Variable
+            d.ResultMask = ua.BrowseResultMask.All
+            params.NodesToBrowse.append(d)
+        results = await self.client.uaclient.browse(params)
+        out = []
+        for res in results:
+            refs = list(res.References or [])
+            cont = res.ContinuationPoint
+            while cont:
+                nxt = await self.client.uaclient.browse_next(_browse_next_params(cont))
+                refs.extend(nxt[0].References or [])
+                cont = nxt[0].ContinuationPoint
+            out.append([{"node_id": r.NodeId.to_string(), "name": r.DisplayName.Text or r.BrowseName.Name,
+                         "node_class": r.NodeClass.name} for r in refs])
+        return out
+
+    async def export(self, node_id: Optional[str] = None, progress=None) -> dict:
         """Walk a subtree and list every variable with its path, data type and current value.
 
-        This is the raw material for machine profiles: compare the tag lists of two
-        machines to see where naming drifts.
+        Browses level by level, EXPORT_BATCH nodes per request, so a whole controller
+        takes a few hundred round trips rather than one per node. ``progress(visited, tags)``
+        is called after each batch. This is the raw material for dashboards and machine
+        profiles.
         """
         start = node_id or self.client.nodes.objects.nodeid.to_string()
         rows: list[dict] = []
         visited = 0
         truncated = False
-        stack: list[tuple[str, str, int]] = [(start, "", 0)]
+        level: list[tuple[str, str]] = [(start, "")]
         seen = {start}
-        while stack:
-            nid, path, depth = stack.pop()
-            if visited >= MAX_EXPORT_NODES:
-                truncated = True
-                break
-            visited += 1
-            try:
-                children = await self.browse(nid)
-            except Exception:
-                continue
-            for c in children:
-                child_path = f"{path}/{c['name']}" if path else c["name"]
-                if c["node_class"] == "Variable":
-                    rows.append({"path": child_path, "node_id": c["node_id"]})
-                if depth + 1 < MAX_EXPORT_DEPTH and c["node_id"] not in seen:
-                    seen.add(c["node_id"])
-                    stack.append((c["node_id"], child_path, depth + 1))
+        depth = 0
+        while level and depth < MAX_EXPORT_DEPTH and not truncated:
+            next_level: list[tuple[str, str]] = []
+            for i in range(0, len(level), EXPORT_BATCH):
+                batch = level[i:i + EXPORT_BATCH]
+                try:
+                    children = await self._browse_many([nid for nid, _ in batch])
+                except Exception:
+                    children = [[] for _ in batch]
+                visited += len(batch)
+                for (nid, path), kids in zip(batch, children):
+                    for c in kids:
+                        child_path = f"{path}/{c['name']}" if path else c["name"]
+                        if c["node_class"] == "Variable":
+                            rows.append({"path": child_path, "node_id": c["node_id"]})
+                        if c["node_id"] not in seen:
+                            seen.add(c["node_id"])
+                            next_level.append((c["node_id"], child_path))
+                if progress:
+                    progress(visited, len(rows))
+                if visited + len(next_level) > MAX_EXPORT_NODES:
+                    truncated = True
+                    break
+            level = next_level
+            depth += 1
         rows.sort(key=lambda r: r["path"].lower())
         for i in range(0, len(rows), MAX_READ):
             chunk = rows[i:i + MAX_READ]
             for row, val in zip(chunk, await self.read([r["node_id"] for r in chunk])):
                 row.update(variant_type=val["variant_type"], value=val["value"], status=val["status"])
+            if progress:
+                progress(visited, len(rows))
         return {"tags": rows, "truncated": truncated}
+
+
+def _browse_next_params(cont: bytes) -> ua.BrowseNextParameters:
+    p = ua.BrowseNextParameters()
+    p.ReleaseContinuationPoints = False
+    p.ContinuationPoints = [cont]
+    return p
 
 
 def _access_text(level: int) -> str:

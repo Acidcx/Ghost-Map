@@ -241,7 +241,16 @@ $("#uaExport").addEventListener("click", async () => {
   btn.disabled = true;
   btn.textContent = "Exporting...";
   try {
-    const r = await api("api/opcua/export", { method: "POST", body: JSON.stringify({ sid: ua.sid, node_id: ua.sel.node_id }) });
+    const { job } = await api("api/opcua/export", { method: "POST", body: JSON.stringify({ sid: ua.sid, node_id: ua.sel.node_id }) });
+    let j;
+    for (;;) {
+      await new Promise((res) => setTimeout(res, 800));
+      j = await api(`api/opcua/export/${job}`);
+      uaStatus(`Exporting ${esc(ua.sel.name)}: ${j.visited} nodes browsed, ${j.tags} tags found...`);
+      if (j.status !== "running") break;
+    }
+    if (j.status === "failed") throw new Error(j.error);
+    const r = j.result;
     csvDownload(`ghostmap-tags-${safeName(ua.sel.name)}.csv`, ["path", "node_id", "type", "value", "status"],
       r.tags.map((t) => [t.path, t.node_id, t.variant_type, t.value, t.status]));
     uaStatus(`Exported ${r.tags.length} tags under ${esc(ua.sel.name)}${r.truncated ? " (stopped at the size limit)" : ""}.`);

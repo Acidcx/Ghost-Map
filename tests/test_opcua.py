@@ -28,6 +28,20 @@ def ua(tmp_path_factory):
         yield c, url, sid, d
 
 
+def run_export(c, sid, node_id):
+    import time
+
+    job = c.post("/api/opcua/export", json={"sid": sid, "node_id": node_id}).json()["job"]
+    for _ in range(100):
+        j = c.get(f"/api/opcua/export/{job}").json()
+        if j["status"] != "running":
+            break
+        time.sleep(0.1)
+    assert j["status"] == "done", j
+    assert j["visited"] > 0 and j["tags"] == len(j["result"]["tags"])
+    return j["result"]
+
+
 def find(c, sid, node_id, name):
     kids = c.post("/api/opcua/browse", json={"sid": sid, "node_id": node_id}).json()
     return next(k for k in kids if k["name"] == name)
@@ -71,7 +85,7 @@ def test_browse_attributes_read(ua):
 def test_export_shows_naming_drift(ua):
     c, url, sid, _ = ua
     gw = find(c, sid, None, "FactoryTalk Linx Gateway")
-    ex = c.post("/api/opcua/export", json={"sid": sid, "node_id": gw["node_id"]}).json()
+    ex = run_export(c, sid, gw["node_id"])
     paths = {t["path"] for t in ex["tags"]}
     assert "PRESS_01/PressFireCount" in paths and "PRESS_02/Press_Fire_Cnt" in paths
     assert "PRESS_02/Fault_Log/Fault_Log[0]/Station" in paths
@@ -114,3 +128,37 @@ def test_typing_demo_starts_simulated_gateway(tmp_path):
         assert r["url"].startswith("opc.tcp://127.0.0.1:") and r["sid"]
         assert c.get("/api/info").json()["demo_opcua"] == r["url"]
         assert c.post("/api/opcua/endpoints", json={"url": "demo"}).status_code == 200
+
+
+def test_browse_follows_continuation_points():
+    """Servers may return children in pages; the rest must be fetched with BrowseNext."""
+    import asyncio
+
+    from asyncua import ua
+
+    def ref(name):
+        r = ua.ReferenceDescription()
+        r.NodeId = ua.NodeId(name, 2)
+        r.BrowseName = ua.QualifiedName(name, 2)
+        r.DisplayName = ua.LocalizedText(name)
+        r.NodeClass = ua.NodeClass.Variable
+        return r
+
+    def result(names, cont):
+        res = ua.BrowseResult()
+        res.References = [ref(n) for n in names]
+        res.ContinuationPoint = cont
+        return res
+
+    class FakeUaClient:
+        async def browse(self, params):
+            assert params.RequestedMaxReferencesPerNode == opcua.BROWSE_MAX_REFS
+            return [result(["a", "b"], b"page2")]
+
+        async def browse_next(self, params):
+            return [result(["c"], None)] if params.ContinuationPoints == [b"page2"] else []
+
+    b = opcua.UaBrowser("127.0.0.1")
+    b.client.uaclient = FakeUaClient()
+    kids = asyncio.run(b._browse_many(["ns=2;s=x"]))
+    assert [k["name"] for k in kids[0]] == ["a", "b", "c"]

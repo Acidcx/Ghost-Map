@@ -397,11 +397,47 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     async def ua_read(body: UaReadIn):
         return await ua_call(ua_get(body.sid).read(body.node_ids))
 
+    ua_exports: dict[str, dict] = {}
+
     @app.post("/api/opcua/export")
     async def ua_export(body: UaNodeIn, request: Request):
+        """Start a tag-list export in the background; poll GET /api/opcua/export/{job}.
+
+        Whole controllers can take minutes, so this doesn't hold the HTTP request open.
+        """
         browser = ua_get(body.sid)
         audit.write(client_of(request), who(request), "opcua.export", f"{browser.url} {body.node_id or 'Objects'}")
-        return await ua_call(browser.export(body.node_id))
+        for k in [k for k, j in ua_exports.items() if j["status"] != "running"][:-4]:
+            ua_exports.pop(k, None)  # keep only the last few finished exports in memory
+        job = {"id": uuid.uuid4().hex[:12], "status": "running", "visited": 0, "tags": 0, "error": None, "result": None}
+        ua_exports[job["id"]] = job
+
+        def progress(visited, tags):
+            job["visited"], job["tags"] = visited, tags
+            entry = ua_sessions.get(body.sid)
+            if entry:
+                entry[1] = time.time()  # a long export counts as activity, so the session isn't dropped
+
+        async def worker():
+            try:
+                job["result"] = await browser.export(body.node_id, progress=progress)
+                job["status"] = "done"
+            except Exception as exc:
+                job["error"] = f"{type(exc).__name__}: {exc}"
+                job["status"] = "failed"
+
+        task = asyncio.create_task(worker())
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+        return {"job": job["id"]}
+
+    @app.get("/api/opcua/export/{job_id}")
+    def ua_export_status(job_id: str, request: Request):
+        require_admin(request)
+        job = ua_exports.get(job_id)
+        if job is None:
+            raise HTTPException(404, "export not found")
+        return job
 
     @app.get("/api/scans")
     def list_scans():
