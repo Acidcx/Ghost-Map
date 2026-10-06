@@ -7,8 +7,11 @@ const SEV_RANK = { error: 0, warning: 1, info: 2 };
 
 const state = { scans: [], scan: null, findingsByTarget: {}, devSort: { key: "ip", dir: 1 }, selDevice: null, selPort: null };
 
+// Paths are relative (no leading "/") so the UI also works under the IXON HTTP proxy's path prefix.
+// X-Ghostmap marks requests as coming from this page; the server rejects state changes without it.
 async function api(path, opts = {}) {
-  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const res = await fetch(path, { headers: { "Content-Type": "application/json", "X-Ghostmap": "1" }, ...opts });
+  if (res.status === 401) { location.href = "login"; throw new Error("login required"); }
   if (!res.ok) {
     let msg = res.statusText;
     try { msg = (await res.json()).detail || msg; } catch (_) { /* ignore */ }
@@ -44,7 +47,7 @@ function showTab(name) {
 
 // ------------------------------------------------------------------ scans
 async function refreshScans(selectId) {
-  state.scans = await api("/api/scans");
+  state.scans = await api("api/scans");
   const opts = state.scans.map((s) => {
     const label = s.label ? ` - ${s.label}` : "";
     return `<option value="${esc(s.id)}">${esc(s.id)}${esc(label)} (${s.devices} dev, ${s.errors}E/${s.warnings}W)</option>`;
@@ -61,12 +64,12 @@ async function refreshScans(selectId) {
 }
 
 async function loadScan(id) {
-  state.scan = await api(`/api/scans/${encodeURIComponent(id)}`);
+  state.scan = await api(`api/scans/${encodeURIComponent(id)}`);
   state.selDevice = null;
   state.selPort = null;
   state.findingsByTarget = {};
   for (const f of state.scan.findings) (state.findingsByTarget[f.target] ||= []).push(f);
-  $("#csvLink").href = `/api/scans/${encodeURIComponent(id)}/inventory.csv`;
+  $("#csvLink").href = `api/scans/${encodeURIComponent(id)}/inventory.csv`;
   renderOverview();
   renderDevices();
   renderSwitches();
@@ -163,7 +166,7 @@ function renderDeviceDetail() {
   pane.innerHTML = `<h3>${esc(i ? i.product_name : d.ip || d.mac)}</h3>
     <dl>${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd class="mono">${esc(v ?? "-")}</dd>`).join("")}</dl>
     ${fs.length ? `<h3 style="margin-top:14px">Findings</h3>${fs.map(findingHtml).join("")}` : ""}
-    ${d.ip ? `<p><button class="btn" id="detailProbe">Probe now</button> ${i ? `<a class="btn ghost" href="http://${esc(d.ip)}/" target="_blank" rel="noopener">Web page</a>` : ""}</p>` : ""}`;
+    ${d.ip ? `<p><button class="btn admin-only" id="detailProbe">Probe now</button> ${i ? `<a class="btn ghost" href="http://${esc(d.ip)}/" target="_blank" rel="noopener">Web page</a>` : ""}</p>` : ""}`;
   const pb = $("#detailProbe");
   if (pb) pb.addEventListener("click", () => { $("#probeIp").value = d.ip; showTab("probe"); runProbe(); });
 }
@@ -242,7 +245,7 @@ function selectPort(si, ifIndex) {
 $("#cmpRun").addEventListener("click", async () => {
   const out = $("#cmpOut");
   try {
-    const d = await api(`/api/diff?old=${encodeURIComponent($("#cmpOld").value)}&new=${encodeURIComponent($("#cmpNew").value)}`);
+    const d = await api(`api/diff?old=${encodeURIComponent($("#cmpOld").value)}&new=${encodeURIComponent($("#cmpNew").value)}`);
     const brief = (x) => `${esc(x.label)}${x.mac && x.mac !== x.label ? ` <span class="mono muted">${esc(x.mac)}</span>` : ""}`;
     const sec = (title, items, fn) => `<div class="diffsec"><h3>${esc(title)} (${items.length})</h3>${items.length ? `<ul>${items.map((x) => `<li>${fn(x)}</li>`).join("")}</ul>` : `<p class="muted">none</p>`}</div>`;
     out.classList.remove("muted");
@@ -265,7 +268,7 @@ async function runProbe() {
   if (!ip) return;
   out.innerHTML = `<p class="muted">Probing ${esc(ip)}...</p>`;
   try {
-    const r = await api(`/api/probe/${encodeURIComponent(ip)}`);
+    const r = await api(`api/probe/${encodeURIComponent(ip)}`);
     const tcp = Object.entries(r.tcp).map(([p, ok]) => `<span class="chip" style="${ok ? "border-color:var(--ok)" : ""}">${esc(p)} ${ok ? "open" : "-"}</span>`).join("");
     const i = r.identity;
     out.innerHTML = `<p>TCP: ${tcp}</p>` + (i ? `<div class="detail"><dl>
@@ -309,10 +312,10 @@ form.addEventListener("submit", async (e) => {
   log.textContent = "Starting...";
   $("#scanGo").disabled = true;
   try {
-    const { job } = await api("/api/scans", { method: "POST", body: JSON.stringify(body) });
+    const { job } = await api("api/scans", { method: "POST", body: JSON.stringify(body) });
     for (;;) {
       await new Promise((r) => setTimeout(r, 700));
-      const j = await api(`/api/jobs/${job}`);
+      const j = await api(`api/jobs/${job}`);
       log.textContent = j.log.join("\n");
       log.scrollTop = log.scrollHeight;
       if (j.status === "done") { f.community.value = f.auth_key.value = f.priv_key.value = ""; await refreshScans(j.scan_id); dlg.close(); break; }
@@ -325,10 +328,19 @@ form.addEventListener("submit", async (e) => {
   }
 });
 
-$("#loadDemo").addEventListener("click", async () => { await api("/api/demo", { method: "POST" }); await refreshScans("demo-today"); });
+$("#logoutBtn").addEventListener("click", async () => { await api("api/logout", { method: "POST" }); location.href = "login"; });
+$("#loadDemo").addEventListener("click", async () => { await api("api/demo", { method: "POST" }); await refreshScans("demo-today"); });
 
 // ------------------------------------------------------------------ boot
 (async () => {
-  try { $("#ver").textContent = "v" + (await api("/api/info")).version; } catch (_) { /* ignore */ }
+  try {
+    const info = await api("api/info");
+    $("#ver").textContent = "v" + info.version;
+    document.body.classList.toggle("viewer", info.role !== "admin");
+    if (info.user) {
+      $("#whoName").textContent = `${info.user} (${info.role})`;
+      $("#who").classList.remove("hidden");
+    }
+  } catch (_) { /* ignore */ }
   await refreshScans();
 })();

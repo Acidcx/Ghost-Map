@@ -125,3 +125,12 @@ dialog .row > label { flex: 1; min-width: 140px; }
 fieldset { border: 1px solid var(--line); border-radius: 6px; margin: 10px 0; }
 legend { color: var(--muted); padding: 0 6px; }
 .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+
+/* access control */
+.viewer .admin-only { display: none !important; }
+.who { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+.login { max-width: 360px; margin: 12vh auto 0; padding: 24px; }
+.login h1 { font-size: 20px; margin: 0 0 16px; }
+.login label { display: block; margin-bottom: 12px; }
+.login input { width: 100%; box-sizing: border-box; }
+.login .err { color: var(--err); min-height: 1.4em; font-size: 13px; }

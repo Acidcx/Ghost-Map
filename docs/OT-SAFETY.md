@@ -25,5 +25,23 @@ It never sends CIP writes, resets, firmware updates, SNMP SET, or configuration 
 - Get permission from the site or asset owner before scanning, and follow the site MOC process.
 - Avoid scanning during critical operations (first runs, batch phases, safety-system testing).
 - Prefer SNMPv3 with authPriv, plus a switch ACL that allows only the engineering laptop.
-- The web UI binds to `127.0.0.1`. If you expose it with `--host 0.0.0.0`, anyone who can reach the port can start scans.
+- The web UI binds to `127.0.0.1`. See **Web UI access** below before making it reachable from the network.
+
+## Web UI access
+
+Once the UI is reachable through the IXON IXrouter it is an outward-facing service on an OT asset, so:
+
+- **Serving beyond localhost is refused** unless you pass `--allow` with the addresses that may connect (normally just the IXrouter's LAN IP) **and** at least one login exists. Example on an HMI:
+  ```
+  GhostMap.exe user add maint --role admin
+  GhostMap.exe web --host 0.0.0.0 --allow 192.168.1.1
+  ```
+  Localhost (the HMI screen) can always connect. Every other address gets `403`.
+- **Logins.** As soon as any user exists, every page and API call needs a login. Roles: `viewer` can look at everything; `admin` can also start scans, probe devices, load the demo and delete scans (anything that sends traffic or changes data). Manage users with `ghostmap user add|remove|list`. Passwords are stored as PBKDF2-SHA256 hashes in `users.json` in the data directory and need at least 10 characters.
+- **Lockout.** 5 failed logins from one address or for one user name lock it out for 5 minutes.
+- **Sessions** are random tokens in an HttpOnly, SameSite=Strict cookie, held in memory for 12 hours. Restarting Ghost Map logs everyone out.
+- **Cross-site requests.** Anything that changes state must carry an `X-Ghostmap` header, which a page on another site can't add.
+- **Headers.** A strict Content-Security-Policy (scripts only from Ghost Map itself), `nosniff`, no referrer, no caching. The API explorer (`/docs`) is turned off.
+- **Audit log.** Logins (good, failed, locked out), logouts, scans started (with targets), probes, demo loads and deletions are appended to `audit.log` in the data directory, with time, client address and user. Passwords and SNMP credentials are never written.
+- **Not yet covered:** HTTPS on the HMI itself. IXON encrypts the path from the user's browser to the IXrouter; the hop from the IXrouter to the HMI is plain HTTP on the machine network.
 - Scan files contain the network inventory (IPs, MACs, serials, firmware). Treat them as sensitive site documentation.

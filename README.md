@@ -114,6 +114,18 @@ ghostmap discover 127.0.10.0/24
 
 Scans are stored as JSON in `~/.ghostmap/scans` (override with `--data-dir` or `GHOSTMAP_DATA`). SNMP credentials are never written to disk.
 
+### Logins and remote access (IXON)
+
+On a laptop, the UI is open to whoever sits at it. To make it reachable from the network, for example through the IXON IXrouter's HTTP service, add a login and allow only the IXrouter:
+
+```bash
+ghostmap user add maint --role admin      # prompts for a password; any user turns login on
+ghostmap user add operator                # viewer: can look, can't scan or probe
+ghostmap web --host 0.0.0.0 --allow 192.168.1.1
+```
+
+Ghost Map refuses to serve beyond localhost without `--allow` and at least one login. Logins and actions are written to `~/.ghostmap/audit.log`. The UI uses relative links, so it works under the path prefix IXON's proxy adds. Details are in [docs/OT-SAFETY.md](docs/OT-SAFETY.md#web-ui-access).
+
 ## Preparing a Stratix switch
 
 Ghost Map needs read-only SNMP. These are example IOS / IOS-XE settings (Stratix 5200/5400/5410/5700/5800, or the equivalent in Device Manager / the WebUI):

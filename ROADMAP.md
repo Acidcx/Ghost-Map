@@ -39,11 +39,12 @@ It can't see traffic between other devices (e.g. PLC ↔ drive I/O). Per-port er
 ## Phase 2: secure resident service on the HMI
 
 Web face first, because it's the biggest risk:
-- [ ] Relative URLs in the web UI so it works behind the IXON HTTP proxy
-- [ ] Client allow-list: only `localhost` and listed IPs/subnets (the IXrouter) can connect
-- [ ] Logins with roles (viewer / admin), hashed passwords, session cookies, login lockout
-- [ ] Audit log of logins and actions (scans started, scans deleted)
-- [ ] Security headers; state-changing requests protected against cross-site requests
+- [x] Relative URLs in the web UI so it works behind the IXON HTTP proxy
+- [x] Client allow-list: only `localhost` and listed IPs/subnets (the IXrouter) can connect
+- [x] Logins with roles (viewer / admin), hashed passwords, session cookies, login lockout
+- [x] Audit log of logins and actions (scans started, scans deleted)
+- [x] Security headers; state-changing requests protected against cross-site requests
+- [ ] HTTPS between the IXrouter and the HMI (self-signed certificate or plant CA)
 
 Then the service:
 - [ ] `GhostMap.exe service install|uninstall|start|stop` to run as a Windows service at boot

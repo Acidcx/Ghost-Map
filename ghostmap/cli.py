@@ -254,13 +254,64 @@ def cmd_web(args) -> int:
             webbrowser.open(url)
         return 0
 
+    from ghostmap.store import default_data_dir
+    from ghostmap.web.auth import UserStore, parse_allow
+
+    try:
+        allow = parse_allow(args.allow)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     if args.host not in ("127.0.0.1", "localhost", "::1"):
-        print(f"WARNING: serving on {args.host} - anyone who can reach this port can run scans.", file=sys.stderr)
-    app = create_app(data_dir=args.data_dir, demo=args.demo)
+        # Reachable from the network (e.g. the IXON IXrouter): require an allow-list and logins.
+        if not allow:
+            print("error: serving beyond localhost needs --allow with the addresses that may connect, "
+                  "e.g. --allow <IXrouter LAN IP>", file=sys.stderr)
+            return 2
+        if not UserStore(args.data_dir or default_data_dir()).has_users():
+            print("error: serving beyond localhost needs at least one login. Create one first:\n"
+                  "  ghostmap user add <name> --role admin", file=sys.stderr)
+            return 2
+        print(f"Serving on {args.host}; clients allowed: localhost, {', '.join(map(str, allow))}", file=sys.stderr)
+    app = create_app(data_dir=args.data_dir, demo=args.demo, allow=allow)
     print(f"Ghost Map is running at {url}  (close this window or press Ctrl+C to stop)", file=sys.stderr)
     if args.open:
         threading.Timer(1.5, webbrowser.open, args=(url,)).start()
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    return 0
+
+
+def cmd_user(args) -> int:
+    from ghostmap.store import default_data_dir
+    from ghostmap.web.auth import UserStore
+
+    users = UserStore(args.data_dir or default_data_dir())
+    if args.action == "list":
+        for u in users.list():
+            print(f"{u['name']}\t{u['role']}")
+        return 0
+    if not args.name:
+        print("error: a user name is required", file=sys.stderr)
+        return 2
+    if args.action == "remove":
+        try:
+            users.remove(args.name)
+        except KeyError:
+            print(f"error: no user {args.name!r}", file=sys.stderr)
+            return 1
+        return 0
+    password = os.environ.get("GHOSTMAP_PASSWORD")
+    if password is None:
+        password = getpass.getpass(f"Password for {args.name}: ")
+        if getpass.getpass("Repeat password: ") != password:
+            print("error: passwords don't match", file=sys.stderr)
+            return 1
+    try:
+        users.set(args.name, password, args.role)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"Saved {args.name} ({args.role}). The web UI now requires a login.", file=sys.stderr)
     return 0
 
 
@@ -337,7 +388,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--port", type=int, default=8470)
     s.add_argument("--demo", action="store_true", help="preload the simulated demo machine scans")
     s.add_argument("--open", action="store_true", help="open the UI in the default browser")
+    s.add_argument("--allow", action="append", default=[], metavar="IP[/BITS]",
+                   help="client address or subnet that may connect besides localhost (e.g. the IXrouter's LAN IP); "
+                        "required with --host other than localhost")
     s.set_defaults(func=cmd_web)
+
+    s = sub.add_parser("user", help="manage web UI logins (any user turns login on)")
+    s.add_argument("action", choices=("add", "remove", "list"), help="add also changes an existing user's password/role")
+    s.add_argument("name", nargs="?")
+    s.add_argument("--role", choices=("viewer", "admin"), default="viewer")
+    s.set_defaults(func=cmd_user)
 
     s = sub.add_parser("simulate", help="run a fake EtherNet/IP machine on loopback for bench testing")
     s.add_argument("--prefix", default="127.0.10.0", help="loopback /24 to bind devices on (Linux)")

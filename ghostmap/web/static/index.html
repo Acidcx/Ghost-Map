@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Ghost Map</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="static/style.css">
 </head>
 <body>
   <header class="topbar">
@@ -14,7 +14,8 @@
       <label for="scanSelect">Scan</label>
       <select id="scanSelect"></select>
       <a id="csvLink" class="btn ghost" href="#" download>Export CSV</a>
-      <button id="newScanBtn" class="btn primary">New scan</button>
+      <button id="newScanBtn" class="btn primary admin-only">New scan</button>
+      <span id="who" class="who hidden"><span id="whoName"></span> <button id="logoutBtn" class="btn ghost">Log out</button></span>
     </div>
   </header>
 
@@ -23,14 +24,14 @@
     <button data-tab="devices">Devices</button>
     <button data-tab="switches">Switches</button>
     <button data-tab="compare">Compare</button>
-    <button data-tab="probe">Probe</button>
+    <button data-tab="probe" class="admin-only">Probe</button>
   </nav>
 
   <main>
     <section id="empty" class="panel hidden">
       <h2>No scans yet</h2>
       <p>Run a scan of the machine network, or load the simulated demo machine to look around.</p>
-      <p><button class="btn primary" id="emptyScan">New scan</button> <button class="btn" id="loadDemo">Load demo machine</button></p>
+      <p><button class="btn primary admin-only" id="emptyScan">New scan</button> <button class="btn admin-only" id="loadDemo">Load demo machine</button></p>
       <p class="muted">Ghost Map is read-only: EtherNet/IP ListIdentity and SNMP GET/WALK only. It never writes to devices.</p>
     </section>
 
@@ -122,6 +123,6 @@
     </form>
   </dialog>
 
-  <script src="/static/app.js"></script>
+  <script src="static/app.js"></script>
 </body>
 </html>
