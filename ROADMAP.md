@@ -6,39 +6,65 @@ Goal: a per-machine "nervous system". One install on each machine shows network 
 
 | Topic | Decision | Why |
 |---|---|---|
-| Where Ghost Map runs | **On the machine's Windows 11 LTSC HMI**, as a background Windows service | The machines have IXrouter3, which provides remote access but can't host apps. Docker Edge Apps need an IXON SecureEdge Pro. The HMI is already on the machine network and has a screen. |
+| Where Ghost Map runs | **On the machine's Windows 11 LTSC HMI** (FactoryTalk View v16), as a background Windows service | The machines have an IXON IXrouter3, which provides remote access but can't host apps. The HMI is already on the machine network and has a screen. Docker on an IXON SecureEdge Pro is a possible later host, but unlikely. |
 | Remote access | **IXON IXrouter3 HTTP service** → HMI `:8470` | Outbound-only connection, no inbound firewall ports, and IXON handles user login and audit. |
-| Who can reach the web UI | Only `localhost` (the HMI screen) and the IXrouter's LAN IP, plus a Ghost Map login | Once it listens on the machine network, it must not be open to every device on the LAN. |
-| Device access | **Read-only, always**: ListIdentity, SNMP GET, Logix tag *reads*. The code has no write paths. | OT trust. Remote reachability makes this even more important. |
-| Machine data source | Ghost Map reads the PLC directly over EtherNet/IP. It does not go through the HMI software. | Works whatever the HMI runtime is, and survives HMI application restarts. |
+| Web face security | **Highest-risk part of the design, so it's built first.** Only `localhost` and allow-listed IPs (the IXrouter) can connect; Ghost Map logins with roles; an audit log. | Once the UI is reachable through IXON it's an outward-facing service on an OT asset (IEC 62443 conduit). |
+| Device access | **Read-only, always.** No write, set, reset or configuration code paths. | OT trust. Remote reachability makes this even more important. |
+| PLC tag data | **OPC UA client reading from FactoryTalk Linx Gateway on the same HMI.** Reads and subscriptions only, with a read-only OPC UA user. OPC UA is *not* used to publish Ghost Map data. | Works for every controller FT Linx can reach, including older ones without a built-in OPC UA server, and Ghost Map never opens its own connection to the PLC. |
+| Detection | **Passive first.** Listen to what the HMI's own network card sees. Active traffic (ListIdentity, SNMP GET to the Stratix switches) only where passive can't answer the question, rate-limited and listed in `docs/OT-SAFETY.md`. | Minimal footprint on the machine network. |
+| Capture without a mirror port | Machine OT network only, **no SPAN/mirror port**. Capture with Windows' built-in **pktmon** first; Npcap only if pktmon falls short. | pktmon needs no third-party kernel driver or license. Npcap's free license is limited to 5 systems per organization, and an extra driver has to be justified and patched under 62443. |
 | Storage | SQLite on the HMI, with raw data aggregated to minutes and a retention limit (e.g. 90 days) | HMI disks are small, and there's no extra service to install. |
-| Future host option | Same code packaged as an ARM64 Docker image if machines move to SecureEdge Pro | Fleet updates from IXON Cloud. |
 
-## Phase 1: finish the commissioning tool (laptop / exe)
+### What passive listening can see without a mirror port
+
+On a switched network the HMI's network card only receives broadcast and multicast frames plus its own traffic:
+- ARP (which hosts are alive, IP ↔ MAC), DHCP/BOOTP requests, gratuitous ARP on IP conflicts
+- LLDP/CDP from the switch port the HMI is plugged into
+- EtherNet/IP ListIdentity browses from other RSLinx / FactoryTalk Linx PCs, and the replies that are broadcast
+- PC chatter (NetBIOS, mDNS, SSDP, LLMNR) that names engineering PCs
+- The HMI's own traffic to the controllers
+
+It can't see traffic between other devices (e.g. PLC ↔ drive I/O). Per-port errors and device health elsewhere still come from SNMP on the Stratix switches and from ListIdentity.
+
+## Phase 1: commissioning tool (laptop / exe)
 
 - [x] EtherNet/IP discovery, Stratix / IOS-XE switch reading, port mapping, diagnostics, scan diff
 - [x] Multiple switches per machine; non-EtherNet/IP hosts listed with MAC vendor; RSLinx PCs labelled
 - [ ] SNMP identification of non-CIP hosts (sysDescr: model / firmware of Moxa, Netgear, IT switches)
 - [ ] Device-side Ethernet diagnostics (CIP Ethernet Link object: speed, duplex, error counters)
 - [ ] Fill in the scanner PC's own MAC address
-- [ ] Relative URLs in the web UI so it works behind the IXON HTTP proxy
 - [ ] Topology diagram; PDF commissioning report
-- [ ] PROFINET DCP discovery for Siemens machines (needs Npcap on Windows)
+- [ ] PROFINET DCP discovery for Siemens machines
 
-## Phase 2: resident service on the HMI
+## Phase 2: secure resident service on the HMI
 
+Web face first, because it's the biggest risk:
+- [ ] Relative URLs in the web UI so it works behind the IXON HTTP proxy
+- [ ] Client allow-list: only `localhost` and listed IPs/subnets (the IXrouter) can connect
+- [ ] Logins with roles (viewer / admin), hashed passwords, session cookies, login lockout
+- [ ] Audit log of logins and actions (scans started, scans deleted)
+- [ ] Security headers; state-changing requests protected against cross-site requests
+
+Then the service:
 - [ ] `GhostMap.exe service install|uninstall|start|stop` to run as a Windows service at boot
 - [ ] Scheduled background scans and polling, with history in SQLite
 - [ ] Change timeline: device added or removed, firmware changed, port down, new MAC on a port
 - [ ] Alerts: thresholds and rate of change (e.g. CRC errors climbing); notifications through the IXON-approved path
-- [ ] Login and roles (viewer / maintenance / admin); listen only on localhost plus the IXrouter LAN IP
-- [ ] HMI self-health: disk, uptime, Windows event-log errors, RSLinx / FactoryTalk / HMI-runtime services running
+- [ ] HMI self-health: disk, uptime, Windows event-log errors, FactoryTalk Linx / View services running
 
-## Phase 3: machine data, OEE and maintenance
+## Phase 3: passive detection
 
-- [ ] Logix tag reads (read-only, rate-limited, batched)
+- [ ] Capture with pktmon (built into Windows), with filters for ARP, LLDP/CDP, DHCP/BOOTP, ListIdentity and name broadcasts
+- [ ] Live device list from passive traffic: new, missing and changed devices without sending anything
+- [ ] IP conflict and duplicate-MAC detection from ARP
+- [ ] HMI uplink health from LLDP (switch name, port, VLAN) and its own interface counters
+- [ ] Npcap as an optional capture backend if pktmon falls short
+
+## Phase 4: machine data, OEE and maintenance (OPC UA)
+
+- [ ] OPC UA client to FactoryTalk Linx Gateway: browse, read and subscribe only, with a read-only user and certificate trust
 - [ ] **L5X import**: read the Studio 5000 project export for fault UDTs, member descriptions and fault message text, so no fault tables are typed by hand
-- [ ] **Machine profiles** (see below), with automatic profile and variant detection
+- [ ] **Machine profiles** (see below), with automatic profile and variant detection from the OPC UA browse
 - [ ] OEE: availability × performance × quality per shift, day and week
   - Performance from **shear / press fire counts** against the ideal cycle time
   - Availability from run state against planned time (shift calendar per machine)
@@ -47,19 +73,19 @@ Goal: a per-machine "nervous system". One install on each machine shows network 
 - [ ] Maintenance counters: blade / die / cylinder life by stroke count, runtime hours, and "due soon" warnings
 - [ ] Machine dashboard: an andon-style status screen on the HMI, plus the same page via IXON
 
-## Phase 4: cross-layer correlation ("the brain")
+## Phase 5: cross-layer correlation ("the brain")
 
 - [ ] One timeline that combines network, device and process events (e.g. press faulted with drive comms loss ← CRC errors on the drive's port for the previous hour)
 - [ ] Trend-based early warnings (cable degrading, fault frequency rising)
 - [ ] Firmware security advisories (Rockwell / CISA) and product lifecycle status, bundled offline
-- [ ] Optional plant-level rollup across machines; optional MQTT / OPC UA publishing
+- [ ] Optional plant-level rollup across machines
 
 ## Machine profiles (for automatic rollout)
 
 One installer is used on every machine. On first start Ghost Map:
 
 1. Scans the machine network and finds the controller(s).
-2. Reads the controller's identity, and its tag and UDT list (read-only browse).
+2. Browses the controller's tags and UDTs through the OPC UA server (FactoryTalk Linx Gateway), read-only.
 3. **Matches a profile** from the bundled profile library by controller name pattern, and by which tags and UDT layouts exist. Fault structures are similar across machines but have variants, so a profile is a *base* plus *variants*. The variant is chosen by comparing the actual UDT members to each variant's definition.
 4. Starts OEE and maintenance collection with that profile, and shows **"profile: Press Line v2 (variant B), matched 14/14 tags"** on the dashboard. If nothing matches, it falls back to network and device health only and flags the machine for review.
 

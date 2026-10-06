@@ -4,7 +4,7 @@ Ghost Map is a read-only OT network mapper and machine health tool for Rockwell 
 
 ## Ground rules
 
-- **Read-only device access, always.** Only EtherNet/IP ListIdentity, SNMP GET/GETBULK, TCP connect checks and (planned) Logix tag *reads*. No write, set, reset or configuration code paths anywhere. See `docs/OT-SAFETY.md`.
+- **Read-only device access, always.** Only EtherNet/IP ListIdentity, SNMP GET/GETBULK, TCP connect checks and (planned) OPC UA reads and subscriptions from FactoryTalk Linx Gateway, and passive capture. No write, set, reset or configuration code paths anywhere. See `docs/OT-SAFETY.md`.
 - **Works offline.** The web UI must not load anything from CDNs or the internet. Bundle any data the app needs (like `ghostmap/data/oui.tsv.gz`).
 - **Windows first.** The target is Windows 11 LTSC HMIs and engineering laptops, through the single-file `GhostMap.exe`. Linux and macOS should keep working. Python 3.10+.
 - **Never commit real plant data**: scan results, L5X exports, IPs or serials from a customer site. Use the simulated machine in `ghostmap/sim/machine.py` for demos and tests.
