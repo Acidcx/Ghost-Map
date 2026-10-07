@@ -3,7 +3,7 @@
 // server reads (read-only) from the OPC UA gateway. Uses $, esc and api() from app.js.
 
 const mach = { list: [], dash: null, vals: null, timer: null, edit: false, axisDetail: {}, axisOpen: new Set(), events: [],
-  verify: null, verifying: false, filter: "", onlyActive: false };
+  verify: null, verifying: false, filter: "", onlyActive: false, det: new Map() };
 const POLL_MS = 2000;
 const SEV_LABEL = { critical: "E-stop", fault: "fault", warning: "warning" };
 const RUN_RE = /(^|_)(line_)?run(ning)?($|_)|autorun|auto_running/i;
@@ -43,6 +43,7 @@ async function machineShow(id) {
   mach.vals = null;
   mach.axisDetail = {};
   mach.axisOpen = new Set();
+  mach.det = new Map();
   mach.events = [];
   mach.verify = null;
   try { localStorage.setItem("gm.dash", id); } catch (_) { /* ignore */ }
@@ -128,9 +129,27 @@ function areaGroup(a) {
   const parts = String(a.id).split("/").filter((p) => !/^program:/i.test(p));
   return parts[0] || "Other";
 }
-function machGroupOpen(key) {
-  try { return localStorage.getItem(`gm.dash.group.${mach.dash.id}.${key}`) === "1"; } catch (_) { return false; }
+// Every poll redraws the page, so each drop-down remembers what the user did with it: key -> { open, seen }.
+// A drop-down the user closed stays closed until a fault comes in that wasn't active when they closed it;
+// one they opened stays open.
+function detAttrs(key, dflt, activeIds = []) {
+  const rec = mach.det.get(key);
+  let open = dflt;
+  if (rec) {
+    open = rec.open;
+    if (!open && activeIds.some((id) => !rec.seen.has(id))) {
+      mach.det.delete(key);
+      open = true;
+    }
+  }
+  return `data-det="${esc(key)}" data-active="${esc(activeIds.join(" "))}" ${open ? "open" : ""}`;
 }
+document.querySelector("#tab-machine").addEventListener("click", (e) => {
+  const sum = e.target.closest("summary");
+  const det = sum?.parentElement;
+  if (!det?.dataset.det) return;
+  mach.det.set(det.dataset.det, { open: !det.open, seen: new Set((det.dataset.active || "").split(" ").filter(Boolean)) });
+}, true);
 // Three levels so a whole controller stays readable: Overview (tiles, what's active now, one card per
 // program), Drives (every axis in one table), and one page per program with its area cards and signals.
 const ACTIVE_KINDS = ["alarms", "axes", "words", "timers"];
@@ -174,7 +193,7 @@ function machineRender() {
       vals.bad.length ? ` &middot; <a href="#" data-view="health" class="errtext">${vals.bad.length} not readable</a>` : ""}`
       : `<span class="chip errchip">no data</span> <span class="errtext">${esc(vals.error)}</span>`;
 
-  $("#mNotes").innerHTML = (L.notes || []).map((n) => `<details class="small muted"><summary>What was left out</summary>${esc(n)}</details>`).join("")
+  $("#mNotes").innerHTML = (L.notes || []).map((n, i) => `<details class="small muted" ${detAttrs(`notes|${i}`, false)}><summary>What was left out</summary>${esc(n)}</details>`).join("")
     + (mach.edit ? `<p class="small muted">Edit mode: click <b>Edit</b> on any item to rename it, change its tag or remove it.
       Tags are picked from what Ghost Map found when the dashboard was built. <button class="btn ghost small" data-addarea="1">Add area</button>
       <button class="btn ghost small" data-rebuild="1" title="Lay the dashboard out again with Ghost Map's current rules, from the tags stored when it was built">Rebuild layout</button></p>` : "");
@@ -302,8 +321,9 @@ function machineRender() {
         const act = g.states.reduce((n, { s }) => n + s.active.length + s.faultedAxes.length, 0);
         const alarms = g.states.reduce((n, { s }) => n + s.alarms.length, 0);
         const w = gRank(g) <= 1 ? "err" : act ? "warn" : known ? "ok" : "";
-        const open = act || q || mach.onlyActive || machGroupOpen(g.key);
-        return `<details class="mgroup" data-group="${esc(g.key)}" ${open ? "open" : ""}><summary><span class="dot ${dotFor(w)}"></span>
+        const ids = g.states.flatMap(({ s }) => [...s.active.map((x) => x.node_id), ...s.faultedAxes.map((x) => x.name)]);
+        const attrs = q || mach.onlyActive ? "open" : detAttrs(`group|${sec.name}|${g.key}`, !!act, ids);
+        return `<details class="mgroup" ${attrs}><summary><span class="dot ${dotFor(w)}"></span>
           <b>${esc(g.key.replace(/_/g, " "))}</b> <span class="small muted">${g.states.length} area${g.states.length === 1 ? "" : "s"}${alarms ? ` &middot; ${alarms} alarms` : ""}${act ? ` &middot; <span class="errtext">${act} active</span>` : known ? " &middot; OK" : ""}</span></summary>
           <div class="mgrid">${g.states.map(({ a, s, ai }) => areaCard(a, s, v, ai)).join("")}</div></details>`;
       }).join("");
@@ -534,7 +554,7 @@ function areaCard(a, s, v, ai) {
     ${s.active.map(alarmRow).join("")}
     ${axes}${words}${timers}
     ${vals ? `<div class="mvals">${vals}</div>` : ""}
-    ${quiet.length ? `<details ${mach.edit ? "open" : ""}><summary class="small muted">${quiet.length} ${known ? "not active" : "alarms"}</summary>${quiet.map(alarmRow).join("")}</details>` : ""}
+    ${quiet.length ? `<details ${detAttrs(`quiet|${a.id}`, mach.edit)}><summary class="small muted">${quiet.length} ${known ? "not active" : "alarms"}</summary>${quiet.map(alarmRow).join("")}</details>` : ""}
   </div>`;
 }
 
@@ -577,11 +597,6 @@ $("#mAreas").addEventListener("input", (e) => {
     if (f) { f.focus(); f.setSelectionRange(pos, pos); }
   }, 250);
 });
-$("#mAreas").addEventListener("toggle", (e) => {
-  const key = e.target.dataset?.group;
-  if (key === undefined) return;
-  try { localStorage.setItem(`gm.dash.group.${mach.dash.id}.${key}`, e.target.open ? "1" : "0"); } catch (_) { /* ignore */ }
-}, true);
 $("#mAreas").addEventListener("change", (e) => {
   if (e.target.id === "mOnlyActive") { mach.onlyActive = e.target.checked; machineRender(); return; }
   if (e.target.id === "mFreshness" || e.target.id === "mMaxMs") { saveFreshness(); return; }
