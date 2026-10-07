@@ -250,3 +250,80 @@ def test_dashboards_viewers_watch_admins_edit(tmp_path, monkeypatch):
         assert c.post(f"/api/dashboards/{dash['id']}/overrides", json={}).status_code == 403
         assert c.delete(f"/api/dashboards/{dash['id']}").status_code == 403
         assert c.post("/api/dashboards", json={"name": "y", "endpoint": "demo", "tags": rows}).status_code == 403
+
+
+def test_comms_health_alarm_check_and_reconnects(tmp_path, monkeypatch):
+    """Coverage, heartbeat, drops and reconnects, the alarm check and the debug log, against the simulator."""
+    import io
+    import time
+    import zipfile
+
+    from ghostmap.analysis import dashboard as gen
+    from ghostmap.web import dashboards as live_mod
+
+    monkeypatch.setattr(live_mod, "HEARTBEAT_STALE_S", 2)
+    monkeypatch.setattr(gen, "HEARTBEAT_STALE_S", 2)
+    app = create_app(data_dir=str(tmp_path), demo_opcua=True, demo_opcua_port=free_port())
+    with TestClient(app, headers=H) as c:
+        url = c.get("/api/info").json()["demo_opcua"]
+        sid = c.post("/api/opcua/connect", json={"url": url}).json()["sid"]
+        gw = find(c, sid, None, "FactoryTalk Linx Gateway")
+        lev = find(c, sid, gw["node_id"], "LEVELER_01")
+        rows = [{"path": t["path"], "node_id": t["node_id"], "type": t["variant_type"], "value": t["value"]}
+                for t in run_export(c, sid, lev["node_id"])["tags"]]
+        dash = c.post("/api/dashboards", json={"name": "Leveler", "endpoint": url, "tags": rows}).json()
+        did = dash["id"]
+        assert dash["layout"]["machine"]["heartbeat"][0].endswith("]Heartbeat")
+        sim = app.state.demo_ua["server"]
+
+        v = c.get(f"/api/dashboards/{did}/values").json()
+        h = v["health"]
+        assert v["ok"] and h["good"] == h["total"] > 0 and h["latency_ms"] is not None and not h["bad_by_plc"]
+        assert dash["layout"]["machine"]["heartbeat"][0] in v["values"]  # machine tags are read too
+
+        r = c.get(f"/api/dashboards/{did}/verify").json()
+        assert r["ok"] and r["summary"]["alarms"] > 20 and r["summary"]["readable"] == r["summary"]["alarms"]
+        codes = {f["code"] for f in r["findings"]}
+        assert "area.mostly_on" in codes  # the Comms OK bits, until the area is flipped
+        assert not [f for f in r["findings"] if f["severity"] == "error"]
+
+        # FT Linx loses the PLC for one area: those tags come back BadCommunicationError.
+        n = c.portal.call(sim.fault_comms, "Hydraulics")
+        time.sleep(1.1)
+        h = c.get(f"/api/dashboards/{did}/values").json()["health"]
+        assert h["bad_by_plc"] == {"LEVELER_01": n} and h["good"] == h["total"] - n
+        r = c.get(f"/api/dashboards/{did}/verify").json()
+        bad = [f for f in r["findings"] if f["code"] == "alarm.unreadable"]
+        assert len(bad) == n and "BadCommunicationError" in bad[0]["message"] and bad[0]["hint"]
+        c.portal.call(sim.fault_comms, "Hydraulics", False)
+
+        # The connection drops under us: the next read re-opens it and still returns data.
+        s = app.state.live._s[did]
+        c.portal.call(s["browser"].client.disconnect)
+        time.sleep(1.1)
+        v = c.get(f"/api/dashboards/{did}/values").json()
+        assert v["ok"], v
+        assert v["health"]["drops"] == 1 and v["health"]["reconnects"] == 1
+        kinds = [e["kind"] for e in c.get(f"/api/dashboards/{did}/health").json()["events"]]
+        assert kinds.index("reconnected") < kinds.index("drop") and "coverage" in kinds  # newest first
+
+        # A frozen heartbeat is reported even though every tag still reads Good.
+        sim.freeze_heartbeat()
+        for _ in range(4):
+            time.sleep(1.1)
+            h = c.get(f"/api/dashboards/{did}/values").json()["health"]
+        assert h["heartbeat"]["frozen"] and h["good"] == h["total"]
+        assert "heartbeat.frozen" in {f["code"] for f in c.get(f"/api/dashboards/{did}/verify").json()["findings"]}
+        sim.freeze_heartbeat(False)
+
+        # The Tag Browser session also survives a drop.
+        c.portal.call(app.state.ua_sessions[sid][0].client.disconnect)
+        assert c.post("/api/opcua/browse", json={"sid": sid, "node_id": None}).status_code == 200
+
+        # Browser errors and the drops end up in the debug log and the bundle.
+        assert c.post("/api/clientlog", json={"message": "TypeError: x is undefined", "page": "opcua"}).json()["ok"]
+        text = c.get("/api/debug/log").text
+        assert "drop" in text and "TypeError: x is undefined" in text and "re-opening" in text
+        z = zipfile.ZipFile(io.BytesIO(c.get("/api/debug/bundle").content))
+        assert "info.json" in z.namelist() and "logs/ghostmap.log" in z.namelist()
+        assert '"drops": 1' in z.read("info.json").decode()

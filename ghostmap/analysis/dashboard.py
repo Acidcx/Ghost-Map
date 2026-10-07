@@ -52,6 +52,9 @@ _RUNNING = [(re.compile(r"^(machine_?|line_?|mach_?)?running$|^runf$|^run_?fb$|^
             (re.compile(r"^run$", re.I), 2),
             (re.compile(r"(^|_)running($|_)|autorun|auto_?running|in_?auto_?run", re.I), 2),
             (re.compile(r"(^|_)run(ning)?($|_)", re.I), 1)]
+# A tag the PLC changes all the time (a heartbeat counter, a watchdog), so frozen data can be told apart from
+# a quiet machine. Counters beat toggling BOOLs: a bit that flips every second can look frozen to a 2 s poll.
+_HEARTBEAT = re.compile(r"heart_?beat|watch_?dog|(^|_)hb($|_)|life_?(bit|sign|count)|alive|wall_?clock", re.I)
 
 # An area where at least this share of the bits is on, and whose bit names
 # don't say "fault", may be using "on = healthy" (e.g. comms OK bits).
@@ -258,6 +261,19 @@ def _running_score(name: str) -> int:
     return next((score for rx, score in _RUNNING if rx.search(name)), 0)
 
 
+def _heartbeat_guess(rows: list[dict]) -> list[str]:
+    best = None
+    for r in rows:
+        leaf = str(r.get("path") or r["node_id"]).split("/")[-1].split(".")[-1]
+        t = _type(r)
+        if not _HEARTBEAT.search(leaf) or t not in BOOL_TYPES | INT_TYPES | REAL_TYPES:
+            continue
+        key = (t in BOOL_TYPES, "program:" in r["node_id"].lower(), len(r["node_id"]))
+        if best is None or key < best[0]:
+            best = (key, r["node_id"])
+    return [best[1]] if best else []
+
+
 def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
     rows = [r for r in rows if r.get("node_id")]
     total = len(rows)
@@ -267,6 +283,7 @@ def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
             and str(r.get("path", "")).split("/")[-1] not in _AOI_INTERNAL]
     excluded = total - len(rows)
     rows, duplicates = _dedupe(rows)
+    heartbeat = _heartbeat_guess(rows)
     # FT Linx puts everything under "Online"; a folder every tag shares adds nothing to area names.
     firsts = {str(r.get("path", "")).split("/")[0] for r in rows}
     if len(firsts) == 1 and all("/" in str(r.get("path", "")) for r in rows) and len(rows) > 1:
@@ -398,7 +415,7 @@ def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
     # Best guess at the machine's running bit: a plain name ("Running", "RunF") beats "Line_Run_Enable",
     # and controller scope beats a program's copy. Changeable on the dashboard.
     running.sort(key=lambda x: (-x[0], "program:" in x[1].lower(), len(x[1])))
-    machine = {"running": [nid for _, _, nid in running[:1]], "mode": "any"}
+    machine = {"running": [nid for _, _, nid in running[:1]], "mode": "any", "heartbeat": heartbeat}
     summary = {
         "areas": len(out_areas),
         "alarms": sum(len(a["alarms"]) for a in out_areas),
@@ -440,6 +457,9 @@ def node_ids(layout: dict) -> list[str]:
                     seen[item["node_id"]] = None
                 for nid in item.get("members", {}).values():
                     seen[nid] = None
+    m = layout.get("machine") or {}
+    for nid in [*m.get("running", []), *m.get("heartbeat", [])]:
+        seen[nid] = None
     return list(seen)
 
 
@@ -505,9 +525,133 @@ def clean_layout(layout: dict, known_ids: Optional[set] = None) -> dict:
     running = m.get("running") or []
     if not isinstance(running, list) or len(running) > 16:
         raise ValueError("bad running tags")
-    machine = {"running": [nid(x) for x in running], "mode": "all" if m.get("mode") == "all" else "any"}
+    heartbeat = m.get("heartbeat") or []
+    if not isinstance(heartbeat, list) or len(heartbeat) > 1:
+        raise ValueError("bad heartbeat tag")
+    machine = {"running": [nid(x) for x in running], "mode": "all" if m.get("mode") == "all" else "any",
+               "heartbeat": [nid(x) for x in heartbeat]}
     result = dict(layout, areas=out, machine=machine)
     result["summary"] = dict(layout.get("summary", {}), areas=len(out),
                              alarms=sum(len(a["alarms"]) for a in out), timers=sum(len(a["timers"]) for a in out),
                              counters=sum(len(a["counters"]) for a in out), axes=sum(len(a["axes"]) for a in out))
     return result
+
+
+# ---------------------------------------------------------------------------------------------- verification
+HEARTBEAT_STALE_S = 15    # a heartbeat that hasn't changed for this long means the data may be frozen
+_MISSING = ("BadNodeIdUnknown", "BadNodeIdInvalid", "BadAttributeIdInvalid")
+_NO_ACCESS = ("BadNotReadable", "BadUserAccessDenied")
+
+
+def plc_of(node_id: str) -> str:
+    """The controller a FT Linx NodeId belongs to (``[LEVELER_01]``), for grouping comms problems."""
+    m = re.search(r"\[([^\]]+)\]", node_id)
+    return m.group(1) if m else "other"
+
+
+def _status_finding(code: str, target: str, nid: str, status: str) -> dict:
+    if status in _MISSING:
+        return {"code": f"{code}.missing", "severity": "error", "target": target, "node_id": nid,
+                "message": f"The gateway doesn't know this tag ({status}).",
+                "hint": "The tag was renamed or deleted in the PLC, or the gateway's shortcut changed. "
+                        "Edit the item and pick the current tag, or remove it."}
+    if status in _NO_ACCESS:
+        return {"code": f"{code}.denied", "severity": "error", "target": target, "node_id": nid,
+                "message": f"The gateway refused to read this tag ({status}).",
+                "hint": "Check the tag's External Access in the PLC and the OPC UA user's rights in FT Linx Gateway."}
+    return {"code": f"{code}.unreadable", "severity": "error", "target": target, "node_id": nid,
+            "message": f"The gateway returned {status} instead of a value.",
+            "hint": "Usually comms between the gateway and the PLC: check the FT Linx shortcut and the PLC's path. "
+                    "Other tags from the same PLC failing too points at comms, not the tag."}
+
+
+def verify_layout(layout: dict, overrides: dict, reads: dict, live: Optional[dict] = None) -> dict:
+    """Check that every alarm on a dashboard can be trusted to flag. Pure: no I/O.
+
+    ``reads``: node_id -> {"status", "variant_type", "value"} from one read of the dashboard's tags.
+    ``live``: what the live reads have seen so far ({"since": {node_id: last change}, "started": t, "now": t}).
+    Returns {"summary": {...}, "findings": [...]}; findings carry a dotted ``code`` and a ``hint``.
+    """
+    live = live or {}
+    since, started, now = live.get("since", {}), live.get("started"), live.get("now")
+    invert = (overrides or {}).get("invert", {})
+    hidden = set((overrides or {}).get("hidden", []))
+    findings: list[dict] = []
+    seen: dict[str, str] = {}
+    checked = good = active = changed = 0
+    bad_by_plc: dict[str, int] = {}
+
+    def good_status(r):
+        return r is not None and str(r.get("status", "")).startswith("Good")
+
+    for a in layout.get("areas", []):
+        alarms = [x for x in a.get("alarms", []) if x.get("node_id") not in hidden]
+        on = 0
+        readable_bits = 0
+        for x in alarms:
+            nid = x["node_id"]
+            target = f"{a.get('title', a.get('id'))} / {x.get('label') or x.get('name')}"
+            checked += 1
+            if nid in seen:
+                findings.append({"code": "alarm.duplicate", "severity": "warning", "target": target, "node_id": nid,
+                                 "message": f"The same tag is also on the dashboard as {seen[nid]}.",
+                                 "hint": "One of the two is probably meant to be a different bit. Edit or remove one."})
+            seen.setdefault(nid, target)
+            r = reads.get(nid)
+            if r is None:
+                findings.append({"code": "alarm.not_read", "severity": "error", "target": target, "node_id": nid,
+                                 "message": "This tag wasn't read.", "hint": "Run the check again; if it persists, send the debug bundle."})
+                continue
+            if not good_status(r):
+                bad_by_plc[plc_of(nid)] = bad_by_plc.get(plc_of(nid), 0) + 1
+                findings.append(_status_finding("alarm", target, nid, r.get("status", "?")))
+                continue
+            good += 1
+            vt = r.get("variant_type")
+            if vt and vt != "Boolean":
+                findings.append({"code": "alarm.not_bool", "severity": "warning", "target": target, "node_id": nid,
+                                 "message": f"This alarm is a {vt}, not a BOOL, so it counts as active whenever it isn't 0.",
+                                 "hint": "Pick the alarm bit itself, or move this tag to the area's values."})
+            readable_bits += 1
+            bit = _truthy(r.get("value"))
+            if bit:
+                on += 1
+            if bit != bool(invert.get(a.get("id"))):
+                active += 1
+            if nid in since:
+                changed += 1
+        if readable_bits >= INVERT_MIN_BITS and on / readable_bits >= INVERT_SHARE and not invert.get(a.get("id")):
+            findings.append({"code": "area.mostly_on", "severity": "warning", "target": a.get("title", a.get("id")),
+                             "message": f"{on} of {readable_bits} alarm bits here are on right now.",
+                             "hint": "If the machine is healthy, these bits mean OK (comms OK, guard closed). "
+                                     "Tick Edit and set this area to \"On means healthy\"."})
+
+    m = layout.get("machine") or {}
+    for nid in m.get("running", []):
+        r = reads.get(nid)
+        if not good_status(r):
+            findings.append(_status_finding("machine.running", "Machine running tag", nid, (r or {}).get("status", "not read")))
+    hb = m.get("heartbeat", [])
+    if not hb:
+        findings.append({"code": "heartbeat.none", "severity": "info", "target": "Heartbeat",
+                         "message": "No heartbeat tag, so frozen data can't be told apart from a quiet machine.",
+                         "hint": "Tick Edit and pick a tag the PLC changes all the time, such as a free-running "
+                                 "counter or a timer that always runs. A counter is better than a toggling bit."})
+    for nid in hb:
+        r = reads.get(nid)
+        if not good_status(r):
+            findings.append(_status_finding("heartbeat", "Heartbeat", nid, (r or {}).get("status", "not read")))
+        elif started is not None and now is not None:
+            age = now - since.get(nid, started)
+            if age > HEARTBEAT_STALE_S:
+                findings.append({"code": "heartbeat.frozen", "severity": "error", "target": "Heartbeat", "node_id": nid,
+                                 "message": f"The heartbeat hasn't changed for {int(age)} s.",
+                                 "hint": "The gateway may be serving old values: check FT Linx's connection to the PLC, "
+                                         "or pick a heartbeat that really changes all the time."})
+    order = {"error": 0, "warning": 1, "info": 2}
+    findings.sort(key=lambda f: order.get(f["severity"], 3))
+    summary = {"alarms": checked, "readable": good, "active": active, "changed": changed, "bad_by_plc": bad_by_plc,
+               "watching_s": int(now - started) if started is not None and now is not None else 0,
+               "errors": sum(f["severity"] == "error" for f in findings),
+               "warnings": sum(f["severity"] == "warning" for f in findings)}
+    return {"summary": summary, "findings": findings}

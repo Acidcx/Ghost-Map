@@ -2,7 +2,7 @@
 // Machine dashboards: layouts built on the server from a tag export, filled with live values that the
 // server reads (read-only) from the OPC UA gateway. Uses $, esc and api() from app.js.
 
-const mach = { list: [], dash: null, vals: null, timer: null, edit: false, axisDetail: {} };
+const mach = { list: [], dash: null, vals: null, timer: null, edit: false, axisDetail: {}, events: [], verify: null, verifying: false };
 const POLL_MS = 2000;
 const SEV_LABEL = { critical: "E-stop", fault: "fault", warning: "warning" };
 const RUN_RE = /(^|_)(line_)?run(ning)?($|_)|autorun|auto_running/i;
@@ -41,6 +41,8 @@ async function machineShow(id) {
   mach.dash = await api(`api/dashboards/${encodeURIComponent(id)}`);
   mach.vals = null;
   mach.axisDetail = {};
+  mach.events = [];
+  mach.verify = null;
   try { localStorage.setItem("gm.dash", id); } catch (_) { /* ignore */ }
   machineRender();
   machinePoll();
@@ -64,11 +66,13 @@ async function machinePoll() {
   if (document.hidden || $("#tab-machine").classList.contains("hidden")) return machineSchedule();
   const id = mach.dash.id;
   try {
-    const v = await api(`api/dashboards/${encodeURIComponent(id)}/values`);
+    // A read that hangs counts as no data: better "?" than old values that look live.
+    const v = await api(`api/dashboards/${encodeURIComponent(id)}/values`, { timeout: 10000 });
     if (mach.dash?.id !== id) return;
     mach.vals = v;
+    if (machineView() === "health") mach.events = (await api(`api/dashboards/${encodeURIComponent(id)}/health`)).events;
   } catch (e) {
-    mach.vals = { ok: false, error: e.message, values: {}, since: {}, bad: [] };
+    mach.vals = { ok: false, error: e.message, values: {}, since: {}, bad: [], health: mach.vals?.health };
   }
   machineRender();
   machineSchedule();
@@ -149,10 +153,12 @@ function machineRender() {
   const vals = mach.vals;
   const v = vals?.values || {};
 
+  const H = vals?.health || {};
+  const frozen = !!(vals?.ok && H.heartbeat?.frozen);
   $("#mLive").innerHTML = !vals ? `reading <span class="mono">${esc(d.endpoint)}</span>...`
-    : vals.ok ? `<span class="chip okchip">live</span> <span class="mono">${esc(d.endpoint)}</span> &middot; ${esc(new Date(vals.at * 1000).toLocaleTimeString())}
-      &middot; ${Object.keys(vals.values).length} tags${
-      vals.bad.length ? ` &middot; <span class="errtext">${vals.bad.length} not readable (renamed, or not on this server?)</span>` : ""}`
+    : vals.ok ? `<span class="chip ${frozen ? "errchip" : "okchip"}">${frozen ? "frozen?" : "live"}</span> <span class="mono">${esc(d.endpoint)}</span> &middot; ${esc(new Date(vals.at * 1000).toLocaleTimeString())}
+      &middot; ${Object.keys(vals.values).length} tags${H.latency_ms != null ? ` in ${esc(fmtMs(H.latency_ms))}` : ""}${
+      vals.bad.length ? ` &middot; <a href="#" data-view="health" class="errtext">${vals.bad.length} not readable</a>` : ""}`
       : `<span class="chip errchip">no data</span> <span class="errtext">${esc(vals.error)}</span>`;
 
   $("#mNotes").innerHTML = (L.notes || []).map((n) => `<details class="small muted"><summary>What was left out</summary>${esc(n)}</details>`).join("")
@@ -160,10 +166,12 @@ function machineRender() {
       Tags are picked from what Ghost Map found when the dashboard was built. <button class="btn ghost small" data-addarea="1">Add area</button></p>` : "");
 
   const states = L.areas.map((a, ai) => ({ a, ai, s: areaState(a) }));
+  let html0 = "";
   const active = states.flatMap(({ a, s }) => s.active.map((x) => ({ ...x, area: a })));
   const faultedAxes = states.flatMap(({ a, s }) => s.faultedAxes.map((x) => ({ ...x, area: a })));
   const count = (pred) => active.filter(pred).length;
-  const known = vals?.ok && vals.bad.length < Object.keys(vals.values).length;
+  // Frozen data (the heartbeat stopped) is treated as no data: alarms can't be trusted to show.
+  const known = vals?.ok && vals.bad.length < Object.keys(vals.values).length && !frozen;
   const run = runningState(L, v, known);
   const tiles = [];
   tiles.push(run
@@ -171,6 +179,8 @@ function machineRender() {
       title: `${run.ids.length} running tag${run.ids.length === 1 ? "" : "s"} (${(L.machine || {}).mode === "all" ? "all" : "any"} on = running)` }
     : { n: "-", l: "Machine", title: "No running tag yet: tick Edit and set one" });
   const faults = count((x) => x.severity !== "warning") + faultedAxes.length;
+  const comms = commsState(vals);
+  tiles.push({ n: comms.n, l: "Comms", cls: comms.cls, view: "health", title: comms.title, always: true });
   tiles.push(
     { n: known ? faults : "?", l: "Active faults", cls: faults ? "err" : "ok" },
     { n: known ? count((x) => x.severity === "warning") : "?", l: "Warnings", cls: count((x) => x.severity === "warning") ? "warn" : "ok" },
@@ -179,7 +189,7 @@ function machineRender() {
   );
   const axesTotal = states.reduce((n, { s }) => n + s.axes.length, 0);
   if (axesTotal) tiles.push({ n: known ? `${axesTotal - faultedAxes.length}/${axesTotal}` : "?", l: "Axes OK", cls: faultedAxes.length ? "err" : "ok", view: "drives" });
-  $("#mTiles").innerHTML = tiles.map((t, i) => `<div class="tile ${known ? t.cls || "" : ""} ${t.view ? "click" : ""}" ${t.view ? `data-view="${t.view}"` : ""}>
+  $("#mTiles").innerHTML = tiles.map((t, i) => `<div class="tile ${known || t.always ? t.cls || "" : ""} ${t.view ? "click" : ""}" ${t.view ? `data-view="${t.view}"` : ""}>
     <div class="n">${esc(t.n)}</div><div class="l" title="${esc(t.title || t.l)}">${esc(t.l)}</div>
     ${i === 0 && mach.edit ? `<button class="btn ghost small" data-editrun="1">Edit</button>` : ""}</div>`).join("");
 
@@ -198,14 +208,21 @@ function machineRender() {
     return { act, worst, alarms: sec.states.reduce((n, { s }) => n + s.alarms.length, 0) };
   };
   let view = machineView();
+  if (frozen) {
+    html0 = `<div class="mbanner"><b>Data may be frozen.</b> The heartbeat tag hasn't changed for ${esc(Math.round(H.heartbeat.age_s))} s,
+      so the gateway may be serving old values. Faults are shown as "?" until it moves again. <a href="#" data-view="health">Health</a></div>`;
+  } else if (vals?.ok && vals.bad.length) {
+    html0 = `<div class="mbanner warn">${vals.bad.length} of ${Object.keys(vals.values).length} tags aren't readable right now, so their alarms show grey (no data), not OK.
+      <a href="#" data-view="health">Which ones</a></div>`;
+  }
   if (view.startsWith("sec:") && !sections.some((x) => `sec:${x.name}` === view)) view = "overview";
   if (view === "drives" && !axesTotal) view = "overview";
   const dotFor = (w) => (w === "ok" ? "okon" : w === "err" ? "erron" : w === "warn" ? "warnon" : "unk");
-  $("#mNav").innerHTML = [["overview", "Overview", null], ...(axesTotal ? [["drives", `Drives (${axesTotal})`, faultedAxes.length ? "err" : known ? "ok" : ""]] : []),
+  $("#mNav").innerHTML = [["overview", "Overview", null], ["health", "Health", comms.cls], ...(axesTotal ? [["drives", `Drives (${axesTotal})`, faultedAxes.length ? "err" : known ? "ok" : ""]] : []),
     ...sections.map((sec) => [`sec:${sec.name}`, sectionName(sec.name), secInfo(sec).worst])]
     .map(([id, label, w]) => `<button class="${view === id ? "active" : ""}" data-view="${esc(id)}">${w !== null ? `<span class="dot ${dotFor(w)}"></span> ` : ""}${esc(label)}</button>`).join("");
 
-  let html = "";
+  let html = html0;
   if (view === "overview") {
     const rows = [...faultedAxes.map((x) => `<div class="malarm on"><span class="dot erron"></span><span class="l" title="${tip(x)}">${esc(x.label)}</span>
         <span class="sev error">axis ${esc(AXIS_STATES[x.st.state] || "fault")}</span><a href="#" class="small" data-view="drives">Drives</a></div>`),
@@ -229,6 +246,8 @@ function machineRender() {
     }).join("")}</div>`;
   } else if (view === "drives") {
     html = drivesTable(states, v, known);
+  } else if (view === "health") {
+    html = healthView(L, vals);
   } else {
     const sec = sections.find((x) => `sec:${x.name}` === view);
     const rank = ({ s }) => (s.active.some((x) => x.severity === "critical") ? 0
@@ -245,6 +264,81 @@ function machineRender() {
     }
   }
   $("#mAreas").innerHTML = html;
+}
+
+function fmtMs(ms) { return ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms)} ms`; }
+function fmtAge(s) { return s < 90 ? `${Math.round(s)} s` : s < 5400 ? `${Math.round(s / 60)} min` : `${(s / 3600).toFixed(1)} h`; }
+const fmtClock = (t) => (t ? new Date(t * 1000).toLocaleTimeString() : "-");
+
+// Comms tile: share of the dashboard's tags that read Good, and whether the heartbeat is moving.
+function commsState(vals) {
+  const H = vals?.health;
+  if (!vals) return { n: "...", cls: "", title: "Reading" };
+  if (!vals.ok || !H || !H.total) return { n: "down", cls: "err", title: vals.error || "No data from the gateway" };
+  const pct = Math.floor((H.good / H.total) * 1000) / 10;
+  if (H.heartbeat?.frozen) return { n: "frozen", cls: "err", title: "The heartbeat tag stopped changing" };
+  return { n: `${pct}%`, cls: H.good === H.total ? "ok" : pct >= 95 ? "warn" : "err",
+    title: `${H.good} of ${H.total} tags read Good; last read ${fmtMs(H.latency_ms)}` };
+}
+
+const EVENT_LABEL = { connected: "Connected", drop: "Dropped", reconnected: "Reconnected", error: "Error", coverage: "Tags" };
+
+function healthView(L, vals) {
+  const H = vals?.health || {};
+  const hb = H.heartbeat || {};
+  const m = L.machine || {};
+  const now = Date.now() / 1000;
+  const hbState = !m.heartbeat?.length ? `<span class="muted">not set</span>`
+    : !hb.good ? `<span class="errtext">not readable</span>`
+      : hb.frozen ? `<span class="errtext">frozen ${esc(fmtAge(hb.age_s))}</span>`
+        : `<span class="oktext">moving</span> <span class="small muted">changed ${esc(fmtAge(hb.age_s))} ago</span>`;
+  const cell = (k, val, tip = "") => `<div title="${esc(tip)}"><div class="k">${k}</div><div class="v">${val}</div></div>`;
+  const pct = H.total ? `${H.good} of ${H.total} (${Math.floor((H.good / H.total) * 1000) / 10}%)` : "-";
+  let html = `<div class="panel"><h3>Comms with the gateway</h3>
+    <p class="small muted">Measured on the reads behind this dashboard, while someone has it open. A tag that doesn't read Good shows grey (no data), never OK.</p>
+    <div class="mhealth">
+      ${cell("Connection", vals?.ok ? `<span class="oktext">reading</span> <span class="small muted">since ${esc(fmtClock(H.connected_at))}</span>` : `<span class="errtext">no data</span>`, vals?.error || "")}
+      ${cell("Tags read Good", `<span class="${H.good === H.total ? "" : "errtext"}">${esc(pct)}</span>`)}
+      ${cell("Read time", H.latency_ms != null ? `${esc(fmtMs(H.latency_ms))} <span class="small muted">avg ${esc(fmtMs(H.latency_avg_ms))}, max ${esc(fmtMs(H.latency_max_ms))}</span>` : "-")}
+      ${cell("Last good read", H.last_ok ? `${esc(fmtClock(H.last_ok))} <span class="small muted">${esc(fmtAge(now - H.last_ok))} ago</span>` : "-")}
+      ${cell("Drops / reconnects", `${H.drops || 0} / ${H.reconnects || 0}`, "Since this dashboard was first opened after Ghost Map started")}
+      ${cell("Heartbeat", hbState, m.heartbeat?.[0] || "A tag the PLC changes all the time")}
+      ${cell("Any tag changed", H.last_any_change ? `${esc(fmtAge(now - H.last_any_change))} ago` : "-", "Last time any value on this dashboard changed")}
+    </div>
+    <p class="small">Heartbeat tag: <span class="mono" title="${esc(m.heartbeat?.[0] || "")}">${esc(shortId(m.heartbeat?.[0])) || "none"}</span>
+      ${mach.edit ? `<button class="btn ghost small" data-hbpick="1">Change</button>${m.heartbeat?.length ? ` <button class="btn ghost small" data-hbclear="1">Clear</button>` : ""}`
+        : `<span class="small muted admin-only">(tick Edit to change it)</span>`}</p>
+    ${!m.heartbeat?.length ? `<p class="hint small">Without a heartbeat, frozen data looks the same as a quiet machine. Pick a tag the PLC changes all the time:
+      a free-running counter or a timer that always runs. A counter is better than a toggling bit.</p>` : ""}`;
+  const bad = Object.entries(H.bad_status || {});
+  if (bad.length) {
+    html += `<h4>Not reading Good</h4><p class="small">${Object.entries(H.bad_by_plc || {}).map(([p, n]) => `<b>${esc(p)}</b>: ${n}`).join(" &middot; ")}</p>
+      <div class="tablewrap"><table><tr><th>Tag</th><th>Status</th></tr>${bad.map(([nid, st]) => `<tr><td class="mono small" title="${esc(nid)}">${esc(shortId(nid))}</td><td class="small errtext">${esc(st)}</td></tr>`).join("")}</table></div>
+      ${(vals?.bad || []).length > bad.length ? `<p class="small muted">Showing the first ${bad.length}.</p>` : ""}`;
+  }
+  html += `<h4>Connection history</h4>${mach.events.length ? `<div class="tablewrap"><table><tr><th>Time</th><th>Event</th><th>Detail</th></tr>
+    ${mach.events.slice(0, 50).map((e) => `<tr><td class="small nowrap">${esc(new Date(e.at * 1000).toLocaleString())}</td>
+      <td class="small ${e.kind === "drop" || e.kind === "error" ? "errtext" : ""}">${esc(EVENT_LABEL[e.kind] || e.kind)}</td>
+      <td class="small">${esc(e.detail)}${e.repeats ? ` <span class="muted">(&times;${e.repeats}, last ${esc(fmtClock(e.last))})</span>` : ""}</td></tr>`).join("")}</table></div>`
+    : `<p class="small muted">Nothing yet.</p>`}</div>`;
+
+  const r = mach.verify;
+  const sevCls = { error: "error", warning: "warning", info: "info" };
+  html += `<div class="panel"><div class="uahead"><h3>Alarm check</h3>
+      <button class="btn small" data-verify="1" ${mach.verifying ? "disabled" : ""}>${mach.verifying ? "Checking..." : r ? "Check again" : "Check all alarms"}</button></div>
+    <p class="small muted">Reads every alarm, running and heartbeat tag once and flags the ones that can't be trusted to show a fault:
+      tags the gateway doesn't know, tags it can't read, alarms that aren't BOOLs, and areas where most bits are on (probably "on = OK").</p>
+    ${!r ? "" : r.error ? `<p class="errtext">${esc(r.error)}</p>` : `<p>${r.summary.readable} of ${r.summary.alarms} alarms readable &middot; ${r.summary.active} active now
+      &middot; ${r.summary.changed} changed while watched${r.summary.watching_s ? ` (${esc(fmtAge(r.summary.watching_s))})` : ""}
+      &middot; <b class="${r.summary.errors ? "errtext" : "oktext"}">${r.summary.errors} problems</b>, ${r.summary.warnings} warnings
+      <span class="small muted">at ${esc(r.at)}</span></p>
+      ${r.findings.length ? `<div class="tablewrap"><table class="mfind">${r.findings.map((f) => `<tr><td><span class="sev ${sevCls[f.severity]}">${esc(f.severity)}</span></td>
+        <td><b title="${esc(f.node_id || "")}">${esc(f.target)}</b><div class="small">${esc(f.message)}</div><div class="hint small">${esc(f.hint)}</div></td>
+        <td class="small muted mono">${esc(f.code)}</td></tr>`).join("")}</table></div>` : `<p class="small"><span class="dot okon"></span> Every alarm read Good and looks right.</p>`}`}
+  </div>`;
+  html += `<div class="panel admin-only"><h3>Debug</h3><p class="small muted">Ghost Map's own log (errors, drops, reconnects) and a bundle to send when reporting a problem.</p>
+    <button class="btn ghost small" data-debuglog="1">Show the log</button> <a class="btn ghost small" href="api/debug/bundle" download>Download debug bundle</a></div>`;
+  return html;
 }
 
 function drivesTable(states, v, known) {
@@ -377,7 +471,26 @@ document.querySelector("#tab-machine").addEventListener("click", async (e) => {
   }
   const t = e.target.dataset;
   try {
-    if (t.editrun) {
+    if (t.verify) {
+      mach.verifying = true;
+      machineRender();
+      try {
+        mach.verify = { ...(await api(`api/dashboards/${encodeURIComponent(mach.dash.id)}/verify`)), at: new Date().toLocaleTimeString() };
+      } catch (err) { mach.verify = { error: err.message }; }
+      mach.verifying = false;
+      machineRender();
+    } else if (t.debuglog) {
+      $("#debugBtn").click();
+    } else if (t.hbpick || t.hbclear) {
+      const L = layoutCopy();
+      L.machine = { ...(L.machine || {}), heartbeat: [] };
+      if (t.hbpick) {
+        const tag = await pickTag("Pick a tag the PLC changes all the time (a counter or a running timer)", "heartbeat");
+        if (!tag) return;
+        L.machine.heartbeat = [tag.node_id];
+      }
+      await machineSaveLayout(L);
+    } else if (t.editrun) {
       e.stopPropagation();
       runningDialog();
     } else if (t.edit) {

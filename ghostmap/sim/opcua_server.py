@@ -96,7 +96,7 @@ class SimUaServer:
         self.server.set_endpoint(self.endpoint)
         self.server.set_server_name("Ghost Map simulated FactoryTalk Linx Gateway")
         self.server.set_security_policy([ua.SecurityPolicyType.NoSecurity])
-        ns = await self.server.register_namespace(NS_URI)
+        ns = self._ns = await self.server.register_namespace(NS_URI)
         root = await self.server.nodes.objects.add_folder(ua.NodeId("FTLinxGateway", ns),
                                                           ua.QualifiedName("FactoryTalk Linx Gateway", ns))
         for shortcut, m in MACHINES.items():
@@ -155,6 +155,8 @@ class SimUaServer:
         nodes = {}
         for name, v in LEVELER_PRODUCTION.items():
             nodes[name] = await self._var(prod, ns, f"{base}.Production.{name}", name, v)
+        # A controller-scope heartbeat counter the PLC bumps every second (for the comms health check).
+        hb = await self._var(folder, ns, f"{sc}Heartbeat", "Heartbeat", 0)
         # Controller-scope axis, an I/O module tag and a long recipe array (the last two should be left out).
         axis = await obj(folder, f"{sc}Ax_Leveler_Roll", "Ax_Leveler_Roll")
         axis_nodes = {}
@@ -166,7 +168,7 @@ class SimUaServer:
         for i in range(100):
             await self._var(recipe, ns, f"{base}.Production.Recipe_Length[{i}]", f"Recipe_Length[{i}]", 0.0)
         self._lev = {"axis": axis_nodes, "bits": bits, "prod": nodes, "active": None, "ft": float(LEVELER_PRODUCTION["Footage_Count"]),
-                     "coil_ft": 0.0, "coils": LEVELER_PRODUCTION["Coil_Count"]}
+                     "coil_ft": 0.0, "coils": LEVELER_PRODUCTION["Coil_Count"], "hb": hb}
 
     async def _tick_leveler(self, n: int):
         lev = self._lev
@@ -179,6 +181,8 @@ class SimUaServer:
         elif n % 20 == 12 and lev["active"] is not None:
             await lev["active"].write_value(ua.Variant(False, ua.VariantType.Boolean))
             lev["active"] = None
+        if not lev.get("hb_frozen"):
+            await lev["hb"].write_value(ua.Variant(n, ua.VariantType.Int32))
         running = lev["active"] is None
         p = lev["prod"]
         await p["Line_Running"].write_value(ua.Variant(running, ua.VariantType.Boolean))
@@ -214,6 +218,23 @@ class SimUaServer:
                 if random.random() < 0.8:
                     counts[node] += 1
                     await node.write_value(ua.Variant(counts[node], ua.VariantType.Int32))
+
+    async def fault_comms(self, area: str, lost: bool = True) -> int:
+        """Make one LEVELER_01 fault area read as BadCommunicationError, like FT Linx when it loses the PLC
+        (tests). Returns how many tags changed."""
+        n = 0
+        code = ua.StatusCode(ua.StatusCodes.BadCommunicationError if lost else ua.StatusCodes.Good)
+        for name, v in LEVELER_FAULTS[area].items():
+            if isinstance(v, bool):
+                node = self.server.get_node(ua.NodeId(f"::[LEVELER_01]Program:MainProgram.FAULT.{area}.{name}", self._ns))
+                await node.write_value(ua.DataValue(ua.Variant(v, ua.VariantType.Boolean), code))
+                n += 1
+        return n
+
+    def freeze_heartbeat(self, frozen: bool = True) -> None:
+        """Stop the heartbeat counter, like a gateway serving stale values (tests)."""
+        if self._lev:
+            self._lev["hb_frozen"] = frozen
 
     async def stop(self):
         if self._task:

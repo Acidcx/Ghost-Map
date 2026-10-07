@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -24,7 +25,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from ghostmap import __version__
+from ghostmap import __version__, debuglog
 from ghostmap.analysis.diff import diff_scans
 from ghostmap.collectors import discovery
 from ghostmap.models import to_dict
@@ -34,9 +35,13 @@ from ghostmap.store import ScanStore, inventory_csv
 from ghostmap.web.auth import AuditLog, Lockout, Sessions, UserStore, client_allowed
 from ghostmap.web.dashboards import DashboardStore, LiveValues, visible_node_ids
 
-UA_IDLE_S = 600        # drop OPC UA sessions nobody has used for 10 minutes
+UA_IDLE_S = 600        # close OPC UA sessions nobody has used for 10 minutes (re-opened on next use)
+UA_FORGET_S = 8 * 3600  # forget them (and the login kept for re-opening) after 8 hours
 UA_MAX_SESSIONS = 4
 DEMO_UA_PORT = 4899    # not 4990, so the demo never collides with a real FT Linx Gateway on the HMI
+
+CLIENT_LOG_PER_MIN = 30  # browser error reports accepted per client per minute
+log = logging.getLogger("ghostmap.web")
 
 STATIC = Path(__file__).parent / "static"
 SESSION_COOKIE = "gm_session"
@@ -83,6 +88,14 @@ class UaNodeIn(BaseModel):
 class UaReadIn(BaseModel):
     sid: str
     node_ids: list[str] = Field(..., max_length=200)
+
+
+class ClientLogIn(BaseModel):
+    message: str = Field("", max_length=2000)
+    source: str = Field("", max_length=300)
+    line: int = 0
+    stack: str = Field("", max_length=4000)
+    page: str = Field("", max_length=100)
 
 
 class DashboardIn(BaseModel):
@@ -140,7 +153,7 @@ def _is_loopback(host: str) -> bool:
 def _needs_admin(request: Request) -> bool:
     """Anything that sends traffic or changes data."""
     path = request.url.path
-    if path in ("/api/login", "/api/logout"):
+    if path in ("/api/login", "/api/logout", "/api/clientlog"):  # clientlog only writes to the log file
         return False
     return request.method not in ("GET", "HEAD") or path.startswith("/api/probe/")
 
@@ -154,7 +167,8 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     """
     if demo_opcua is None:
         demo_opcua = demo
-    ua_sessions: dict[str, list] = {}  # sid -> [UaBrowser, last_used, info]
+    # sid -> [UaBrowser or None (closed while idle or after a drop), last_used, info, connect args]
+    ua_sessions: dict[str, list] = {}
     demo_ua: dict = {}
 
     demo_ua_lock = asyncio.Lock()
@@ -186,8 +200,9 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         if demo_opcua:
             await start_demo_ua()
         yield
-        for b, _, _ in list(ua_sessions.values()):
-            await b.disconnect()
+        for b, *_ in list(ua_sessions.values()):
+            if b is not None:
+                await b.disconnect()
         await live.close()
         if "server" in demo_ua:
             await demo_ua["server"].stop()
@@ -195,6 +210,9 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     app = FastAPI(title="Ghost Map", version=__version__, docs_url=None, redoc_url=None, openapi_url=None,
                   lifespan=lifespan)
     store = ScanStore(data_dir)
+    log_path = debuglog.setup(store.root)
+    started = time.time()
+    log.info("Ghost Map %s starting; data in %s", __version__, store.root)
     users = UserStore(store.root)
     sessions = Sessions()
     lockout = Lockout()
@@ -203,6 +221,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     dashboards = DashboardStore(store.root)
     live = LiveValues(resolve_ua_url)
     tasks: set[asyncio.Task] = set()
+    app.state.demo_ua, app.state.live, app.state.ua_sessions = demo_ua, live, ua_sessions  # for tests
 
     def client_of(request: Request) -> str:
         return request.client.host if request.client else ""
@@ -224,7 +243,13 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
                 return JSONResponse({"detail": "login required"}, status_code=401, headers=SECURITY_HEADERS)
             if _needs_admin(request) and session.role != "admin":
                 return JSONResponse({"detail": "admin role required"}, status_code=403, headers=SECURITY_HEADERS)
-        response = await call_next(request)
+        try:
+            response = await call_next(request)
+        except Exception as exc:  # anything not handled below: log the stack trace, answer with a reference
+            ref = uuid.uuid4().hex[:8]
+            log.exception("unhandled error %s on %s %s", ref, request.method, path)
+            return JSONResponse({"detail": f"Internal error {ref} ({type(exc).__name__}). "
+                                           "Details are in the debug log."}, status_code=500, headers=SECURITY_HEADERS)
         for k, v in SECURITY_HEADERS.items():
             response.headers.setdefault(k, v)
         return response
@@ -346,26 +371,72 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         return users.list()
 
     # ------------------------------------------------------------- OPC UA tag browser (read-only)
-    def ua_get(sid: str):
+    async def ua_open(args: dict):
+        from ghostmap.collectors.opcua import UaBrowser
+
+        try:
+            browser = UaBrowser(await resolve_ua_url(args["url"]))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        try:
+            info = await ua_call(browser.connect(args["security"], args["mode"], args["username"], args["password"],
+                                                 pki_dir=store.root / "pki"))
+        except HTTPException:
+            await browser.disconnect()
+            raise
+        return browser, info
+
+    def ua_entry(sid: str) -> list:
         now = time.time()
-        for k, (b, last, _) in list(ua_sessions.items()):
-            if now - last > UA_IDLE_S:
+        for k, entry in list(ua_sessions.items()):
+            if now - entry[1] > UA_FORGET_S:
                 ua_sessions.pop(k, None)
+            if now - entry[1] > UA_IDLE_S and entry[0] is not None:
+                b, entry[0] = entry[0], None  # closed now, re-opened on next use
+                log.info("opcua session %s idle, closed (re-opens on next use)", k[:8])
                 asyncio.create_task(b.disconnect())
         entry = ua_sessions.get(sid)
         if entry is None:
             raise HTTPException(404, "OPC UA session closed; connect again")
         entry[1] = now
+        return entry
+
+    async def ua_get(sid: str):
+        """The session's browser, re-opened if it was closed while idle or dropped."""
+        entry = ua_entry(sid)
+        if entry[0] is None:
+            entry[0], _ = await ua_open(entry[3])
+            log.info("opcua session %s re-opened to %s", sid[:8], entry[0].url)
         return entry[0]
+
+    async def ua_run(sid: str, fn):
+        """Run ``fn(browser)`` on a Tag Browser session; if the connection dropped, re-open it and retry once."""
+        from ghostmap.collectors.opcua import is_connection_error
+
+        for attempt in (1, 2):
+            browser = await ua_get(sid)
+            try:
+                return await asyncio.wait_for(fn(browser), timeout=60)
+            except HTTPException:
+                raise
+            except Exception as exc:
+                entry = ua_sessions.get(sid)
+                if attempt == 1 and is_connection_error(exc) and entry is not None and entry[0] is browser:
+                    log.warning("opcua session %s to %s dropped (%s: %s); re-opening", sid[:8], browser.url,
+                                type(exc).__name__, exc)
+                    entry[0] = None
+                    await browser.disconnect()
+                    continue
+                log.warning("opcua request on %s failed: %s: %s", browser.url, type(exc).__name__, exc)
+                raise HTTPException(502, f"{type(exc).__name__}: {exc}")
 
     async def ua_call(coro):
         try:
             return await asyncio.wait_for(coro, timeout=60)
         except HTTPException:
             raise
-        except (ValueError, asyncio.TimeoutError, OSError) as exc:
-            raise HTTPException(502, f"{type(exc).__name__}: {exc}")
         except Exception as exc:  # asyncua raises its own error types (BadNodeIdUnknown, ...)
+            log.warning("opcua call failed: %s: %s", type(exc).__name__, exc)
             raise HTTPException(502, f"{type(exc).__name__}: {exc}")
 
     @app.post("/api/opcua/endpoints")
@@ -381,19 +452,17 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
 
     @app.post("/api/opcua/connect")
     async def ua_connect(body: UaConnectIn, request: Request):
-        from ghostmap.collectors.opcua import UaBrowser
-
         if len(ua_sessions) >= UA_MAX_SESSIONS:
             oldest = min(ua_sessions, key=lambda k: ua_sessions[k][1])
-            await ua_sessions.pop(oldest)[0].disconnect()
-        try:
-            browser = UaBrowser(await resolve_ua_url(body.url))
-        except ValueError as exc:
-            raise HTTPException(400, str(exc))
-        info = await ua_call(browser.connect(body.security, body.mode, body.username, body.password,
-                                             pki_dir=store.root / "pki"))
+            b = ua_sessions.pop(oldest)[0]
+            if b is not None:
+                await b.disconnect()
+        args = {"url": body.url, "security": body.security, "mode": body.mode, "username": body.username,
+                "password": body.password}
+        browser, info = await ua_open(args)
         sid = uuid.uuid4().hex
-        ua_sessions[sid] = [browser, time.time(), info]
+        ua_sessions[sid] = [browser, time.time(), info, args]
+        log.info("opcua session %s connected to %s (security %s)", sid[:8], browser.url, body.security)
         audit.write(client_of(request), who(request), "opcua.connect",
                     f"{browser.url} security={body.security} user={body.username or 'anonymous'}")
         return {"sid": sid, **info}
@@ -401,23 +470,23 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     @app.post("/api/opcua/disconnect")
     async def ua_disconnect(body: UaNodeIn):
         entry = ua_sessions.pop(body.sid, None)
-        if entry:
+        if entry and entry[0] is not None:
             await entry[0].disconnect()
         return {"ok": True}
 
     @app.post("/api/opcua/browse")
     async def ua_browse(body: UaNodeIn):
-        return await ua_call(ua_get(body.sid).browse(body.node_id))
+        return await ua_run(body.sid, lambda b: b.browse(body.node_id))
 
     @app.post("/api/opcua/attributes")
     async def ua_attributes(body: UaNodeIn):
         if not body.node_id:
             raise HTTPException(400, "node_id required")
-        return await ua_call(ua_get(body.sid).attributes(body.node_id))
+        return await ua_run(body.sid, lambda b: b.attributes(body.node_id))
 
     @app.post("/api/opcua/read")
     async def ua_read(body: UaReadIn):
-        return await ua_call(ua_get(body.sid).read(body.node_ids))
+        return await ua_run(body.sid, lambda b: b.read(body.node_ids))
 
     ua_exports: dict[str, dict] = {}
 
@@ -427,7 +496,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
 
         Whole controllers can take minutes, so this doesn't hold the HTTP request open.
         """
-        browser = ua_get(body.sid)
+        browser = await ua_get(body.sid)
         audit.write(client_of(request), who(request), "opcua.export", f"{browser.url} {body.node_id or 'Objects'}")
         for k in [k for k, j in ua_exports.items() if j["status"] != "running"][:-4]:
             ua_exports.pop(k, None)  # keep only the last few finished exports in memory
@@ -447,6 +516,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
             except Exception as exc:
                 job["error"] = f"{type(exc).__name__}: {exc}"
                 job["status"] = "failed"
+                log.warning("tag export from %s failed after %d nodes: %s", browser.url, job["visited"], job["error"])
 
         task = asyncio.create_task(worker())
         tasks.add(task)
@@ -577,6 +647,65 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
 
         dash = load_dashboard(dash_id)
         return await live.read(dash, visible_node_ids(dash, node_ids(dash["layout"])))
+
+    @app.get("/api/dashboards/{dash_id}/health")
+    def dashboard_health(dash_id: str):
+        """Comms health and connection history of the dashboard's live reads (reads nothing)."""
+        return live.health(load_dashboard(dash_id))
+
+    @app.get("/api/dashboards/{dash_id}/verify")
+    async def dashboard_verify(dash_id: str):
+        """Read every alarm, running and heartbeat tag once and report the ones that can't be trusted."""
+        from ghostmap.analysis.dashboard import verify_layout
+
+        dash = load_dashboard(dash_id)
+        L = dash["layout"]
+        m = L.get("machine") or {}
+        ids = list(dict.fromkeys([x["node_id"] for a in L["areas"] for x in a.get("alarms", [])]
+                                 + m.get("running", []) + m.get("heartbeat", [])))
+        r = await live.read_once(dash, ids, rows=True)
+        if not r["ok"]:
+            return {"ok": False, "error": r["error"]}
+        out = verify_layout(L, dash.get("overrides", {}), r["rows"], live.history(dash))
+        log.info("dashboard %s alarm check: %s", dash_id, {k: v for k, v in out["summary"].items() if k != "bad_by_plc"})
+        return {"ok": True, "error": None, **out}
+
+    # ------------------------------------------------------------- debug log
+    client_log_seen: dict[str, list[float]] = {}
+
+    @app.post("/api/clientlog")
+    def client_log(body: ClientLogIn, request: Request):
+        """Errors from the browser (uncaught exceptions on a page), written to the debug log."""
+        client = client_of(request)
+        now = time.time()
+        recent = [t for t in client_log_seen.get(client, []) if now - t < 60]
+        if len(recent) >= CLIENT_LOG_PER_MIN:
+            return {"ok": False}
+        client_log_seen[client] = recent + [now]
+        log.warning("browser error on %s page from %s (%s): %s at %s:%d\n%s", body.page or "?", client,
+                    who(request) or "-", body.message, body.source, body.line, body.stack)
+        return {"ok": True}
+
+    def debug_info() -> dict:
+        return {"version": __version__, "data_dir": str(store.root), "log": str(log_path), "uptime_s": int(time.time() - started),
+                "dashboards": [{k: d[k] for k in ("id", "name", "endpoint", "summary")} for d in dashboards.list()],
+                "comms": live.snapshot(),
+                "opcua_sessions": [{"url": e[3]["url"], "open": e[0] is not None, "idle_s": int(time.time() - e[1]),
+                                    "security": e[3]["security"]} for e in ua_sessions.values()]}
+
+    @app.get("/api/debug/log")
+    def debug_log(request: Request, lines: int = 300):
+        require_admin(request)
+        return PlainTextResponse(debuglog.tail(store.root, min(max(lines, 1), 5000)))
+
+    @app.get("/api/debug/bundle")
+    def debug_bundle(request: Request):
+        """Zip of the log files and versions/comms health, to send when reporting a problem. No tag values."""
+        require_admin(request)
+        audit.write(client_of(request), who(request), "debug.bundle")
+        name = f"ghostmap-debug-{time.strftime('%Y%m%d-%H%M%S')}.zip"
+        return Response(debuglog.bundle(store.root, debug_info()), media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
     @app.get("/api/scans")
     def list_scans():

@@ -88,6 +88,24 @@ def jsonable(v: Any, depth: int = 0) -> Any:
     return str(v)
 
 
+# Status codes that mean the session or the connection is gone (not a problem with one tag).
+_SESSION_LOST = {"BadSessionIdInvalid", "BadSessionClosed", "BadSessionNotActivated", "BadConnectionClosed",
+                 "BadSecureChannelClosed", "BadSecureChannelIdInvalid", "BadNotConnected", "BadServerHalted",
+                 "BadServerNotConnected", "BadTimeout", "BadCommunicationError", "BadShutdown",
+                 "BadTooManySessions", "BadNoCommunication"}
+
+
+def is_connection_error(exc: BaseException) -> bool:
+    """True when ``exc`` means the OPC UA connection should be re-opened (vs. a bad request)."""
+    import asyncio
+
+    if isinstance(exc, (ConnectionError, asyncio.TimeoutError, TimeoutError, OSError)):
+        return True
+    if isinstance(exc, ua.UaStatusCodeError):
+        return type(exc).__name__ in _SESSION_LOST or ua.StatusCode(exc.code).name in _SESSION_LOST
+    return "closed" in str(exc).lower() or "not connected" in str(exc).lower()
+
+
 def _status(dv: ua.DataValue) -> str:
     code = dv.StatusCode
     return code.name if code is not None else "Good"

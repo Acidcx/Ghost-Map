@@ -197,7 +197,43 @@ def test_clean_layout_checks_running_tags():
     L = build_layout(ROWS)
     known = {r["node_id"] for r in ROWS}
     L["machine"] = {"running": [ROWS[0]["node_id"]], "mode": "all"}
-    assert clean_layout(L, known)["machine"] == {"running": [ROWS[0]["node_id"]], "mode": "all"}
+    assert clean_layout(L, known)["machine"] == {"running": [ROWS[0]["node_id"]], "mode": "all", "heartbeat": []}
     L["machine"]["running"] = ["ns=2;s=Made.Up"]
     with pytest.raises(ValueError):
         clean_layout(L, known)
+
+
+def test_verify_layout_flags_alarms_that_cant_be_trusted():
+    from ghostmap.analysis.dashboard import node_ids, verify_layout
+
+    def alarm(name):
+        return {"name": name, "label": name, "node_id": f"ns=2;s=[PLC1]FAULT.Comms.{name}", "severity": "fault",
+                "category": "comms"}
+
+    bits = [alarm(n) for n in ("Rack1_OK", "Rack2_OK", "Rack3_OK", "Rack4_OK")]
+    gone, word = alarm("Old_Name_Flt"), alarm("Fault_Code")
+    L = {"areas": [{"id": "Comms", "title": "Comms", "alarms": bits},
+                   {"id": "General", "title": "General", "alarms": [gone, word, dict(word, label="again")]}],
+         "machine": {"running": ["ns=2;s=[PLC1]RunF"], "heartbeat": []}}
+    assert "ns=2;s=[PLC1]RunF" in node_ids(L)  # machine tags are read even when no area shows them
+    reads = {b["node_id"]: {"status": "Good", "variant_type": "Boolean", "value": True} for b in bits}
+    reads[gone["node_id"]] = {"status": "BadNodeIdUnknown", "variant_type": None, "value": None}
+    reads[word["node_id"]] = {"status": "Good", "variant_type": "Int32", "value": 0}
+    reads["ns=2;s=[PLC1]RunF"] = {"status": "BadCommunicationError", "variant_type": None, "value": None}
+    out = verify_layout(L, {}, reads)
+    codes = [f["code"] for f in out["findings"]]
+    assert {"alarm.missing", "machine.running.unreadable", "alarm.not_bool", "alarm.duplicate", "area.mostly_on",
+            "heartbeat.none"} <= set(codes)
+    assert all(f["hint"] for f in out["findings"])
+    assert out["summary"]["bad_by_plc"] == {"PLC1": 1} and out["summary"]["active"] == 4
+    # Flipped to "on means healthy": the OK bits are no longer active, and no longer flagged.
+    flipped = verify_layout(L, {"invert": {"Comms": True}}, reads)
+    assert "area.mostly_on" not in {f["code"] for f in flipped["findings"]} and flipped["summary"]["active"] == 0
+
+
+def test_heartbeat_guess_prefers_counters():
+    rows = [{"path": "Online/Prog/HMI_Heartbeat", "node_id": "ns=2;s=::[P]Program:Prog.HMI_Heartbeat", "type": "Boolean", "value": True},
+            {"path": "Online/Heartbeat_Cnt", "node_id": "ns=2;s=::[P]Heartbeat_Cnt", "type": "Int32", "value": 5},
+            {"path": "Online/FAULT/E_Stop_Flt", "node_id": "ns=2;s=::[P]FAULT.E_Stop_Flt", "type": "Boolean", "value": False}]
+    assert build_layout(rows)["machine"]["heartbeat"] == ["ns=2;s=::[P]Heartbeat_Cnt"]
+    assert build_layout(rows[2:])["machine"]["heartbeat"] == []

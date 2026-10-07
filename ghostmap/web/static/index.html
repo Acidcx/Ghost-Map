@@ -16,6 +16,7 @@
         <select id="scanSelect"></select>
         <a id="csvLink" class="btn ghost" href="#" download>Export CSV</a>
       </span>
+      <button id="debugBtn" class="btn ghost admin-only" title="Ghost Map's own log: errors, OPC UA drops and reconnects">Debug log</button>
       <button id="newScanBtn" class="btn primary admin-only">New scan</button>
       <span id="who" class="who hidden"><span id="whoName"></span>
         <button id="usersBtn" class="btn ghost admin-only">Users</button>
@@ -217,6 +218,18 @@
         <button type="submit" class="btn primary">Create admin</button>
       </div>
     </form>
+  </dialog>
+
+  <dialog id="debugDialog" class="wide">
+    <h3>Debug log</h3>
+    <p class="small muted">Errors, OPC UA drops and reconnects, and errors from this page, newest at the bottom.
+      The bundle zips this log with version and comms details (no tag values; it does include gateway addresses and user names).</p>
+    <pre id="debugText" class="logbox"></pre>
+    <div class="actions">
+      <a class="btn" href="api/debug/bundle" download>Download debug bundle</a>
+      <button type="button" class="btn ghost" id="debugRefresh">Refresh</button>
+      <button type="button" class="btn" id="debugClose">Close</button>
+    </div>
   </dialog>
 
   <dialog id="usersDialog">

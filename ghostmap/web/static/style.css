@@ -235,3 +235,14 @@ table.mdrives tr.bad td { background: color-mix(in srgb, var(--err) 8%, transpar
 .tile { position: relative; }
 .tile [data-editrun] { position: absolute; top: 8px; right: 8px; }
 details.small summary { cursor: pointer; }
+
+/* Debug log and machine health */
+.logbox { max-height: 55vh; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
+  padding: 8px; font-size: 11px; white-space: pre-wrap; word-break: break-word; }
+.mhealth { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px 16px; margin-bottom: 8px; }
+.mhealth .k { color: var(--muted); font-size: 12px; }
+.mhealth .v { font-weight: 600; }
+.mbanner { border: 1px solid var(--err); border-radius: 8px; padding: 8px 12px; margin-bottom: 10px; }
+.mbanner.warn { border-color: var(--warn); }
+table.mfind td { vertical-align: top; }
+.oktext { color: var(--ok); }

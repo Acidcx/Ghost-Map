@@ -9,8 +9,20 @@ const state = { scans: [], scan: null, findingsByTarget: {}, devSort: { key: "ip
 
 // Paths are relative (no leading "/") so the UI also works under the IXON HTTP proxy's path prefix.
 // X-Ghostmap marks requests as coming from this page; the server rejects state changes without it.
+// opts.timeout (ms, default 120 s): give up on a request that hangs, so pages show "no data" instead of
+// old values when the server or the network stops answering.
 async function api(path, opts = {}) {
-  const res = await fetch(path, { headers: { "Content-Type": "application/json", "X-Ghostmap": "1" }, ...opts });
+  const { timeout = 120000, ...rest } = opts;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeout);
+  let res;
+  try {
+    res = await fetch(path, { headers: { "Content-Type": "application/json", "X-Ghostmap": "1" }, signal: ctl.signal, ...rest });
+  } catch (e) {
+    throw new Error(e.name === "AbortError" ? `no answer from Ghost Map after ${Math.round(timeout / 1000)} s` : `can't reach Ghost Map (${e.message})`);
+  } finally {
+    clearTimeout(timer);
+  }
   if (res.status === 401) { location.href = "login"; throw new Error("login required"); }
   if (!res.ok) {
     let msg = res.statusText;
@@ -19,6 +31,16 @@ async function api(path, opts = {}) {
   }
   return res.json();
 }
+
+// Uncaught errors on any page go to the server's debug log (Debug log button, or the debug bundle).
+function reportError(message, source, line, stack) {
+  const page = document.querySelector("#tabs button.active")?.dataset.tab || "";
+  fetch("api/clientlog", { method: "POST", headers: { "Content-Type": "application/json", "X-Ghostmap": "1" },
+    body: JSON.stringify({ message: String(message).slice(0, 2000), source: String(source || "").slice(0, 300),
+      line: Number(line) || 0, stack: String(stack || "").slice(0, 4000), page }) }).catch(() => { /* ignore */ });
+}
+window.addEventListener("error", (e) => reportError(e.message, e.filename, e.lineno, e.error?.stack));
+window.addEventListener("unhandledrejection", (e) => reportError(`unhandled promise rejection: ${e.reason?.message || e.reason}`, "", 0, e.reason?.stack));
 
 // ------------------------------------------------------------------ helpers
 const ipKey = (ip) => (ip ? ip.split(".").map((p) => p.padStart(3, "0")).join(".") : "~");
@@ -365,6 +387,18 @@ async function renderUsers() {
 }
 $("#usersBtn").addEventListener("click", async () => { $("#usersErr").textContent = ""; await renderUsers(); usersDlg.showModal(); });
 $("#usersClose").addEventListener("click", () => usersDlg.close());
+async function showDebugLog() {
+  const box = $("#debugText");
+  box.textContent = "Loading...";
+  try {
+    const res = await fetch("api/debug/log?lines=500", { headers: { "X-Ghostmap": "1" } });
+    box.textContent = res.ok ? (await res.text()) || "The log is empty." : `Could not load the log (${res.status}).`;
+  } catch (e) { box.textContent = e.message; }
+  box.scrollTop = box.scrollHeight;
+}
+$("#debugBtn").addEventListener("click", () => { $("#debugDialog").showModal(); showDebugLog(); });
+$("#debugRefresh").addEventListener("click", showDebugLog);
+$("#debugClose").addEventListener("click", () => $("#debugDialog").close());
 $("#usersForm").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const f = ev.target;
