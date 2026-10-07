@@ -23,14 +23,31 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from ghostmap.analysis.dashboard import HEARTBEAT_STALE_S
+from ghostmap.analysis.dashboard import DEFAULT_MAX_READ_MS, HEARTBEAT_STALE_S
 
 CACHE_S = 1.0
 IDLE_S = 300
+READS_IN_FLIGHT = 4  # read requests sent to the gateway at once (a whole controller is ~10 requests of 200 tags)
 EVENTS_KEPT = 200   # connection history kept per dashboard
 BAD_KEPT = 50       # unreadable tags listed per dashboard (with their status)
 log = logging.getLogger("ghostmap.live")
 _ID_RE = re.compile(r"^[a-z0-9-]{1,64}$")
+
+
+def _replace(src: Path, dst: Path, tries: int = 40) -> None:
+    """os.replace that rides out Windows sharing violations.
+
+    On Windows the replace fails with "Access is denied" while anything has ``dst`` open: the dashboard being
+    read by a live-values request at that moment, or a virus scanner. The open is short, so retry briefly.
+    """
+    for i in range(tries):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(0.05)
 
 
 class DashboardStore:
@@ -66,7 +83,7 @@ class DashboardStore:
         p = self._path(dash["id"])
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps(dash, indent=1), encoding="utf-8")
-        tmp.replace(p)
+        _replace(tmp, p)
 
     def save_tags(self, dash_id: str, rows: list[dict]) -> None:
         """The full tag export behind a dashboard, so edits pick tags from what was discovered."""
@@ -222,8 +239,15 @@ class LiveValues:
     def _health(self, dash: dict, s: dict) -> dict:
         now = time.time()
         h = dict(s["health"])
-        hb = ((dash.get("layout") or {}).get("machine") or {}).get("heartbeat") or []
-        if hb and s["started"] is not None:
+        m = (dash.get("layout") or {}).get("machine") or {}
+        hb = m.get("heartbeat") or []
+        h["freshness"] = m.get("freshness") or ("heartbeat" if hb else "response")
+        h["max_read_ms"] = m.get("max_read_ms") or DEFAULT_MAX_READ_MS
+        # Response-time mode: no heartbeat; data counts as fresh while reads come back Good and quickly.
+        h["slow"] = h["latency_ms"] is not None and h["latency_ms"] > h["max_read_ms"]
+        if h["freshness"] == "response":
+            h["heartbeat"] = {"node_id": None, "frozen": False}
+        elif hb and s["started"] is not None:
             nid = hb[0]
             changed = s["since"].get(nid)
             age = now - (changed or s["started"])
@@ -280,10 +304,17 @@ class LiveValues:
     async def _read_rows(s: dict, node_ids: list[str]) -> list[dict]:
         from ghostmap.collectors.opcua import MAX_READ
 
-        rows = []
-        for i in range(0, len(node_ids), MAX_READ):
-            rows += await asyncio.wait_for(s["browser"].read(node_ids[i:i + MAX_READ]), timeout=15)
-        return rows
+        browser = s["browser"]
+        if browser is None:
+            raise ConnectionError("session closed")
+        sem = asyncio.Semaphore(READS_IN_FLIGHT)
+
+        async def one(chunk):
+            async with sem:
+                return await asyncio.wait_for(browser.read(chunk), timeout=15)
+
+        chunks = [node_ids[i:i + MAX_READ] for i in range(0, len(node_ids), MAX_READ)]
+        return [r for part in await asyncio.gather(*(one(c) for c in chunks)) for r in part]
 
     async def read_once(self, dash: dict, node_ids: list[str], rows: bool = False) -> dict:
         """A one-off read on the dashboard's session (an axis's fault bits, or the alarm check).
@@ -319,7 +350,8 @@ class LiveValues:
     async def _drop_idle(self, keep: str) -> None:
         now = time.time()
         for did, s in list(self._s.items()):
-            if did != keep and now - s.get("used", 0) > IDLE_S:
+            lock = self._locks.get(did)
+            if did != keep and now - s.get("used", 0) > IDLE_S and not (lock and lock.locked()):
                 self._s.pop(did, None)
                 await self._close(s)
 

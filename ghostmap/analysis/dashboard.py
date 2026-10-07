@@ -33,6 +33,20 @@ AXIS_KEYS = ["CIPAxisState", "DriveEnableStatus", "ServoActionStatus", "AxisHome
              "AxisFault", "CIPAxisFaults", "CIPAxisAlarms", "ModuleFaults", "GuardFaults", "MotionFaultStatus",
              "CIPInitializationFaults", "CIPAPRFaults", "AxisSafetyFaults", "CIPStartInhibits"]
 AXES_AREA = "Motion axes"
+# What an axis's Details panel shows, read once on request from the axis's ~600 members.
+AXIS_DETAIL = {
+    "Motion": ["CommandPosition", "ActualPosition", "PositionError", "CommandVelocity", "ActualVelocity",
+               "VelocityError", "ActualAcceleration", "CommandTorque", "TorqueReference"],
+    "Power": ["DCBusVoltage", "OutputCurrent", "OutputVoltage", "OutputFrequency", "OutputPower", "CurrentFeedback",
+              "MotorCapacity", "InverterCapacity", "ConverterCapacity", "BusRegulatorCapacity"],
+    "Limits": ["TorqueLimitPositive", "TorqueLimitNegative", "OperativeCurrentLimit", "CurrentLimitSource",
+               "VelocityLimitSource"],
+    "Tuning": ["SystemInertia", "PositionLoopBandwidth", "VelocityLoopBandwidth", "VelocityIntegratorBandwidth",
+               "TorqueLowPassFilterBandwidth"],
+    "Fault words": ["AxisFault", "CIPAxisFaults", "CIPAxisAlarms", "ModuleFaults", "GuardFaults",
+                    "CIPInitializationFaults", "CIPStartInhibits", "CIPAPRFaults", "AxisSafetyFaults",
+                    "MotionFaultStatus", "AttributeErrorCode", "AttributeErrorID"],
+}
 INSTRUCTION_MEMBERS = {"EN", "DN", "ER"}
 
 # Keep live reads small: per area at most this many status bits, values and counters (alarms are all kept).
@@ -54,7 +68,15 @@ _RUNNING = [(re.compile(r"^(machine_?|line_?|mach_?)?running$|^runf$|^run_?fb$|^
             (re.compile(r"(^|_)run(ning)?($|_)", re.I), 1)]
 # A tag the PLC changes all the time (a heartbeat counter, a watchdog), so frozen data can be told apart from
 # a quiet machine. Counters beat toggling BOOLs: a bit that flips every second can look frozen to a 2 s poll.
-_HEARTBEAT = re.compile(r"heart_?beat|watch_?dog|(^|_)hb($|_)|life_?(bit|sign|count)|alive|wall_?clock", re.I)
+_HEARTBEAT = re.compile(r"heart_?beat|watch_?dog|(^|_)hb($|_)|life_?(bit|sign|count)|live_?count|alive|wall_?clock", re.I)
+# One-shot storage bits (OSg.CL1.Start, OS1.x, ONS): rung internals that change for one scan.
+_ONESHOT = re.compile(r"^(os|osg|ons|osr|osf|one_?shots?)\d*$", re.I)
+# Bits in a fault folder that are commands, not conditions (Reset_Faults, Fault_Ack, HMI_Clear_PB).
+_COMMAND = re.compile(r"(^|_)(reset|rst|clear|clr|ack|acknowledge|silence)(_|$)|_cmd$|_pb$|^hmi_|req$|request", re.I)
+# Alarm-folder bits that are on when healthy (No_Faults, Comms_OK): active when off.
+_OK_WHEN_ON = re.compile(r"^(no|not)_?(faults?|flts?|alarms?|alms?|errors?|errs?)$|(^|_)(ok|healthy|good)$", re.I)
+FRESHNESS = ("heartbeat", "response")
+DEFAULT_MAX_READ_MS = 2000
 
 # An area where at least this share of the bits is on, and whose bit names
 # don't say "fault", may be using "on = healthy" (e.g. comms OK bits).
@@ -199,7 +221,7 @@ def _excluded(row: dict) -> bool:
     dashboard (recipe tables, queues, data logs)."""
     text = f"{row.get('path', '')}/{'/'.join(tag_path(row.get('node_id', '')))}"
     for seg in re.split(r"[/.]", text):
-        if _MODULE_TAG.match(seg):
+        if _MODULE_TAG.match(seg) or _ONESHOT.match(seg):
             return True
     idx = [int(m.group(1)) for m in _ARRAY_IDX.finditer(text)]
     return bool(idx) and (max(idx) > MAX_ARRAY_INDEX or not _FAULT_CONTEXT.search(text))
@@ -266,9 +288,11 @@ def _heartbeat_guess(rows: list[dict]) -> list[str]:
     for r in rows:
         leaf = str(r.get("path") or r["node_id"]).split("/")[-1].split(".")[-1]
         t = _type(r)
-        if not _HEARTBEAT.search(leaf) or t not in BOOL_TYPES | INT_TYPES | REAL_TYPES:
+        if (not _HEARTBEAT.search(leaf) or _FAULT_WORD.search(leaf) or _excluded(r)
+                or t not in BOOL_TYPES | INT_TYPES | REAL_TYPES):
             continue
-        key = (t in BOOL_TYPES, "program:" in r["node_id"].lower(), len(r["node_id"]))
+        stored = bool(re.search(r"(mem|last|prev|old|copy|save[d]?)$", leaf, re.I))  # a copy, not the live value
+        key = (t in BOOL_TYPES, stored, "program:" in r["node_id"].lower(), len(r["node_id"]))
         if best is None or key < best[0]:
             best = (key, r["node_id"])
     return [best[1]] if best else []
@@ -357,7 +381,9 @@ def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
         item = {"node_id": r["node_id"], "name": leaf, "label": humanize(label_src)}
         if t in BOOL_TYPES:
             in_fault_context = bool(_FAULT_CONTEXT.search(full)) or bool(_FAULT_WORD.search(leaf))
-            if in_fault_context:
+            if in_fault_context and _COMMAND.search(leaf):
+                unlisted += 1  # Reset_Faults and friends: a button, not a condition
+            elif in_fault_context:
                 cat = category(a["id"], leaf)
                 sev = severity(leaf, cat)
                 if sev == "status":
@@ -365,6 +391,8 @@ def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
                 else:
                     item.update(category=cat, severity=sev, says_fault=bool(_FAULT_WORD.search(leaf)),
                                 sample=_truthy(r.get("value")))
+                    if _OK_WHEN_ON.search(leaf):
+                        item["ok_when_on"] = True
                     a["alarms"].append(item)
             else:
                 score = _running_score(leaf)
@@ -398,7 +426,7 @@ def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
             if len(a[k]) > MAX_PER_AREA:
                 capped += len(a[k]) - MAX_PER_AREA
                 del a[k][MAX_PER_AREA:]
-        bits = [x for x in a["alarms"] if not x["says_fault"]]
+        bits = [x for x in a["alarms"] if not x["says_fault"] and not x.get("ok_when_on")]
         on = sum(1 for x in bits if x["sample"])
         a["suggest_invert"] = len(bits) >= INVERT_MIN_BITS and on / len(bits) >= INVERT_SHARE
         if a["suggest_invert"]:
@@ -415,7 +443,8 @@ def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
     # Best guess at the machine's running bit: a plain name ("Running", "RunF") beats "Line_Run_Enable",
     # and controller scope beats a program's copy. Changeable on the dashboard.
     running.sort(key=lambda x: (-x[0], "program:" in x[1].lower(), len(x[1])))
-    machine = {"running": [nid for _, _, nid in running[:1]], "mode": "any", "heartbeat": heartbeat}
+    machine = {"running": [nid for _, _, nid in running[:1]], "mode": "any", "heartbeat": heartbeat,
+               "freshness": "heartbeat" if heartbeat else "response", "max_read_ms": DEFAULT_MAX_READ_MS}
     summary = {
         "areas": len(out_areas),
         "alarms": sum(len(a["alarms"]) for a in out_areas),
@@ -458,14 +487,15 @@ def node_ids(layout: dict) -> list[str]:
                 for nid in item.get("members", {}).values():
                     seen[nid] = None
     m = layout.get("machine") or {}
-    for nid in [*m.get("running", []), *m.get("heartbeat", [])]:
+    hb = m.get("heartbeat", []) if m.get("freshness", "heartbeat") == "heartbeat" else []
+    for nid in [*m.get("running", []), *hb]:
         seen[nid] = None
     return list(seen)
 
 
 ITEM_KINDS = ("alarms", "axes", "timers", "counters", "words", "values", "status")
 SEVERITIES = ("critical", "fault", "warning")
-MAX_LAYOUT_ITEMS = 20000
+MAX_LAYOUT_ITEMS = 200000  # dashboards built before whole-controller trimming can be this big
 
 
 def clean_layout(layout: dict, known_ids: Optional[set] = None) -> dict:
@@ -511,6 +541,8 @@ def clean_layout(layout: dict, known_ids: Optional[set] = None) -> dict:
                     item["category"] = it.get("category") if it.get("category") in CATEGORY_TITLES else "other"
                     item["says_fault"] = bool(it.get("says_fault"))
                     item["sample"] = bool(it.get("sample"))
+                    if it.get("ok_when_on"):
+                        item["ok_when_on"] = True
                 if not item.get("node_id") and not item.get("members"):
                     raise ValueError(f"{item['label'] or k} has no tag")
                 items.append(item)
@@ -528,8 +560,14 @@ def clean_layout(layout: dict, known_ids: Optional[set] = None) -> dict:
     heartbeat = m.get("heartbeat") or []
     if not isinstance(heartbeat, list) or len(heartbeat) > 1:
         raise ValueError("bad heartbeat tag")
+    try:
+        max_ms = min(max(int(m.get("max_read_ms") or DEFAULT_MAX_READ_MS), 100), 60000)
+    except (TypeError, ValueError):
+        raise ValueError("bad max_read_ms")
     machine = {"running": [nid(x) for x in running], "mode": "all" if m.get("mode") == "all" else "any",
-               "heartbeat": [nid(x) for x in heartbeat]}
+               "heartbeat": [nid(x) for x in heartbeat],
+               "freshness": m.get("freshness") if m.get("freshness") in FRESHNESS else ("heartbeat" if heartbeat else "response"),
+               "max_read_ms": max_ms}
     result = dict(layout, areas=out, machine=machine)
     result["summary"] = dict(layout.get("summary", {}), areas=len(out),
                              alarms=sum(len(a["alarms"]) for a in out), timers=sum(len(a["timers"]) for a in out),
@@ -612,11 +650,11 @@ def verify_layout(layout: dict, overrides: dict, reads: dict, live: Optional[dic
                 findings.append({"code": "alarm.not_bool", "severity": "warning", "target": target, "node_id": nid,
                                  "message": f"This alarm is a {vt}, not a BOOL, so it counts as active whenever it isn't 0.",
                                  "hint": "Pick the alarm bit itself, or move this tag to the area's values."})
-            readable_bits += 1
             bit = _truthy(r.get("value"))
-            if bit:
-                on += 1
-            if bit != bool(invert.get(a.get("id"))):
+            if not x.get("ok_when_on"):
+                readable_bits += 1
+                on += bit
+            if bit != (bool(invert.get(a.get("id"))) != bool(x.get("ok_when_on"))):
                 active += 1
             if nid in since:
                 changed += 1
@@ -631,8 +669,9 @@ def verify_layout(layout: dict, overrides: dict, reads: dict, live: Optional[dic
         r = reads.get(nid)
         if not good_status(r):
             findings.append(_status_finding("machine.running", "Machine running tag", nid, (r or {}).get("status", "not read")))
-    hb = m.get("heartbeat", [])
-    if not hb:
+    response_only = m.get("freshness") == "response"
+    hb = [] if response_only else m.get("heartbeat", [])
+    if not hb and not response_only:
         findings.append({"code": "heartbeat.none", "severity": "info", "target": "Heartbeat",
                          "message": "No heartbeat tag, so frozen data can't be told apart from a quiet machine.",
                          "hint": "Tick Edit and pick a tag the PLC changes all the time, such as a free-running "

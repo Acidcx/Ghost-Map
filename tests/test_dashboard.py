@@ -197,7 +197,8 @@ def test_clean_layout_checks_running_tags():
     L = build_layout(ROWS)
     known = {r["node_id"] for r in ROWS}
     L["machine"] = {"running": [ROWS[0]["node_id"]], "mode": "all"}
-    assert clean_layout(L, known)["machine"] == {"running": [ROWS[0]["node_id"]], "mode": "all", "heartbeat": []}
+    assert clean_layout(L, known)["machine"] == {"running": [ROWS[0]["node_id"]], "mode": "all", "heartbeat": [],
+                                                 "freshness": "response", "max_read_ms": 2000}
     L["machine"]["running"] = ["ns=2;s=Made.Up"]
     with pytest.raises(ValueError):
         clean_layout(L, known)
@@ -237,3 +238,66 @@ def test_heartbeat_guess_prefers_counters():
             {"path": "Online/FAULT/E_Stop_Flt", "node_id": "ns=2;s=::[P]FAULT.E_Stop_Flt", "type": "Boolean", "value": False}]
     assert build_layout(rows)["machine"]["heartbeat"] == ["ns=2;s=::[P]Heartbeat_Cnt"]
     assert build_layout(rows[2:])["machine"]["heartbeat"] == []
+
+
+def test_one_shots_commands_and_ok_bits():
+    """Replays a real Logix line controller: OSg one-shot storage, Reset_Faults in a fault folder, VFD
+    No_Faults bits, an axis CPUWatchdogFault and a live counter between two PLCs."""
+    def row(path, typ="Boolean", value="false"):
+        return {"path": f"Online/{path}", "node_id": "ns=2;s=[PLC]" + path.replace("/", "."), "type": typ, "value": value}
+
+    rows = [row("OSg/CL1/CL_C/Start"), row("OSg/CL1/CL_C/Stop"), row("OS1/WD_No_Startup_Flt_Ltc"),
+            row("_RS_To_CTL/RS_Faulted"), row("_RS_To_CTL/Reset_Faults"),
+            row("_RS_To_CTL/Live_Counter", "Int32", "41"), row("RS_Live_Counter_Mem", "Int32", "41"),
+            row("CL1_Flags/VFD/No_Faults", value="true"), row("CL1_Flags/VFD/Drive_Fault"),
+            row("Ax_X/CPUWatchdogFault")]
+    L = build_layout(rows)
+    names = {x["name"]: x for a in L["areas"] for k in ("alarms", "status") for x in a[k]}
+    assert "Start" not in names and "WD_No_Startup_Flt_Ltc" not in names  # one-shot storage
+    assert "Reset_Faults" not in names and names["RS_Faulted"]["severity"] == "fault"
+    assert names["No_Faults"].get("ok_when_on") and not names["Drive_Fault"].get("ok_when_on")
+    assert L["machine"]["heartbeat"] == ["ns=2;s=[PLC]_RS_To_CTL.Live_Counter"]
+    assert L["machine"]["freshness"] == "heartbeat"
+    # No_Faults on means healthy: not active, and it doesn't make the area look "mostly on".
+    from ghostmap.analysis.dashboard import verify_layout
+
+    reads = {x["node_id"]: {"status": "Good", "variant_type": "Boolean", "value": x["name"] == "No_Faults"}
+             for x in names.values()}
+    reads[L["machine"]["heartbeat"][0]] = {"status": "Good", "variant_type": "Int32", "value": 41}
+    out = verify_layout(L, {}, reads)
+    assert out["summary"]["active"] == 0
+
+
+def test_response_time_mode_skips_the_heartbeat():
+    from ghostmap.analysis.dashboard import clean_layout, node_ids, verify_layout
+
+    L = build_layout(ROWS)
+    L["machine"] = {"running": [], "heartbeat": [ROWS[0]["node_id"]], "freshness": "response", "max_read_ms": 50}
+    C = clean_layout(L, {r["node_id"] for r in ROWS})
+    assert C["machine"]["freshness"] == "response" and C["machine"]["max_read_ms"] == 100  # clamped
+    assert ROWS[0]["node_id"] not in node_ids({"areas": [], "machine": C["machine"]})
+    codes = {f["code"] for f in verify_layout(C, {}, {})["findings"]}
+    assert not any(c.startswith("heartbeat") for c in codes)
+
+
+def test_save_rides_out_windows_sharing_violations(tmp_path, monkeypatch):
+    """Replays a Windows HMI: replacing a dashboard file failed with WinError 5 while a live-values request
+    was reading it."""
+    from pathlib import Path
+
+    from ghostmap.web.dashboards import DashboardStore
+
+    store = DashboardStore(tmp_path)
+    dash = store.create("Line", "demo", "", build_layout(ROWS))
+    real, calls = Path.replace, []
+
+    def flaky(self, target):
+        calls.append(1)
+        if len(calls) < 3:
+            raise PermissionError(5, "Access is denied")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "replace", flaky)
+    dash["name"] = "Line 2"
+    store.save(dash)
+    assert store.load(dash["id"])["name"] == "Line 2" and len(calls) == 3

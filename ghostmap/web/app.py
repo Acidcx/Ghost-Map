@@ -610,27 +610,66 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
 
     @app.get("/api/dashboards/{dash_id}/axis")
     async def axis_detail(dash_id: str, name: str):
-        """Which of an axis's fault, alarm and inhibit bits are on right now (read once, on request)."""
+        """One axis in detail, read once on request: active fault/alarm/inhibit bits, status bits that are on,
+        and motion, power, limit, tuning and fault-word values."""
         import re as _re
 
-        from ghostmap.analysis.dashboard import humanize
+        from ghostmap.analysis.dashboard import AXIS_DETAIL, humanize
 
         dash = load_dashboard(dash_id)
         axis = next((x for a in dash["layout"]["areas"] for x in a.get("axes", []) if x["name"] == name), None)
         if axis is None:
             raise HTTPException(404, "no such axis")
         prefix = axis["base"] + "."
-        bits = [nid for _, nid, typ, _ in dashboards.load_tags(dash_id)
-                if typ == "Boolean" and nid.startswith(prefix)
-                and _re.search(r"(Fault|Alarm|Inhibit)$", nid[len(prefix):])][:600]
-        r = await live.read_once(dash, bits)
+        members = {nid[len(prefix):]: (nid, typ) for _, nid, typ, _ in dashboards.load_tags(dash_id)
+                   if nid.startswith(prefix) and "." not in nid[len(prefix):]}
+        bits = [m for m, (_, typ) in members.items() if typ == "Boolean"
+                and _re.search(r"(Fault|Alarm|Inhibit|Status)$", m)]
+        wanted = [m for group in AXIS_DETAIL.values() for m in group if m in members]
+        ids = [members[m][0] for m in bits + wanted][:1000]
+        r = await live.read_once(dash, ids)
         if not r["ok"]:
             return r
-        on = [nid for nid in bits if r["values"].get(nid) is True]
-        return {"ok": True, "error": None, "checked": len(bits), "active": [
-            {"node_id": nid, "name": nid[len(prefix):], "label": humanize(nid[len(prefix):]),
-             "kind": "fault" if nid.endswith("Fault") else "alarm" if nid.endswith("Alarm") else "inhibit"}
-            for nid in on]}
+        val = {m: r["values"].get(members[m][0]) for m in bits + wanted}
+        kind = lambda m: "fault" if m.endswith("Fault") else "alarm" if m.endswith("Alarm") else "inhibit"  # noqa: E731
+        checked = [m for m in bits if not m.endswith("Status")]
+        return {"ok": True, "error": None, "checked": len(checked),
+                "active": [{"node_id": members[m][0], "name": m, "label": humanize(m), "kind": kind(m)}
+                           for m in checked if val[m] is True],
+                "status_on": [humanize(m[:-len("Status")]) for m in bits if m.endswith("Status") and val[m] is True],
+                "groups": {g: [{"name": m, "label": humanize(m), "value": val[m]} for m in ms if m in members]
+                           for g, ms in AXIS_DETAIL.items() if any(m in members for m in ms)},
+                "at": time.time()}
+
+    @app.post("/api/dashboards/{dash_id}/rebuild")
+    def rebuild_dashboard(dash_id: str, request: Request):
+        """Lay the dashboard out again from its stored tag export with the current rules.
+
+        Keeps the name, endpoint, running tags, heartbeat and comms settings; area edits are replaced.
+        """
+        from ghostmap.analysis.dashboard import build_layout
+
+        dash = load_dashboard(dash_id)
+        catalog = dashboards.load_tags(dash_id)
+        if not catalog:
+            raise HTTPException(409, "this dashboard has no stored tag export; build it again from the Tags tab")
+        rows = [{"path": p, "node_id": n, "type": t, "value": v} for p, n, t, v in catalog]
+        layout = build_layout(rows, name=dash["name"])
+        known = {r["node_id"] for r in rows}
+        old = dash["layout"].get("machine") or {}
+        keep = {k: old[k] for k in ("mode", "freshness", "max_read_ms") if k in old}
+        for k in ("running", "heartbeat"):
+            if old.get(k) and all(n in known for n in old[k]):
+                keep[k] = old[k]
+        layout["machine"] = {**layout["machine"], **keep}
+        dash["layout"] = layout
+        ids = {a["id"] for a in layout["areas"]}
+        ov = dash.get("overrides") or {}
+        dash["overrides"] = {"invert": {k: v for k, v in (ov.get("invert") or {}).items() if k in ids},
+                             "hidden": ov.get("hidden") or []}
+        dashboards.save(dash)
+        audit.write(client_of(request), who(request), "dashboard.rebuild", dash_id)
+        return dash
 
     @app.delete("/api/dashboards/{dash_id}")
     async def delete_dashboard(dash_id: str, request: Request):

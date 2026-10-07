@@ -198,6 +198,7 @@ def test_dashboard_from_simulated_leveler(ua):
     assert estop["node_id"] in vals["values"] and axis["members"]["ActualPosition"] in vals["values"]
     detail = c.get(f"/api/dashboards/{dash['id']}/axis", params={"name": "Ax_Leveler_Roll"}).json()
     assert detail["ok"] and detail["checked"] == 6
+    assert "ActualPosition" in [m["name"] for m in detail["groups"]["Motion"]] and "Fault words" in detail["groups"]
 
     # Editing: tags are picked from the dashboard's own export, not typed in.
     found = c.get(f"/api/dashboards/{dash['id']}/tags", params={"q": "coil count"}).json()
@@ -212,6 +213,11 @@ def test_dashboard_from_simulated_leveler(ua):
     assert any(v["label"] == "Coils" for a in r.json()["layout"]["areas"] for v in a["values"])
     gen["values"].append({"name": "x", "label": "x", "node_id": "ns=2;s=NotDiscovered"})
     assert c.post(f"/api/dashboards/{dash['id']}/layout", json={"layout": edited}).status_code == 400
+
+    # Rebuild from the stored export: area edits go, the running tag stays.
+    rb = c.post(f"/api/dashboards/{dash['id']}/rebuild").json()
+    assert not any(v["label"] == "Coils" for a in rb["layout"]["areas"] for v in a["values"])
+    assert rb["layout"]["machine"]["running"] == L["machine"]["running"]
 
     hidden = areas["General"]["alarms"][-1]["node_id"]
     r = c.post(f"/api/dashboards/{dash['id']}/overrides", json={"invert": {areas["Comms"]["id"]: True}, "hidden": [hidden]})
