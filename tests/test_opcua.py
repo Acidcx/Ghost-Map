@@ -236,7 +236,29 @@ def test_dashboard_unreachable_gateway_and_bad_input(tmp_path):
         dash = c.post("/api/dashboards", json={"name": "x", "endpoint": f"127.0.0.1:{free_port()}", "tags": rows}).json()
         v = c.get(f"/api/dashboards/{dash['id']}/values").json()
         assert v["ok"] is False and v["error"]
+        # Requests queued behind a dead gateway get that failure back, not one connect attempt each.
+        for _ in range(3):
+            assert c.get(f"/api/dashboards/{dash['id']}/values").json()["ok"] is False
+        assert c.get(f"/api/dashboards/{dash['id']}/health").json()["failed"] == 1
         assert c.get("/api/dashboards/..%2Fusers").status_code == 404
+
+
+def test_one_bad_node_id_does_not_break_the_dashboard(ua):
+    """A mistyped NodeId in a hand-edited CSV: that tag is unreadable, the rest read, the session stays up."""
+    c, url, sid, _ = ua
+    gw = find(c, sid, None, "FactoryTalk Linx Gateway")
+    lev = find(c, sid, gw["node_id"], "LEVELER_01")
+    rows = [{"path": t["path"], "node_id": t["node_id"], "type": t["variant_type"], "value": t["value"]}
+            for t in run_export(c, sid, lev["node_id"])["tags"]]
+    rows.append({"path": "Faults/Bogus_Flt", "node_id": "ns=2;x=bogus", "type": "Boolean", "value": False})
+    did = c.post("/api/dashboards", json={"name": "Typo", "endpoint": url, "tags": rows}).json()["id"]
+    import time
+    for _ in range(3):
+        v = c.get(f"/api/dashboards/{did}/values").json()
+        time.sleep(1.1)
+    assert v["ok"] and "ns=2;x=bogus" in v["bad"] and len(v["values"]) > 20
+    h = c.get(f"/api/dashboards/{did}/health").json()
+    assert h["drops"] == 0 and h["reconnects"] == 0 and h["bad_status"]["ns=2;x=bogus"] == "BadNodeIdInvalid"
 
 
 def test_dashboards_viewers_watch_admins_edit(tmp_path, monkeypatch):

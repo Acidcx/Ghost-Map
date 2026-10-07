@@ -277,7 +277,9 @@ def cmd_web(args) -> int:
     print(f"Ghost Map is running at {url}  (close this window or press Ctrl+C to stop)", file=sys.stderr)
     if args.open:
         threading.Timer(1.5, webbrowser.open, args=(url,)).start()
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    # log_config=None: uvicorn's own logging config would remove the debug-log file handler from
+    # "uvicorn.error", and bind failures and ASGI exceptions would only reach the console.
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning", log_config=None)
     return 0
 
 

@@ -68,6 +68,8 @@ uaForm.addEventListener("submit", async (ev) => {
     ua.sid = r.sid;
     ua.url = r.url;
     ua.typed = uaForm.url.value.trim().toLowerCase() === "demo" ? "demo" : "";
+    // Dashboards read with an anonymous, unsecured session; say so when this one needed more.
+    ua.secured = r.security !== "None" || (r.user && r.user !== "anonymous");
     uaRemember(r.url);
     uaStatus(`<span class="chip okchip">connected</span> <span class="mono">${esc(r.url)}</span> &middot; ${esc(r.server || "OPC UA server")}
       &middot; security ${esc(r.security)}${r.security !== "None" ? ` (${esc(r.mode)})` : ""} &middot; ${esc(r.user)}
@@ -204,7 +206,9 @@ async function uaPoll() {
     const vals = await api("api/opcua/read", { method: "POST", body: JSON.stringify({ sid: ua.sid, node_ids: [...ua.watch.keys()] }) });
     for (const v of vals) Object.assign(ua.watch.get(v.node_id) || {}, v);
     uaRenderWatch();
+    if (ua.readFailed) { ua.readFailed = false; uaStatus(`<span class="chip okchip">reading again</span> <span class="mono">${esc(ua.url)}</span>`, ""); }
   } catch (e) {
+    ua.readFailed = true;
     uaStatus(`Read failed: ${esc(e.message)}`, "errtext");
   } finally {
     ua.busy = false;
@@ -249,6 +253,14 @@ async function uaRunExport(verb) {
   }
 }
 
+// What an export left out: a size limit, or folders the server would not browse.
+function uaGaps(r) {
+  const gaps = [];
+  if (r.truncated) gaps.push("stopped at the size limit");
+  if (r.failed) gaps.push(`${r.failed} folder${r.failed === 1 ? "" : "s"} could not be browsed, so their tags are missing`);
+  return gaps.length ? ` <span class="warntext">(${gaps.join("; ")})</span>` : "";
+}
+
 async function uaBusyButton(btn, label, fn) {
   if (!ua.sel) return;
   const text = btn.textContent;
@@ -262,7 +274,7 @@ $("#uaExport").addEventListener("click", () => uaBusyButton($("#uaExport"), "Exp
     const r = await uaRunExport("Exporting");
     csvDownload(`ghostmap-tags-${safeName(ua.sel.name)}.csv`, ["path", "node_id", "type", "value", "status"],
       r.tags.map((t) => [t.path, t.node_id, t.variant_type, t.value, t.status]));
-    uaStatus(`Exported ${r.tags.length} tags under ${esc(ua.sel.name)}${r.truncated ? " (stopped at the size limit)" : ""}.`);
+    uaStatus(`Exported ${r.tags.length} tags under ${esc(ua.sel.name)}.${uaGaps(r)}`);
   } catch (e) {
     uaStatus(`Export failed: ${esc(e.message)}`, "errtext");
   }
@@ -278,7 +290,8 @@ $("#uaDashboard").addEventListener("click", () => uaBusyButton($("#uaDashboard")
       name, endpoint: ua.typed || ua.url, source: ua.sel.node_id, job: r.job }) });
     const sm = d.layout.summary;
     uaStatus(`Built dashboard <b>${esc(d.name)}</b> from ${r.tags.length} tags: ${sm.areas} areas, ${sm.alarms} alarms${
-      sm.axes ? `, ${sm.axes} ${sm.axes === 1 ? "axis" : "axes"}` : ""}. It's on the Machine tab.`);
+      sm.axes ? `, ${sm.axes} ${sm.axes === 1 ? "axis" : "axes"}` : ""}. It's on the Machine tab.${uaGaps(r)}${ua.secured
+      ? ` <span class="warntext">Dashboards read anonymously with no security; if this gateway needs a login or security, the Machine tab will show no data.</span>` : ""}`);
     if (window.machineOpen) window.machineOpen(d.id);
   } catch (e) {
     uaStatus(`Could not build a dashboard: ${esc(e.message)}`, "errtext");

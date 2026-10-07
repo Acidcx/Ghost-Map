@@ -386,15 +386,21 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
             raise
         return browser, info
 
+    ua_locks: dict[str, asyncio.Lock] = {}
+    bg_tasks: set = set()  # keep a reference so a pending disconnect is not garbage-collected
+
     def ua_entry(sid: str) -> list:
         now = time.time()
         for k, entry in list(ua_sessions.items()):
             if now - entry[1] > UA_FORGET_S:
                 ua_sessions.pop(k, None)
+                ua_locks.pop(k, None)
             if now - entry[1] > UA_IDLE_S and entry[0] is not None:
                 b, entry[0] = entry[0], None  # closed now, re-opened on next use
                 log.info("opcua session %s idle, closed (re-opens on next use)", k[:8])
-                asyncio.create_task(b.disconnect())
+                task = asyncio.create_task(b.disconnect())
+                bg_tasks.add(task)
+                task.add_done_callback(bg_tasks.discard)
         entry = ua_sessions.get(sid)
         if entry is None:
             raise HTTPException(404, "OPC UA session closed; connect again")
@@ -405,8 +411,12 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         """The session's browser, re-opened if it was closed while idle or dropped."""
         entry = ua_entry(sid)
         if entry[0] is None:
-            entry[0], _ = await ua_open(entry[3])
-            log.info("opcua session %s re-opened to %s", sid[:8], entry[0].url)
+            # Tree expands and the watch poll arrive together; only one of them may open the new session,
+            # or the others' sessions are left open on the gateway (and FT Linx runs out of sessions).
+            async with ua_locks.setdefault(sid, asyncio.Lock()):
+                if entry[0] is None:
+                    entry[0], _ = await ua_open(entry[3])
+                    log.info("opcua session %s re-opened to %s", sid[:8], entry[0].url)
         return entry[0]
 
     async def ua_run(sid: str, fn):
@@ -421,11 +431,12 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
                 raise
             except Exception as exc:
                 entry = ua_sessions.get(sid)
-                if attempt == 1 and is_connection_error(exc) and entry is not None and entry[0] is browser:
-                    log.warning("opcua session %s to %s dropped (%s: %s); re-opening", sid[:8], browser.url,
-                                type(exc).__name__, exc)
-                    entry[0] = None
-                    await browser.disconnect()
+                if attempt == 1 and is_connection_error(exc) and entry is not None:
+                    if entry[0] is browser:  # first request to notice the drop closes it; the others just retry
+                        log.warning("opcua session %s to %s dropped (%s: %s); re-opening", sid[:8], browser.url,
+                                    type(exc).__name__, exc)
+                        entry[0] = None
+                        await browser.disconnect()
                     continue
                 log.warning("opcua request on %s failed: %s: %s", browser.url, type(exc).__name__, exc)
                 raise HTTPException(502, f"{type(exc).__name__}: {exc}")
@@ -568,7 +579,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         return load_dashboard(dash_id)
 
     @app.post("/api/dashboards/{dash_id}/overrides")
-    async def set_overrides(dash_id: str, body: OverridesIn, request: Request):
+    def set_overrides(dash_id: str, body: OverridesIn, request: Request):
         dash = load_dashboard(dash_id)
         dash["overrides"] = {"invert": {k: v for k, v in body.invert.items() if v}, "hidden": body.hidden}
         if body.name:
@@ -609,7 +620,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         return out
 
     @app.get("/api/dashboards/{dash_id}/axis")
-    async def axis_detail(dash_id: str, name: str):
+    async def axis_detail(dash_id: str, name: str = "", base: str = ""):
         """One axis in detail, read once on request: active fault/alarm/inhibit bits, status bits that are on,
         and motion, power, limit, tuning and fault-word values."""
         import re as _re
@@ -617,7 +628,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         from ghostmap.analysis.dashboard import AXIS_DETAIL, humanize
 
         dash = load_dashboard(dash_id)
-        axis = next((x for a in dash["layout"]["areas"] for x in a.get("axes", []) if x["name"] == name), None)
+        axis = next((x for a in dash["layout"]["areas"] for x in a.get("axes", []) if (x["base"] == base if base else x["name"] == name)), None)
         if axis is None:
             raise HTTPException(404, "no such axis")
         prefix = axis["base"] + "."

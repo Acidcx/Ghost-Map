@@ -301,3 +301,37 @@ def test_save_rides_out_windows_sharing_violations(tmp_path, monkeypatch):
     dash["name"] = "Line 2"
     store.save(dash)
     assert store.load(dash["id"])["name"] == "Line 2" and len(calls) == 3
+
+
+def test_csv_without_path_column_and_per_plc_sections():
+    """A Tag Browser watch CSV has NodeIds but no path; two PLCs' MainProgram stay separate pages."""
+    rows = [{"node_id": f"ns=2;s=[{plc}]Program:MainProgram.Faults.{n}", "type": "Boolean", "value": False}
+            for plc in ("PRESS_1", "PRESS_2") for n in ("E_Stop_Flt", "Guard_Open_Flt", "Low_Air_Flt")]
+    L = build_layout(rows)
+    secs = {a["section"] for a in L["areas"]}
+    assert secs == {"PRESS_1 / MainProgram", "PRESS_2 / MainProgram"}
+    assert L["summary"]["alarms"] == 6
+    # One PLC: plain program names, as before.
+    assert {a["section"] for a in build_layout(rows[:3])["areas"]} == {"MainProgram"}
+
+
+def test_clean_layout_rejects_junk_with_value_error():
+    import pytest
+
+    from ghostmap.analysis.dashboard import clean_layout
+
+    for bad in ({"areas": [{"id": "A", "hints": 5}]}, {"areas": [{"id": "A", "alarms": ["x"]}]}):
+        with pytest.raises(ValueError):
+            clean_layout(bad)
+    out = clean_layout({"areas": [{"id": "A/" + "Deep_Folder/" * 30, "hints": None, "alarms": None}]})
+    assert out["areas"][0]["alarms"] == []
+
+
+def test_store_skips_a_damaged_dashboard_file(tmp_path):
+    from ghostmap.web.dashboards import DashboardStore
+
+    st = DashboardStore(tmp_path)
+    st.create("Good", "opc.tcp://x:4990", "", {"areas": [], "summary": {}})
+    (st.dir / "broken.json").write_text('{"id": "broken"}', encoding="utf-8")
+    assert [d["name"] for d in st.list()] == ["Good"]
+    assert not list(st.dir.glob("*.tmp"))

@@ -85,12 +85,21 @@ document.addEventListener("gm:tab", (e) => { if (e.detail === "machine") machine
 document.addEventListener("visibilitychange", () => { if (!document.hidden) machinePoll(); });
 
 // ------------------------------------------------------------------ state
+// A tag that came back with a Bad status is in the values as null: that is "unknown", not 0 or off.
+function readable(nid) {
+  const vals = mach.vals;
+  if (!vals?.ok || !(nid in (vals.values || {}))) return false;
+  if (vals.bad !== mach.badList) { mach.badList = vals.bad; mach.badSet = new Set(vals.bad || []); }
+  return !mach.badSet.has(nid);
+}
+
 function axisState(x) {
   const v = mach.vals?.values || {};
   const m = x.members || {};
-  const state = m.CIPAxisState in v ? Number(v[m.CIPAxisState]) : null;
-  const faultWords = AXIS_FAULT_WORDS.filter((k) => m[k] && Number(v[m[k]]));
-  return { state, faulted: state === 8 || faultWords.length > 0, faultWords, known: !!mach.vals?.ok && m.CIPAxisState in v };
+  const known = !!m.CIPAxisState && readable(m.CIPAxisState);
+  const state = known ? Number(v[m.CIPAxisState]) : null;
+  const faultWords = AXIS_FAULT_WORDS.filter((k) => m[k] && readable(m[k]) && Number(v[m[k]]));
+  return { state, faulted: state === 8 || faultWords.length > 0, faultWords, known };
 }
 
 function areaState(area) {
@@ -167,15 +176,15 @@ function machineSetView(view) {
 
 function runningState(L, v, known) {
   const m = L.machine || {};
-  const ids = m.running || [];
-  if (!ids.length) {
+  const ids = [...(m.running || [])];  // a copy: the guess below must never end up in the saved layout
+  if (m.running === undefined) {
     const guess = L.areas.flatMap((a) => a.status).find((x) => RUN_RE.test(x.name));  // dashboards built before
     if (guess) ids.push(guess.node_id);
   }
   if (!ids.length) return null;
   const on = ids.map((n) => truthy(v[n]));
   const running = m.mode === "all" ? on.every(Boolean) : on.some(Boolean);
-  return { ids, running, known: known && ids.some((n) => n in v) };
+  return { ids, running, known: known && ids.some(readable) };
 }
 
 function machineRender() {
@@ -337,7 +346,7 @@ function machineRender() {
             : `<span class="n">${esc(fmtNum(x.node_id ? v[x.node_id] : v[(x.members || {}).ACC]))}</span>`}</div>`).join("")}</div></div>`).join("")}</div></div>`;
     }
   }
-  $("#mAreas").innerHTML = html;
+  setKeepingFocus($("#mAreas"), html);
 }
 
 function fmtMs(ms) { return ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms)} ms`; }
@@ -441,9 +450,9 @@ function drivesTable(states, v, known) {
   const secs = Object.keys(bySec).sort();
   const rows = (list) => list.sort((p, q) => AXIS_SORT(p.x) - AXIS_SORT(q.x) || p.x.label.localeCompare(q.x.label)).map(({ x, ai, i }) => {
     const st = x.st;
-    const key = `${mach.dash.id}|${x.name}`;
+    const key = `${mach.dash.id}|${axKey(x)}`;
     const detail = mach.axisDetail[key];
-    const open = mach.axisOpen.has(x.name);
+    const open = mach.axisOpen.has(axKey(x));
     const since = x.members.CIPAxisState && mach.vals?.since?.[x.members.CIPAxisState];
     return `<tr class="${st.faulted ? "bad" : ""}"><td class="l" title="${tip(x)}"><b>${esc(x.label)}</b></td>
       <td class="nowrap"><span class="chip ${st.faulted ? "errchip" : st.state === 4 ? "okchip" : ""}">${st.state === null ? "-" : esc(AXIS_STATES[st.state] || `state ${st.state}`)}</span>
@@ -452,7 +461,7 @@ function drivesTable(states, v, known) {
       <td class="mono">${n(x, "ActualPosition")}</td><td class="mono">${n(x, "ActualVelocity")}</td><td class="mono">${n(x, "MotorCapacity")}</td>
       <td class="mono">${n(x, "CurrentFeedback")}</td><td class="mono">${n(x, "DCBusVoltage")}</td>
       <td class="small ${st.faultWords.length ? "errtext" : "muted"}">${st.faultWords.length ? st.faultWords.map((k) => `${esc(k)}=${esc(fmtNum(v[x.members[k]]))}`).join(" ") : known ? "none" : "-"}</td>
-      <td class="nowrap"><button class="btn ghost small" data-axis="${esc(x.name)}" aria-expanded="${open}">${open ? "Hide" : "Details"}</button>${editBtn(ai, "axes", i)}</td></tr>
+      <td class="nowrap"><button class="btn ghost small" data-axis="${esc(axKey(x))}" aria-expanded="${open}">${open ? "Hide" : "Details"}</button>${editBtn(ai, "axes", i)}</td></tr>
       ${open ? `<tr class="maxisdetail"><td colspan="12">${axisDetailHtml(detail)}</td></tr>` : ""}`;
   }).join("");
   const head = `<thead><tr><th>Axis</th><th>State</th><th title="Drive enabled">En</th><th title="Servo action">Servo</th>
@@ -482,10 +491,13 @@ async function saveFreshness() {
   try { await machineSaveLayout(L); } catch (err) { alert(err.message); }
 }
 
-async function axisLoad(name) {
-  const key = `${mach.dash.id}|${name}`;
+// Axes are keyed by their NodeId prefix: two controllers can both have an axis called Ax_Feed.
+const axKey = (x) => x.base || x.name;
+
+async function axisLoad(base) {
+  const key = `${mach.dash.id}|${base}`;
   try {
-    mach.axisDetail[key] = await api(`api/dashboards/${encodeURIComponent(mach.dash.id)}/axis?name=${encodeURIComponent(name)}`, { timeout: 15000 });
+    mach.axisDetail[key] = await api(`api/dashboards/${encodeURIComponent(mach.dash.id)}/axis?base=${encodeURIComponent(base)}`, { timeout: 15000 });
   } catch (err) {
     mach.axisDetail[key] = { error: err.message };
   }
@@ -510,7 +522,7 @@ function areaCard(a, s, v, ai) {
     const st = x.st;
     const name = st.state === null ? "-" : AXIS_STATES[st.state] || `state ${st.state}`;
     const dot = !st.known ? "unk" : st.faulted ? "erron" : st.state === 4 ? "okon" : "";
-    const detail = mach.axisDetail[`${mach.dash.id}|${x.name}`];
+    const detail = mach.axisDetail[`${mach.dash.id}|${axKey(x)}`];
     const flags = [["DriveEnableStatus", "enabled"], ["ServoActionStatus", "servo on"], ["AxisHomedStatus", "homed"]]
       .filter(([k]) => m[k]).map(([k, l]) => `<span class="flag ${truthy(v[m[k]]) ? "on" : ""}">${l}</span>`).join("");
     const nums = [["ActualPosition", "pos"], ["ActualVelocity", "vel"], ["MotorCapacity", "motor %"], ["DCBusVoltage", "DC bus V"]]
@@ -520,8 +532,8 @@ function areaCard(a, s, v, ai) {
         <span class="chip ${st.faulted ? "errchip" : st.state === 4 ? "okchip" : ""}">${esc(name)}</span>${editBtn(ai, "axes", i)}</div>
       <div class="maxisrow">${flags} ${nums}</div>
       ${st.faultWords.length ? `<div class="maxisrow errtext small">${st.faultWords.map((k) => `${esc(k)} = ${esc(fmtNum(v[m[k]]))}`).join(" &middot; ")}</div>` : ""}
-      <div class="maxisrow"><button class="btn ghost small" data-axis="${esc(x.name)}">${mach.axisOpen.has(x.name) ? "Hide" : "Details"}</button></div>
-      ${mach.axisOpen.has(x.name) ? axisDetailHtml(detail) : ""}
+      <div class="maxisrow"><button class="btn ghost small" data-axis="${esc(axKey(x))}">${mach.axisOpen.has(axKey(x)) ? "Hide" : "Details"}</button></div>
+      ${mach.axisOpen.has(axKey(x)) ? axisDetailHtml(detail) : ""}
     </div>`;
   }).join("");
   const timers = a.timers.map((t, i) => {
@@ -584,6 +596,21 @@ async function machineSaveLayout(layout) {
   mach.dash = await api(`api/dashboards/${encodeURIComponent(mach.dash.id)}/layout`, { method: "POST", body: JSON.stringify({ layout }) });
   machineRender();
 }
+// The page redraws on every poll. Keep the field being typed in (filter, max read time) focused with what was
+// typed, and don't redraw at all while a drop-down list is open, or it would close under the user.
+function setKeepingFocus(el, html) {
+  const f = document.activeElement;
+  const mine = f && f.id && el.contains(f);
+  if (mine && f.tagName === "SELECT") return;
+  const keep = mine && f.tagName === "INPUT" ? { id: f.id, value: f.value, a: f.selectionStart, b: f.selectionEnd } : null;
+  el.innerHTML = html;
+  if (!keep) return;
+  const n = document.getElementById(keep.id);
+  if (!n) return;
+  if (n.value !== keep.value) n.value = keep.value;
+  n.focus();
+  try { if (keep.a !== null) n.setSelectionRange(keep.a, keep.b); } catch (_) { /* number inputs have no selection */ }
+}
 const layoutCopy = () => JSON.parse(JSON.stringify(mach.dash.layout));
 
 $("#mAreas").addEventListener("input", (e) => {
@@ -599,7 +626,7 @@ $("#mAreas").addEventListener("input", (e) => {
 });
 $("#mAreas").addEventListener("change", (e) => {
   if (e.target.id === "mOnlyActive") { mach.onlyActive = e.target.checked; machineRender(); return; }
-  if (e.target.id === "mFreshness" || e.target.id === "mMaxMs") { saveFreshness(); return; }
+  if (e.target.id === "mFreshness" || e.target.id === "mMaxMs") { e.target.blur(); saveFreshness(); return; }
   const id = e.target.dataset.invert;
   if (id !== undefined) machineSaveOverrides((ov) => { ov.invert[id] = e.target.checked; });
 });
@@ -678,7 +705,9 @@ document.querySelector("#tab-machine").addEventListener("click", async (e) => {
 
 $("#mDelete").addEventListener("click", async () => {
   if (!mach.dash || !confirm(`Delete the dashboard "${mach.dash.name}"? The PLC is not touched.`)) return;
-  await api(`api/dashboards/${encodeURIComponent(mach.dash.id)}`, { method: "DELETE" });
+  try {
+    await api(`api/dashboards/${encodeURIComponent(mach.dash.id)}`, { method: "DELETE" });
+  } catch (err) { alert(`Could not delete: ${err.message}`); return; }
   try { localStorage.removeItem("gm.dash"); } catch (_) { /* ignore */ }
   await machineLoadList();
 });
@@ -686,7 +715,8 @@ $("#mDelete").addEventListener("click", async () => {
 // Which tags say the machine is running (any or all of them on).
 function runningDialog() {
   const L = layoutCopy();
-  L.machine = { running: [...((L.machine || {}).running || [])], mode: (L.machine || {}).mode || "any" };
+  // Keep the heartbeat and freshness settings: this dialog only edits the running tags.
+  L.machine = { ...(L.machine || {}), running: [...((L.machine || {}).running || [])], mode: (L.machine || {}).mode || "any" };
   const dlg = $("#mRunDialog");
   const draw = () => {
     $("#mRunList").innerHTML = L.machine.running.length ? L.machine.running.map((n, i) => `<div class="mtagfield">

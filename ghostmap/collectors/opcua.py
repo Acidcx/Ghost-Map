@@ -197,14 +197,22 @@ class UaBrowser:
         if len(node_ids) > MAX_READ:
             raise ValueError(f"at most {MAX_READ} nodes per read")
         params = ua.ReadParameters()
+        good_ids, out = [], []
         for nid in node_ids:
+            try:
+                parsed = ua.NodeId.from_string(nid)
+            except Exception:
+                # One mistyped NodeId (from a hand-edited CSV) must not fail the read for every other tag.
+                out.append({"node_id": nid, "value": None, "variant_type": None, "status": "BadNodeIdInvalid",
+                            "source_time": None, "server_time": None})
+                continue
             rv = ua.ReadValueId()
-            rv.NodeId = ua.NodeId.from_string(nid)
+            rv.NodeId = parsed
             rv.AttributeId = ua.AttributeIds.Value
             params.NodesToRead.append(rv)
+            good_ids.append(nid)
         results = await self.client.uaclient.read(params) if params.NodesToRead else []
-        out = []
-        for nid, dv in zip(node_ids, results):
+        for nid, dv in zip(good_ids, results):
             out.append({
                 "node_id": nid,
                 "value": jsonable(dv.Value.Value) if dv.Value is not None else None,
@@ -278,6 +286,7 @@ class UaBrowser:
         rows: list[dict] = []
         visited = 0
         truncated = False
+        failed = 0  # folders that could not be browsed
         level: list[tuple[str, str]] = [(start, "")]
         seen = {start}
         depth = 0
@@ -288,7 +297,15 @@ class UaBrowser:
                 try:
                     children = await self._browse_many([nid for nid, _ in batch])
                 except Exception:
-                    children = [[] for _ in batch]
+                    # Retry one node at a time, so one refused node doesn't drop a whole batch of subtrees,
+                    # and count what still failed: a quietly partial export makes a dashboard with holes.
+                    children = []
+                    for nid, _ in batch:
+                        try:
+                            children.append((await self._browse_many([nid]))[0])
+                        except Exception:
+                            failed += 1
+                            children.append([])
                 visited += len(batch)
                 for (nid, path), kids in zip(batch, children):
                     for c in kids:
@@ -312,7 +329,7 @@ class UaBrowser:
                 row.update(variant_type=val["variant_type"], value=val["value"], status=val["status"])
             if progress:
                 progress(visited, len(rows))
-        return {"tags": rows, "truncated": truncated}
+        return {"tags": rows, "truncated": truncated, "failed": failed}
 
 
 def _browse_next_params(cont: bytes) -> ua.BrowseNextParameters:

@@ -298,8 +298,44 @@ def _heartbeat_guess(rows: list[dict]) -> list[str]:
     return [best[1]] if best else []
 
 
+def path_from_node_id(node_id: str) -> str:
+    """A browse path for a row that has none (a Tag Browser watch CSV has only NodeIds).
+
+    ``ns=2;s=[PLC]Program:Main.FAULT.E_Stop`` -> ``PLC/Program:Main/FAULT/E_Stop``
+    """
+    s = node_id.split(";s=", 1)[1] if ";s=" in node_id else node_id
+    s = s.lstrip(":")
+    m = re.match(r"\[([^\]]*)\]", s)
+    head = [m.group(1)] if m and m.group(1) else []
+    s = s[m.end():] if m else s
+    m = re.match(r"(Program:[^.]+)\.", s)
+    if m:
+        head.append(m.group(1))
+        s = s[m.end():]
+    return "/".join(head + [p for p in s.split(".") if p]) or node_id
+
+
+def _section_names(areas: list[dict]) -> None:
+    """Sections are programs; with more than one controller, name them per controller, or every PLC's
+    MainProgram lands on one page."""
+    def plc(a):
+        for k in ITEM_KINDS:
+            for x in a.get(k) or []:
+                nid = x.get("node_id") or next(iter((x.get("members") or {}).values()), "")
+                if nid:
+                    return plc_of(nid)
+        return "other"
+
+    plcs = {id(a): plc(a) for a in areas}
+    many = len(set(plcs.values()) - {"other"}) > 1
+    for a in areas:
+        sec = _section(a["id"])
+        a["section"] = f"{plcs[id(a)]} / {sec}" if many and plcs[id(a)] != "other" else sec
+
+
 def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
-    rows = [r for r in rows if r.get("node_id")]
+    rows = [r if r.get("path") else dict(r, path=path_from_node_id(str(r["node_id"])))
+            for r in rows if r.get("node_id")]
     total = len(rows)
     # FT Linx diagnostics (@...), strings and their SINT characters aren't machine data.
     rows = [r for r in rows if not _excluded(r) and _type(r) not in ("SByte", "Byte", "String")
@@ -439,7 +475,7 @@ def build_layout(rows: Iterable[dict], name: str = "Machine") -> dict:
     out_areas = [a for a in areas.values() if any(a.get(k) for k in ITEM_KINDS)]
     for a in out_areas:
         a.setdefault("axes", [])
-        a["section"] = _section(a["id"])
+    _section_names(out_areas)
     # Best guess at the machine's running bit: a plain name ("Running", "RunF") beats "Line_Run_Enable",
     # and controller scope beats a program's copy. Changeable on the dashboard.
     running.sort(key=lambda x: (-x[0], "program:" in x[1].lower(), len(x[1])))
@@ -498,6 +534,14 @@ SEVERITIES = ("critical", "fault", "warning")
 MAX_LAYOUT_ITEMS = 200000  # dashboards built before whole-controller trimming can be this big
 
 
+def _list(v) -> list:
+    if v is None:
+        return []
+    if not isinstance(v, list):
+        raise ValueError("expected a list")
+    return v
+
+
 def clean_layout(layout: dict, known_ids: Optional[set] = None) -> dict:
     """Validate a layout edited in the UI; keep only known fields. Raises ValueError.
 
@@ -521,13 +565,16 @@ def clean_layout(layout: dict, known_ids: Optional[set] = None) -> dict:
     for a in layout["areas"]:
         if not isinstance(a, dict):
             raise ValueError("bad area")
-        area = {"id": text(a.get("id")), "title": text(a.get("title", a.get("id"))),
-                "section": text(a.get("section") or _section(a.get("id", ""))),
-                "hints": [text(h, 500) for h in a.get("hints", [])][:5],
+        # Area ids are folder paths; deep exports make long ones.
+        area = {"id": text(a.get("id"), 2000), "title": text(a.get("title", a.get("id")), 2000),
+                "section": text(a.get("section") or _section(str(a.get("id", ""))), 500),
+                "hints": [text(h, 500) for h in _list(a.get("hints"))][:5],
                 "suggest_invert": bool(a.get("suggest_invert"))}
         for k in ITEM_KINDS:
             items = []
-            for it in a.get(k, []):
+            for it in _list(a.get(k)):
+                if not isinstance(it, dict):
+                    raise ValueError(f"bad {k} item")
                 count += 1
                 item = {"name": text(it.get("name", "")), "label": text(it.get("label", it.get("name", "")))}
                 if it.get("node_id"):

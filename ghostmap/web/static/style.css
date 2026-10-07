@@ -137,6 +137,7 @@ legend { color: var(--muted); padding: 0 6px; }
 .warnchip { border-color: var(--warn); color: var(--warn); }
 .okchip { border-color: var(--ok); color: var(--ok); }
 .errtext { color: var(--err); }
+.warntext { color: var(--warn); }
 .btn.small { padding: 2px 8px; font-size: 12px; }
 dialog .err { color: var(--err); min-height: 1.2em; font-size: 13px; }
 #usersTable td, #usersTable th { padding: 4px 8px; }

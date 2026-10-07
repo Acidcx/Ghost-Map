@@ -63,6 +63,9 @@ document.querySelectorAll("#tabs button").forEach((b) =>
   b.addEventListener("click", () => showTab(b.dataset.tab)));
 const SCANLESS_TABS = ["opcua", "machine"];  // tabs that work without any scan loaded
 function showTab(name) {
+  // A tab remembered from an admin login is hidden for a viewer: fall back to the first visible one.
+  const btn = document.querySelector(`#tabs button[data-tab="${name}"]`);
+  if (!btn || (btn.classList.contains("admin-only") && document.body.classList.contains("viewer"))) name = "machine";
   const free = SCANLESS_TABS.includes(name);
   document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("hidden", t.id !== `tab-${name}` || (!state.scan && !free)));

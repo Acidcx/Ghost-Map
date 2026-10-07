@@ -30,8 +30,17 @@ IDLE_S = 300
 READS_IN_FLIGHT = 4  # read requests sent to the gateway at once (a whole controller is ~10 requests of 200 tags)
 EVENTS_KEPT = 200   # connection history kept per dashboard
 BAD_KEPT = 50       # unreadable tags listed per dashboard (with their status)
+FAIL_HOLD_S = 5.0   # after a failed connect or read, answer waiting requests with that failure for this long
 log = logging.getLogger("ghostmap.live")
 _ID_RE = re.compile(r"^[a-z0-9-]{1,64}$")
+
+
+def error_text(exc: BaseException) -> str:
+    """A readable one-line reason. A bare timeout has no message of its own."""
+    msg = str(exc).strip()
+    if not msg and isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        msg = "no answer from the gateway in time"
+    return f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
 
 
 def _replace(src: Path, dst: Path, tries: int = 40) -> None:
@@ -66,10 +75,10 @@ class DashboardStore:
                 continue
             try:
                 d = json.loads(p.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            out.append({"id": d["id"], "name": d["name"], "endpoint": d["endpoint"], "created": d["created"],
-                        "summary": d["layout"]["summary"]})
+                out.append({"id": d["id"], "name": d["name"], "endpoint": d["endpoint"], "created": d["created"],
+                            "summary": d["layout"]["summary"]})
+            except (OSError, ValueError, KeyError, TypeError):
+                continue  # one damaged file must not hide every other dashboard
         return out
 
     def load(self, dash_id: str) -> dict:
@@ -81,7 +90,7 @@ class DashboardStore:
     def save(self, dash: dict) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
         p = self._path(dash["id"])
-        tmp = p.with_suffix(".tmp")
+        tmp = p.with_name(f"{p.stem}.{secrets.token_hex(4)}.tmp")  # two saves at once must not share a tmp file
         tmp.write_text(json.dumps(dash, indent=1), encoding="utf-8")
         _replace(tmp, p)
 
@@ -160,15 +169,20 @@ class LiveValues:
             s["used"] = now
             if s.get("result") and now - s["at"] < CACHE_S:
                 return s["result"]
+            # The gateway just failed: don't queue another 15 s connect attempt behind every waiting request.
+            if s.get("fail") and now - s["fail_at"] < FAIL_HOLD_S:
+                return {**s["fail"], "health": self._health(dash, s)}
             try:
                 values, bad, latency = await self._read_with_retry(dash, s, node_ids)
             except Exception as exc:
                 h = s["health"]
                 h["failed"] += 1
-                h["last_error"] = f"{type(exc).__name__}: {exc}"
+                h["last_error"] = error_text(exc)
                 s["result"] = None
-                return {"ok": False, "error": h["last_error"], "values": {}, "since": {}, "bad": [],
-                        "health": self._health(dash, s)}
+                s["fail"] = {"ok": False, "error": h["last_error"], "values": {}, "since": {}, "bad": []}
+                s["fail_at"] = time.time()
+                return {**s["fail"], "health": self._health(dash, s)}
+            s["fail"] = None
             # When did each value last change (as seen by Ghost Map)? Shown as "since" on active alarms.
             if s["started"] is None:
                 s["started"] = now
@@ -201,15 +215,19 @@ class LiveValues:
                 values, bad = await self._read_all(s, node_ids)
                 return values, bad, (time.perf_counter() - t0) * 1000
             except Exception as exc:
-                reason = f"{type(exc).__name__}: {exc}"
+                reason = error_text(exc)
                 was_up = s["browser"] is not None
+                if was_up and not is_connection_error(exc):
+                    # The gateway refused the request, but the session is fine: keep it, don't count a drop.
+                    self._event(s, did, "error", f"read refused: {reason}")
+                    raise
                 await self._close(s)
                 if was_up:
                     s["health"]["drops"] += 1
                     self._event(s, did, "drop", reason)
                 else:
                     self._event(s, did, "error", f"connect failed: {reason}")
-                if attempt == 2 or not (was_up and is_connection_error(exc)):
+                if attempt == 2 or not was_up:
                     raise
         raise RuntimeError("unreachable")
 
@@ -235,6 +253,7 @@ class LiveValues:
                 self._event(s, did, "coverage", f"all {len(values)} tags Good again")
         h["bad_by_plc"] = by_plc
         h["bad_status"] = dict(list(bad.items())[:BAD_KEPT])
+        s["bad_ids"] = set(bad)
 
     def _health(self, dash: dict, s: dict) -> dict:
         now = time.time()
@@ -252,7 +271,7 @@ class LiveValues:
             changed = s["since"].get(nid)
             age = now - (changed or s["started"])
             h["heartbeat"] = {"node_id": nid, "value": s["last"].get(nid), "changed_at": changed,
-                              "age_s": round(age, 1), "good": nid in s["last"] and nid not in h["bad_status"],
+                              "age_s": round(age, 1), "good": nid in s["last"] and nid not in s.get("bad_ids", ()),
                               "frozen": age > HEARTBEAT_STALE_S}
         else:
             h["heartbeat"] = {"node_id": hb[0] if hb else None, "frozen": False}
@@ -334,12 +353,13 @@ class LiveValues:
                     break
                 except Exception as exc:
                     was_up = s["browser"] is not None
-                    await self._close(s)
-                    if was_up:
-                        s["health"]["drops"] += 1
-                        self._event(s, dash["id"], "drop", f"{type(exc).__name__}: {exc}")
+                    if not (was_up and not is_connection_error(exc)):
+                        await self._close(s)
+                        if was_up:
+                            s["health"]["drops"] += 1
+                            self._event(s, dash["id"], "drop", error_text(exc))
                     if attempt == 2 or not (was_up and is_connection_error(exc)):
-                        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "values": {}, "bad": []}
+                        return {"ok": False, "error": error_text(exc), "values": {}, "bad": []}
             out = {"ok": True, "error": None, "values": {r["node_id"]: r["value"] for r in got},
                    "bad": [r["node_id"] for r in got if not str(r["status"]).startswith("Good")]}
             if rows:
