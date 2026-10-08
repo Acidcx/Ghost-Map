@@ -411,7 +411,7 @@ def test_collector_records_first_out_on_one_shared_session(tmp_path, monkeypatch
         assert stop["alarms"] == 2 and stop["tie"] == 1 and stop["end"] is not None
         assert [f["key"] for f in stop["first_out"]] == cur["first_out"]
         assert h["summary"]["first_out"][0]["key"].endswith("E_Stop_Flt")
-        assert "E_Stop_Flt,2," in c.get(f"/api/dashboards/{did}/history.csv", params={"hours": 1}).text
+        assert f"E_Stop_Flt,{stop['id']}," in c.get(f"/api/dashboards/{did}/history.csv", params={"hours": 1}).text
         assert c.get(f"/api/dashboards/{did}/history", params={"hours": 0}).status_code == 400
 
         # Deleting a dashboard stops its collection; the gateway session stays for the other one.
