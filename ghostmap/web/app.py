@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -33,6 +34,8 @@ from ghostmap.protocols.snmp import SnmpCredentials
 from ghostmap.scanner import ScanRequest, run_scan
 from ghostmap.store import ScanStore, inventory_csv
 from ghostmap.web.auth import AuditLog, Lockout, Sessions, UserStore, client_allowed
+from ghostmap.history import RETENTION_DAYS, History
+from ghostmap.web.collector import Collector
 from ghostmap.web.dashboards import DashboardStore, LiveValues, visible_node_ids
 
 UA_IDLE_S = 600        # close OPC UA sessions nobody has used for 10 minutes (re-opened on next use)
@@ -160,8 +163,10 @@ def _needs_admin(request: Request) -> bool:
 
 def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=None,
                allow: Optional[list] = None, demo_opcua: Optional[bool] = None,
-               demo_opcua_port: int = DEMO_UA_PORT) -> FastAPI:
+               demo_opcua_port: int = DEMO_UA_PORT, collect: bool = True) -> FastAPI:
     """``allow``: client networks besides loopback that may connect. ``None`` disables the check (tests).
+
+    ``collect``: read every dashboard in the background and record alarm history (``ghostmap/history.py``).
 
     ``demo_opcua`` (default: same as ``demo``) also starts the simulated OPC UA server for the Tag Browser.
     """
@@ -199,11 +204,15 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     async def lifespan(_app):
         if demo_opcua:
             await start_demo_ua()
+        if collect:
+            collector.start()
         yield
+        await collector.stop()
         for b, *_ in list(ua_sessions.values()):
             if b is not None:
                 await b.disconnect()
         await live.close()
+        history.close()
         if "server" in demo_ua:
             await demo_ua["server"].stop()
 
@@ -220,8 +229,11 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     jobs: dict[str, Job] = {}
     dashboards = DashboardStore(store.root)
     live = LiveValues(resolve_ua_url)
+    history = History(store.root)
+    collector = Collector(dashboards, live, history)
     tasks: set[asyncio.Task] = set()
     app.state.demo_ua, app.state.live, app.state.ua_sessions = demo_ua, live, ua_sessions  # for tests
+    app.state.history, app.state.collector = history, collector
 
     def client_of(request: Request) -> str:
         return request.client.host if request.client else ""
@@ -686,6 +698,8 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     async def delete_dashboard(dash_id: str, request: Request):
         load_dashboard(dash_id)
         dashboards.delete(dash_id)
+        collector.forget(dash_id)
+        history.forget(dash_id)
         await live.forget(dash_id)
         audit.write(client_of(request), who(request), "dashboard.delete", dash_id)
         return {"ok": True}
@@ -696,7 +710,34 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         from ghostmap.analysis.dashboard import node_ids
 
         dash = load_dashboard(dash_id)
-        return await live.read(dash, visible_node_ids(dash, node_ids(dash["layout"])))
+        r = await live.read(dash, visible_node_ids(dash, node_ids(dash["layout"])))
+        # The open stop's first-out alarm(s), so the page can mark which fault came first.
+        return {**r, "first_out": history.current(dash_id)["first_out"], "recording": collector.status(dash_id)["recording"]}
+
+    def history_window(hours: float) -> tuple[float, float]:
+        if not 0 < hours <= RETENTION_DAYS * 24:
+            raise HTTPException(400, f"hours must be between 0 and {RETENTION_DAYS * 24}")
+        now = time.time()
+        return now - hours * 3600, now
+
+    @app.get("/api/dashboards/{dash_id}/history")
+    def dashboard_history(dash_id: str, hours: float = 24, limit: int = 500):
+        """Recorded stops (with first-out), alarm events and totals for the last ``hours``."""
+        load_dashboard(dash_id)
+        since, until = history_window(hours)
+        limit = min(max(limit, 1), 5000)
+        return {"since": since, "until": until, **collector.status(dash_id),
+                "summary": history.summary(dash_id, since, until),
+                "stops": history.stops(dash_id, since, until, limit=limit),
+                "events": history.events(dash_id, since, until, limit=limit)}
+
+    @app.get("/api/dashboards/{dash_id}/history.csv")
+    def dashboard_history_csv(dash_id: str, hours: float = 24):
+        dash = load_dashboard(dash_id)
+        since, until = history_window(hours)
+        name = re.sub(r"[^A-Za-z0-9_-]+", "-", dash["name"]).strip("-") or "machine"
+        return Response(history.events_csv(dash_id, since, until), media_type="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="ghostmap-alarms-{name}-{time.strftime("%Y%m%d")}.csv"'})
 
     @app.get("/api/dashboards/{dash_id}/health")
     def dashboard_health(dash_id: str):
@@ -739,7 +780,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     def debug_info() -> dict:
         return {"version": __version__, "data_dir": str(store.root), "log": str(log_path), "uptime_s": int(time.time() - started),
                 "dashboards": [{k: d[k] for k in ("id", "name", "endpoint", "summary")} for d in dashboards.list()],
-                "comms": live.snapshot(),
+                "comms": live.snapshot(), "gateway_sessions": live.sessions(),
                 "opcua_sessions": [{"url": e[3]["url"], "open": e[0] is not None, "idle_s": int(time.time() - e[1]),
                                     "security": e[3]["security"]} for e in ua_sessions.values()]}
 

@@ -273,7 +273,7 @@ def cmd_web(args) -> int:
                   "  ghostmap user add <name> --role admin", file=sys.stderr)
             return 2
         print(f"Serving on {args.host}; clients allowed: localhost, {', '.join(map(str, allow))}", file=sys.stderr)
-    app = create_app(data_dir=args.data_dir, demo=args.demo, allow=allow)
+    app = create_app(data_dir=args.data_dir, demo=args.demo, allow=allow, collect=not args.no_collect)
     print(f"Ghost Map is running at {url}  (close this window or press Ctrl+C to stop)", file=sys.stderr)
     if args.open:
         threading.Timer(1.5, webbrowser.open, args=(url,)).start()
@@ -393,6 +393,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--allow", action="append", default=[], metavar="IP[/BITS]",
                    help="client address or subnet that may connect besides localhost (e.g. the IXrouter's LAN IP); "
                         "required with --host other than localhost")
+    s.add_argument("--no-collect", action="store_true",
+                   help="don't read dashboards in the background or record alarm history (only while someone watches)")
     s.set_defaults(func=cmd_web)
 
     s = sub.add_parser("user", help="manage web UI logins (any user turns login on)")

@@ -49,6 +49,7 @@ Web face first, because it's the biggest risk:
 Then the service:
 - [ ] `GhostMap.exe service install|uninstall|start|stop` to run as a Windows service at boot
 - [ ] Scheduled background scans and polling, with history in SQLite
+  - [x] Background reading of every machine dashboard (resident collector), one OPC UA session per gateway, alarm history in SQLite (90 days)
 - [ ] Change timeline: device added or removed, firmware changed, port down, new MAC on a port
 - [ ] Alerts: thresholds and rate of change (e.g. CRC errors climbing); notifications through the IXON-approved path
 - [ ] HMI self-health: disk, uptime, Windows event-log errors, FactoryTalk Linx / View services running
@@ -79,7 +80,8 @@ Then the service:
   - [x] Editing: rename, remove, re-point items to other discovered tags, add tags and areas; motion axes as one item; whole-controller builds trimmed (I/O module tags, arrays, long status lists)
   - [x] Whole-controller dashboards: Overview / Drives / per-program pages; program-parameter copies, AOI internals and instruction tags dropped; editable Machine running tags
   - [x] Trustworthy alarms and comms health: alarm check (missing, unreadable, non-BOOL, mostly-on areas), share of tags reading Good per PLC, read time, heartbeat tag that flags frozen data, connection drops and automatic reconnects, debug log and bundle
-  - [ ] Fault text from the L5X, first-out fault, alarm history (needs the resident service and SQLite)
+  - [x] First-out fault and alarm history: stops with their first-out, alarm log, most frequent and longest alarms, comms gaps, CSV export
+  - [ ] Fault text from the L5X
 
 ## Phase 5: cross-layer correlation ("the brain")
 

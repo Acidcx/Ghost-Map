@@ -42,6 +42,10 @@ MACHINES = {
 
 # area -> {tag: initial value}; a dict value is a Logix TIMER (members EN/TT/DN/ACC/PRE).
 _TMR = {"EN": True, "TT": False, "DN": True, "ACC": 2000, "PRE": 2000}
+# A fault that brings a second one with it, 2 s later: the first is the first-out.
+CASCADES = {"E_Stop_Flt": "Roll_Drive_Flt", "Control_Power_Off": "Entry_VFD_Comms_Flt",
+            "HPU_Low_Oil_Level": "HPU_Low_Pressure", "Low_Air_Pressure": "Coil_Car_OverTravel"}
+
 LEVELER_FAULTS = {
     "General": {"E_Stop_Flt": False, "Guard_Door_Open": False, "Low_Air_Pressure": False,
                 "Control_Power_Off": False, "PLC_Battery_Low": False, "PLC_Minor_Flts": 0},
@@ -85,6 +89,8 @@ class SimUaServer:
         self._counters: list[tuple] = []
         self._states: list = []
         self._lev: dict = {}
+        self._bit_by_name: dict = {}
+        self.auto_faults = True  # tests turn the random faults off and use set_fault()
 
     async def _var(self, parent, ns, sid, name, value):
         node = await parent.add_variable(ua.NodeId(sid, ns), ua.QualifiedName(name, ns),
@@ -138,7 +144,7 @@ class SimUaServer:
 
         base = f"{sc}Program:MainProgram"
         fault = await obj(prog, f"{base}.FAULT", "FAULT")
-        bits = []
+        bits, self._bit_by_name = [], {}
         for area, tags in LEVELER_FAULTS.items():
             a = await obj(fault, f"{base}.FAULT.{area}", area)
             for name, v in tags.items():
@@ -151,6 +157,7 @@ class SimUaServer:
                 node = await self._var(a, ns, sid, name, v)
                 if isinstance(v, bool) and area != "Comms" and not name.endswith("_Sts"):
                     bits.append(node)
+                    self._bit_by_name[name] = node
         prod = await obj(prog, f"{base}.Production", "Production")
         nodes = {}
         for name, v in LEVELER_PRODUCTION.items():
@@ -174,13 +181,24 @@ class SimUaServer:
         lev = self._lev
         if not lev:
             return
-        # Every 20 s raise one random fault for about 12 s, so the dashboard has something to show.
-        if n % 20 == 0:
+        # Every 20 s raise one random fault for about 12 s, so the dashboard has something to show. Some
+        # faults bring a second one 2 s later (an E-stop drops the roll drive), so the history has a first-out.
+        if not self.auto_faults:
+            pass
+        elif n % 20 == 0:
             lev["active"] = random.choice(lev["bits"])
+            lev["follow"] = None
             await lev["active"].write_value(ua.Variant(True, ua.VariantType.Boolean))
+        elif n % 20 == 2 and lev["active"] is not None:
+            name = next((k for k, v in self._bit_by_name.items() if v is lev["active"]), "")
+            if name in CASCADES:
+                lev["follow"] = self._bit_by_name[CASCADES[name]]
+                await lev["follow"].write_value(ua.Variant(True, ua.VariantType.Boolean))
         elif n % 20 == 12 and lev["active"] is not None:
-            await lev["active"].write_value(ua.Variant(False, ua.VariantType.Boolean))
-            lev["active"] = None
+            for node in (lev["active"], lev.get("follow")):
+                if node is not None:
+                    await node.write_value(ua.Variant(False, ua.VariantType.Boolean))
+            lev["active"] = lev["follow"] = None
         if not lev.get("hb_frozen"):
             await lev["hb"].write_value(ua.Variant(n, ua.VariantType.Int32))
         running = lev["active"] is None
@@ -196,7 +214,7 @@ class SimUaServer:
         await p["Coil_Count"].write_value(ua.Variant(lev["coils"], ua.VariantType.Int32))
         await p["Coil_Length_Ft"].write_value(ua.Variant(lev["coil_ft"], ua.VariantType.Float))
         ax = lev["axis"]
-        faulted = n % 60 >= 45  # the roll axis faults on motor over-temperature for 15 s each minute
+        faulted = self.auto_faults and n % 60 >= 45  # the roll axis faults on motor over-temperature for 15 s a minute
         await ax["CIPAxisState"].write_value(ua.Variant(8 if faulted else 4, ua.VariantType.Int32))
         await ax["AxisFault"].write_value(ua.Variant(1 if faulted else 0, ua.VariantType.Int32))
         await ax["MotorOvertemperatureFault"].write_value(ua.Variant(faulted, ua.VariantType.Boolean))
@@ -230,6 +248,10 @@ class SimUaServer:
                 await node.write_value(ua.DataValue(ua.Variant(v, ua.VariantType.Boolean), code))
                 n += 1
         return n
+
+    async def set_fault(self, name: str, on: bool = True) -> None:
+        """Turn one LEVELER_01 fault bit on or off (tests; set ``auto_faults = False`` first)."""
+        await self._bit_by_name[name].write_value(ua.Variant(on, ua.VariantType.Boolean))
 
     def freeze_heartbeat(self, frozen: bool = True) -> None:
         """Stop the heartbeat counter, like a gateway serving stale values (tests)."""

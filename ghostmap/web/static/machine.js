@@ -46,6 +46,9 @@ async function machineShow(id) {
   mach.det = new Map();
   mach.events = [];
   mach.verify = null;
+  mach.hist = null;
+  mach.histAt = 0;
+  mach.histStop = null;
   try { localStorage.setItem("gm.dash", id); } catch (_) { /* ignore */ }
   machineRender();
   machinePoll();
@@ -75,6 +78,7 @@ async function machinePoll() {
     mach.vals = v;
     if (machineView() === "health") mach.events = (await api(`api/dashboards/${encodeURIComponent(id)}/health`)).events;
     if (machineView() === "drives") await Promise.all([...mach.axisOpen].map(axisLoad));
+    if (machineView() === "history" && Date.now() - mach.histAt > HIST_REFRESH_MS) await historyLoad();
   } catch (e) {
     mach.vals = { ok: false, error: e.message, values: {}, since: {}, bad: [], health: mach.vals?.health };
   }
@@ -172,6 +176,7 @@ function machineSetView(view) {
   try { localStorage.setItem(`gm.dash.view.${mach.dash.id}`, view); } catch (_) { /* ignore */ }
   machineRender();
   window.scrollTo(0, 0);
+  if (view === "history") historyLoad().then(machineRender);
 }
 
 function runningState(L, v, known) {
@@ -263,16 +268,21 @@ function machineRender() {
   if (view.startsWith("sec:") && !sections.some((x) => `sec:${x.name}` === view)) view = "overview";
   if (view === "drives" && !axesTotal) view = "overview";
   const dotFor = (w) => (w === "ok" ? "okon" : w === "err" ? "erron" : w === "warn" ? "warnon" : "unk");
-  $("#mNav").innerHTML = [["overview", "Overview", null], ["health", "Health", comms.cls], ...(axesTotal ? [["drives", `Drives (${axesTotal})`, faultedAxes.length ? "err" : known ? "ok" : ""]] : []),
+  $("#mNav").innerHTML = [["overview", "Overview", null], ["health", "Health", comms.cls], ["history", "History", null], ...(axesTotal ? [["drives", `Drives (${axesTotal})`, faultedAxes.length ? "err" : known ? "ok" : ""]] : []),
     ...sections.map((sec) => [`sec:${sec.name}`, sectionName(sec.name), secInfo(sec).worst])]
     .map(([id, label, w]) => `<button class="${view === id ? "active" : ""}" data-view="${esc(id)}">${w !== null ? `<span class="dot ${dotFor(w)}"></span> ` : ""}${esc(label)}</button>`).join("");
 
   let html = html0;
   if (view === "overview") {
-    const rows = [...faultedAxes.map((x) => `<div class="malarm on"><span class="dot erron"></span><span class="l" title="${tip(x)}">${esc(x.label)}</span>
-        <span class="sev error">axis ${esc(AXIS_STATES[x.st.state] || "fault")}</span><a href="#" class="small" data-view="drives">Drives</a></div>`),
-      ...active.map((x) => `<div class="malarm on"><span class="dot ${x.severity === "warning" ? "warnon" : "erron"}"></span>
-        <span class="l" title="${tip(x)}">${esc(x.label)}</span>
+    // The alarm(s) that started the current stop, as recorded by the history: listed first, marked.
+    const first = new Set(vals?.first_out || []);
+    const isFirst = (x) => first.has(x.node_id) || first.has(`axis:${axKey(x)}`);
+    const firstChip = (x) => (isFirst(x) ? `<span class="chip errchip" title="Went active first in this stop${first.size > 1 ? ` (tie of ${first.size}: active in the same read)` : ""}">First out</span>` : "");
+    const byFirst = (list) => [...list.filter(isFirst), ...list.filter((x) => !isFirst(x))];
+    const rows = [...byFirst(faultedAxes).map((x) => `<div class="malarm on"><span class="dot erron"></span><span class="l" title="${tip(x)}">${esc(x.label)}</span>
+        ${firstChip(x)}<span class="sev error">axis ${esc(AXIS_STATES[x.st.state] || "fault")}</span><a href="#" class="small" data-view="drives">Drives</a></div>`),
+      ...byFirst(active).map((x) => `<div class="malarm on"><span class="dot ${x.severity === "warning" ? "warnon" : "erron"}"></span>
+        <span class="l" title="${tip(x)}">${esc(x.label)}</span>${firstChip(x)}
         <a href="#" class="small muted nowrap mwhere" data-view="sec:${esc(x.area.section || "Controller")}" title="${esc(x.area.title)}">${esc(sectionName(x.area.section || "Controller"))} &rsaquo; ${esc(x.area.title)}</a>
         <span class="sev ${x.severity === "warning" ? "warning" : "error"}">${esc(SEV_LABEL[x.severity] || x.severity)}</span>
         <span class="small muted nowrap">${esc(fmtSince(x.node_id))}</span></div>`)];
@@ -293,6 +303,8 @@ function machineRender() {
     html = drivesTable(states, v, known);
   } else if (view === "health") {
     html = healthView(L, vals);
+  } else if (view === "history") {
+    html = historyView();
   } else {
     const sec = sections.find((x) => `sec:${x.name}` === view);
     const rank = ({ s }) => (s.active.some((x) => x.severity === "critical") ? 0
@@ -366,6 +378,73 @@ function commsState(vals) {
 }
 
 const EVENT_LABEL = { connected: "Connected", drop: "Dropped", reconnected: "Reconnected", error: "Error", coverage: "Tags" };
+
+// ------------------------------------------------------------------ alarm history (recorded by the server)
+const HIST_REFRESH_MS = 10000;
+const HIST_WINDOWS = [[8, "Last 8 h"], [24, "Last 24 h"], [168, "Last 7 days"], [720, "Last 30 days"], [2160, "Last 90 days"]];
+function histHours() {
+  try { return Number(localStorage.getItem("gm.hist.hours")) || 24; } catch (_) { return 24; }
+}
+async function historyLoad() {
+  const id = mach.dash.id;
+  try {
+    const h = await api(`api/dashboards/${encodeURIComponent(id)}/history?hours=${histHours()}`, { timeout: 30000 });
+    if (mach.dash?.id === id) mach.hist = h;
+  } catch (e) {
+    mach.hist = { error: e.message };
+  }
+  mach.histAt = Date.now();
+}
+const fmtWhen = (t) => (t ? new Date(t * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "-");
+const fmtDur = (a, b) => (b ? fmtAge(b - a) : `${fmtAge(Date.now() / 1000 - a)}, ongoing`);
+
+function historyView() {
+  const H = mach.hist;
+  const hours = histHours();
+  const tools = `<div class="mtools"><select id="mHistHours">${HIST_WINDOWS.map(([h, l]) => `<option value="${h}" ${h === hours ? "selected" : ""}>${l}</option>`).join("")}</select>
+    <a class="btn ghost small" href="api/dashboards/${encodeURIComponent(mach.dash.id)}/history.csv?hours=${hours}">Download CSV</a>
+    <span class="small muted">${H?.until ? `updated ${esc(fmtClock(H.until))}` : ""}</span></div>`;
+  if (!H) return `<div class="panel"><h3>History</h3>${tools}<p class="muted small">Loading...</p></div>`;
+  if (H.error) return `<div class="panel"><h3>History</h3>${tools}<p class="errtext small">${esc(H.error)}</p></div>`;
+  const S = H.summary;
+  const note = H.recording ? "" : `<div class="mbanner warn">Not recording right now: history only grows while Ghost Map runs with the background collector on (it is off with <span class="mono">--no-collect</span>).</div>`;
+  const tiles = [[S.stops, "Stops", S.stops ? "warn" : "ok"], [S.alarms, "Alarm events", ""],
+    [S.comms_gaps ? `${S.comms_gaps} · ${fmtAge(S.comms_gap_seconds)}` : "0", "Comms gaps", S.comms_gaps ? "warn" : "ok"]]
+    .map(([n, l, cls]) => `<div class="tile ${cls}"><div class="n">${esc(String(n))}</div><div class="l">${l}</div></div>`).join("");
+  const firstOut = (s) => (!s.first_known ? `<span class="muted" title="Already active when recording started, or came in during a comms gap">unknown</span>`
+    : s.first_out.map((f) => `<b>${esc(f.label)}</b> <span class="small muted">${esc(f.area_title || "")}</span>`).join("<br>")
+      + (s.tie > 1 ? ` <span class="chip" title="Went active in the same read, about a second apart or less">tie of ${s.tie}</span>` : ""));
+  const evRow = (e) => `<tr class="${e.end ? "" : "bad"}"><td class="nowrap">${esc(fmtWhen(e.start))}${e.at_start ? ` <span class="small muted" title="Already active when recording started">(or earlier)</span>` : ""}</td>
+    <td class="nowrap">${esc(fmtDur(e.start, e.end))}${e.end_uncertain ? ` <span class="small muted" title="Cleared during a comms gap or while Ghost Map was stopped">(about)</span>` : ""}</td>
+    <td class="l" title="${esc(e.node_id || "")}">${esc(e.label)}${e.first_out ? ` <span class="chip errchip">First out</span>` : ""}</td>
+    <td class="small muted">${esc(e.area_title || "")}</td><td><span class="sev ${e.severity === "warning" ? "warning" : "error"}">${esc(SEV_LABEL[e.severity] || e.severity)}</span></td></tr>`;
+  const evHead = `<thead><tr><th>Start</th><th>Lasted</th><th>Alarm</th><th>Area</th><th>Severity</th></tr></thead>`;
+  const stopRows = H.stops.map((s) => {
+    const open = mach.histStop === s.id;
+    const evs = H.events.filter((e) => e.stop === s.id).sort((a, b) => a.start - b.start);
+    return `<tr class="click ${s.end ? "" : "bad"}" data-histstop="${s.id}"><td class="nowrap">${esc(fmtWhen(s.start))}</td>
+      <td class="nowrap">${esc(fmtDur(s.start, s.end))}${s.end_uncertain ? ` <span class="small muted">(about)</span>` : ""}</td>
+      <td class="l">${firstOut(s)}</td><td>${s.alarms}</td>
+      <td class="small muted">${s.was_running === null ? "-" : s.was_running ? "running" : "stopped"}</td>
+      <td><button class="btn ghost small" data-histstop="${s.id}">${open ? "Hide" : "Alarms"}</button></td></tr>
+      ${open ? `<tr class="maxisdetail"><td colspan="6">${evs.length ? `<table class="mdrives">${evHead}<tbody>${evs.map(evRow).join("")}</tbody></table>`
+        : `<span class="small muted">Its alarms are older than the alarm log below shows; download the CSV for all of them.</span>`}</td></tr>` : ""}`;
+  }).join("");
+  const actor = (list, val) => (list.length ? `<table class="mdrives"><tbody>${list.map((p) => `<tr><td class="l" title="${esc(p.key)}">${esc(p.label)}
+    <span class="small muted">${esc(p.area_title || "")}</span></td><td class="nowrap">${val(p)}</td></tr>`).join("")}</tbody></table>` : `<p class="small muted">None.</p>`);
+  return `${note}<div class="tiles">${tiles}</div>
+    <div class="panel"><div class="uahead"><h3>Stops</h3>${tools}</div>
+      <p class="small muted">A stop runs from the first alarm after a clear machine until every alarm has cleared. <b>First out</b> is the alarm that started it. Reads are about a second apart, so alarms within the same second are a tie.</p>
+      ${H.stops.length ? `<div class="tablewrap"><table class="mdrives"><thead><tr><th>Start</th><th>Lasted</th><th>First out</th><th>Alarms</th><th>Machine before</th><th></th></tr></thead>
+        <tbody>${stopRows}</tbody></table></div>` : `<p class="small"><span class="dot okon"></span> No stops in this window.</p>`}</div>
+    <div class="mgrid">
+      <div class="panel"><h3>First out most often</h3>${actor(S.first_out, (p) => `${p.first_out}&times;`)}</div>
+      <div class="panel"><h3>Active most often</h3>${actor(S.most_often, (p) => `${p.count}&times; &middot; ${esc(fmtAge(p.seconds))}`)}</div>
+      <div class="panel"><h3>Active longest</h3>${actor(S.longest, (p) => `${esc(fmtAge(p.seconds))} &middot; ${p.count}&times;`)}</div>
+    </div>
+    <div class="panel"><h3>Alarm log</h3><p class="small muted">Newest first${H.events.length >= 500 ? ", latest 500 (the CSV has them all)" : ""}.</p>
+      ${H.events.length ? `<div class="tablewrap"><table class="mdrives">${evHead}<tbody>${H.events.map(evRow).join("")}</tbody></table></div>` : `<p class="small muted">No alarms in this window.</p>`}</div>`;
+}
 
 function healthView(L, vals) {
   const H = vals?.health || {};
@@ -626,6 +705,14 @@ $("#mAreas").addEventListener("input", (e) => {
 });
 $("#mAreas").addEventListener("change", (e) => {
   if (e.target.id === "mOnlyActive") { mach.onlyActive = e.target.checked; machineRender(); return; }
+  if (e.target.id === "mHistHours") {
+    try { localStorage.setItem("gm.hist.hours", e.target.value); } catch (_) { /* ignore */ }
+    e.target.blur();
+    mach.hist = null;
+    machineRender();
+    historyLoad().then(machineRender);
+    return;
+  }
   if (e.target.id === "mFreshness" || e.target.id === "mMaxMs") { e.target.blur(); saveFreshness(); return; }
   const id = e.target.dataset.invert;
   if (id !== undefined) machineSaveOverrides((ov) => { ov.invert[id] = e.target.checked; });
@@ -635,6 +722,13 @@ document.querySelector("#tab-machine").addEventListener("click", async (e) => {
   if (el?.dataset.view && !e.target.dataset.axis && !e.target.closest("button[data-edit]")) {
     e.preventDefault();
     machineSetView(el.dataset.view);
+    return;
+  }
+  const hs = e.target.closest("[data-histstop]");
+  if (hs) {
+    const sid = Number(hs.dataset.histstop);
+    mach.histStop = mach.histStop === sid ? null : sid;
+    machineRender();
     return;
   }
   const t = e.target.dataset;

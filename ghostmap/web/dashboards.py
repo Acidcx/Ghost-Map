@@ -4,10 +4,12 @@ A dashboard is a layout built by ``analysis/dashboard.py`` from a tag export,
 plus the endpoint to read from and the user's overrides (areas flipped to
 "on = healthy", hidden tags). Saved as ``<data_dir>/dashboards/<id>.json``.
 
-Live values: the server keeps one anonymous OPC UA session per dashboard and
-caches each read for ``CACHE_S``, so several people watching the same machine
-cost the gateway one read per second, not one each. Sessions nobody has looked
-at for ``IDLE_S`` are closed.
+Live values: the server keeps one anonymous OPC UA session per gateway, shared
+by every dashboard on that gateway, and caches each dashboard's read for
+``CACHE_S``, so several people watching the same machine cost the gateway one
+read per second, not one each. Sessions nothing has read for ``IDLE_S`` are
+closed (the background collector reads every dashboard, so in normal running
+they stay open).
 """
 
 from __future__ import annotations
@@ -123,8 +125,13 @@ class DashboardStore:
         p.with_suffix(".tags.json").unlink(missing_ok=True)
 
 
+def endpoint_key(endpoint: str) -> str:
+    """Dashboards whose endpoints match here share one gateway session."""
+    return str(endpoint or "").strip().lower()
+
+
 class LiveValues:
-    """One cached, read-only OPC UA session per dashboard, plus a record of how well it is reading.
+    """Read-only OPC UA sessions, one per gateway, plus a per-dashboard record of how well it is reading.
 
     Comms health (per dashboard): how many tags came back Good on the last read, read latency, when the
     session dropped and reconnected and why, and when the heartbeat tag last changed. A dropped session is
@@ -135,19 +142,29 @@ class LiveValues:
         self.resolve_url = resolve_url
         self._s: dict[str, dict] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        # One session per gateway: {"browser", "lock" (held while connecting), "gen" (bumped on each new session)}.
+        self._conns: dict[str, dict] = {}
 
-    def _state(self, did: str) -> dict:
+    def _state(self, did: str, dash: dict | None = None) -> dict:
         s = self._s.get(did)
         if s is None:
             now = time.time()
             s = self._s[did] = {
-                "browser": None, "since": {}, "last": {}, "at": 0, "result": None, "used": now, "started": None,
+                "key": "", "gen": None, "since": {}, "last": {}, "at": 0, "result": None, "used": now, "started": None,
                 "events": deque(maxlen=EVENTS_KEPT),
                 "health": {"connected_at": None, "cycles": 0, "failed": 0, "drops": 0, "reconnects": 0,
                            "last_ok": None, "last_error": None, "latency_ms": None, "latency_max_ms": 0,
                            "latency_avg_ms": None, "good": 0, "total": 0, "bad_by_plc": {}, "bad_status": {},
                            "last_any_change": None}}
+        if dash is not None:
+            s["key"] = endpoint_key(dash.get("endpoint"))
         return s
+
+    def _conn(self, s: dict) -> dict:
+        c = self._conns.get(s["key"])
+        if c is None:
+            c = self._conns[s["key"]] = {"browser": None, "lock": asyncio.Lock(), "gen": 0, "url": None}
+        return c
 
     def _event(self, s: dict, did: str, kind: str, detail: str = "") -> None:
         ev = s["events"][-1] if s["events"] else None
@@ -164,7 +181,7 @@ class LiveValues:
         lock = self._locks.setdefault(did, asyncio.Lock())
         async with lock:
             await self._drop_idle(keep=did)
-            s = self._state(did)
+            s = self._state(did, dash)
             now = time.time()
             s["used"] = now
             if s.get("result") and now - s["at"] < CACHE_S:
@@ -205,23 +222,20 @@ class LiveValues:
 
         did = dash["id"]
         for attempt in (1, 2):
-            reconnecting = s["browser"] is None and s["health"]["connected_at"] is not None
+            browser = None
             try:
-                await self._ensure(dash, s)
-                if reconnecting:
-                    s["health"]["reconnects"] += 1
-                    self._event(s, did, "reconnected")
+                browser = await self._ensure(dash, s)
                 t0 = time.perf_counter()
-                values, bad = await self._read_all(s, node_ids)
+                values, bad = await self._read_all(browser, node_ids)
                 return values, bad, (time.perf_counter() - t0) * 1000
             except Exception as exc:
                 reason = error_text(exc)
-                was_up = s["browser"] is not None
+                was_up = browser is not None
                 if was_up and not is_connection_error(exc):
                     # The gateway refused the request, but the session is fine: keep it, don't count a drop.
                     self._event(s, did, "error", f"read refused: {reason}")
                     raise
-                await self._close(s)
+                await self._close_browser(s, browser)
                 if was_up:
                     s["health"]["drops"] += 1
                     self._event(s, did, "drop", reason)
@@ -276,12 +290,14 @@ class LiveValues:
         else:
             h["heartbeat"] = {"node_id": hb[0] if hb else None, "frozen": False}
         h["started"] = s["started"]
-        h["connected"] = s["browser"] is not None
+        c = self._conns.get(s["key"])
+        h["connected"] = bool(c and c["browser"] is not None and s["gen"] == c["gen"])
+        h["shared_with"] = sum(1 for o in self._s.values() if o is not s and o["key"] == s["key"])
         return h
 
     def health(self, dash: dict) -> dict:
         """Comms health and the connection history, without reading anything."""
-        s = self._state(dash["id"])
+        s = self._state(dash["id"], dash)
         return {**self._health(dash, s), "events": list(s["events"])[::-1]}
 
     def history(self, dash: dict) -> dict:
@@ -289,41 +305,52 @@ class LiveValues:
         s = self._s.get(dash["id"]) or {}
         return {"since": dict(s.get("since", {})), "started": s.get("started"), "now": time.time()}
 
-    async def _ensure(self, dash: dict, s: dict) -> dict:
+    async def _ensure(self, dash: dict, s: dict):
+        """The gateway's shared session, opened if needed. Returns the browser to read with."""
         from ghostmap.collectors.opcua import UaBrowser
 
-        if s["browser"] is None:
-            browser = UaBrowser(await self.resolve_url(dash["endpoint"]))
-            try:
-                await asyncio.wait_for(browser.connect(), timeout=15)
-            except BaseException:
-                await browser.disconnect()
-                raise
-            s["browser"] = browser
-            first = s["health"]["connected_at"] is None
+        c = self._conn(s)
+        if c["browser"] is None:
+            async with c["lock"]:  # several dashboards may find it closed at once; only one connects
+                if c["browser"] is None:
+                    browser = UaBrowser(await self.resolve_url(dash["endpoint"]))
+                    try:
+                        await asyncio.wait_for(browser.connect(), timeout=15)
+                    except BaseException:
+                        await browser.disconnect()
+                        raise
+                    c.update(browser=browser, gen=c["gen"] + 1, url=browser.url)
+                    log.info("gateway session %d open to %s", c["gen"], browser.url)
+        # This dashboard's view of it: first connection, or a new session after a drop.
+        if s["gen"] != c["gen"]:
+            if s["gen"] is None:
+                self._event(s, dash["id"], "connected", c["url"] or "")
+            else:
+                s["health"]["reconnects"] += 1
+                self._event(s, dash["id"], "reconnected")
+            s["gen"] = c["gen"]
             s["health"]["connected_at"] = time.time()
-            if first:
-                self._event(s, dash["id"], "connected", browser.url)
-        return s
+        return c["browser"]
+
+    async def _close_browser(self, s: dict, browser) -> None:
+        """Close the gateway session after a drop, unless another dashboard already replaced it."""
+        c = self._conns.get(s["key"])
+        if browser is None or c is None or c["browser"] is not browser:
+            return
+        c["browser"] = None
+        await browser.disconnect()
 
     @staticmethod
-    async def _close(s: dict) -> None:
-        b, s["browser"] = s.get("browser"), None
-        if b is not None:
-            await b.disconnect()
-
-    @staticmethod
-    async def _read_all(s: dict, node_ids: list[str]) -> tuple[dict, dict]:
-        rows = await LiveValues._read_rows(s, node_ids)
+    async def _read_all(browser, node_ids: list[str]) -> tuple[dict, dict]:
+        rows = await LiveValues._read_rows(browser, node_ids)
         values = {r["node_id"]: r["value"] for r in rows}
         bad = {r["node_id"]: r["status"] for r in rows if not str(r["status"]).startswith("Good")}
         return values, bad
 
     @staticmethod
-    async def _read_rows(s: dict, node_ids: list[str]) -> list[dict]:
+    async def _read_rows(browser, node_ids: list[str]) -> list[dict]:
         from ghostmap.collectors.opcua import MAX_READ
 
-        browser = s["browser"]
         if browser is None:
             raise ConnectionError("session closed")
         sem = asyncio.Semaphore(READS_IN_FLIGHT)
@@ -344,17 +371,18 @@ class LiveValues:
 
         lock = self._locks.setdefault(dash["id"], asyncio.Lock())
         async with lock:
-            s = self._state(dash["id"])
+            s = self._state(dash["id"], dash)
             s["used"] = time.time()
             for attempt in (1, 2):
+                browser = None
                 try:
-                    await self._ensure(dash, s)
-                    got = await self._read_rows(s, node_ids)
+                    browser = await self._ensure(dash, s)
+                    got = await self._read_rows(browser, node_ids)
                     break
                 except Exception as exc:
-                    was_up = s["browser"] is not None
+                    was_up = browser is not None
                     if not (was_up and not is_connection_error(exc)):
-                        await self._close(s)
+                        await self._close_browser(s, browser)
                         if was_up:
                             s["health"]["drops"] += 1
                             self._event(s, dash["id"], "drop", error_text(exc))
@@ -373,16 +401,31 @@ class LiveValues:
             lock = self._locks.get(did)
             if did != keep and now - s.get("used", 0) > IDLE_S and not (lock and lock.locked()):
                 self._s.pop(did, None)
-                await self._close(s)
+        await self._close_unused()
+
+    async def _close_unused(self) -> None:
+        """Close gateway sessions no remaining dashboard reads through."""
+        in_use = {s["key"] for s in self._s.values()}
+        for key, c in list(self._conns.items()):
+            if key not in in_use and not c["lock"].locked():
+                self._conns.pop(key, None)
+                if c["browser"] is not None:
+                    await c["browser"].disconnect()
 
     async def forget(self, dash_id: str) -> None:
-        s = self._s.pop(dash_id, None)
-        if s:
-            await self._close(s)
+        self._s.pop(dash_id, None)
+        self._locks.pop(dash_id, None)
+        await self._close_unused()
 
     async def close(self) -> None:
-        for did in list(self._s):
-            await self.forget(did)
+        self._s.clear()
+        await self._close_unused()
+
+    def sessions(self) -> list[dict]:
+        """Open gateway sessions and how many dashboards share each, for the debug bundle."""
+        return [{"endpoint": key, "url": c["url"], "open": c["browser"] is not None, "session": c["gen"],
+                 "dashboards": sum(1 for s in self._s.values() if s["key"] == key)}
+                for key, c in self._conns.items()]
 
     def snapshot(self) -> dict:
         """Health of every live dashboard session, for the debug bundle (no tag values)."""

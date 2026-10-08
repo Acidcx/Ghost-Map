@@ -326,8 +326,8 @@ def test_comms_health_alarm_check_and_reconnects(tmp_path, monkeypatch):
         c.portal.call(sim.fault_comms, "Hydraulics", False)
 
         # The connection drops under us: the next read re-opens it and still returns data.
-        s = app.state.live._s[did]
-        c.portal.call(s["browser"].client.disconnect)
+        live = app.state.live
+        c.portal.call(live._conn(live._s[did])["browser"].client.disconnect)
         time.sleep(1.1)
         v = c.get(f"/api/dashboards/{did}/values").json()
         assert v["ok"], v
@@ -355,3 +355,65 @@ def test_comms_health_alarm_check_and_reconnects(tmp_path, monkeypatch):
         z = zipfile.ZipFile(io.BytesIO(c.get("/api/debug/bundle").content))
         assert "info.json" in z.namelist() and "logs/ghostmap.log" in z.namelist()
         assert '"drops": 1' in z.read("info.json").decode()
+
+
+def test_collector_records_first_out_on_one_shared_session(tmp_path, monkeypatch):
+    """With nobody watching, the collector reads both dashboards through one gateway session and records
+    the E-stop as the first-out of the stop it causes."""
+    import time
+
+    from ghostmap.web import collector as collector_mod
+
+    monkeypatch.setattr(collector_mod, "RESCAN_S", 0.2)
+    app = create_app(data_dir=str(tmp_path), demo_opcua=True, demo_opcua_port=free_port())
+    with TestClient(app, headers=H) as c:
+        sim = app.state.demo_ua["server"]
+        sim.auto_faults = False
+        url = c.get("/api/info").json()["demo_opcua"]
+        sid = c.post("/api/opcua/connect", json={"url": url}).json()["sid"]
+        gw = find(c, sid, None, "FactoryTalk Linx Gateway")
+        lev = find(c, sid, gw["node_id"], "LEVELER_01")
+        rows = [{"path": t["path"], "node_id": t["node_id"], "type": t["variant_type"], "value": t["value"]}
+                for t in run_export(c, sid, lev["node_id"])["tags"]]
+        did = c.post("/api/dashboards", json={"name": "Leveler", "endpoint": url, "tags": rows}).json()["id"]
+        dash = c.get(f"/api/dashboards/{did}").json()
+        comms = next(a["id"] for a in dash["layout"]["areas"] if a["id"].endswith("Comms"))
+        c.post(f"/api/dashboards/{did}/overrides", json={"invert": {comms: True}, "hidden": []})
+        faults_only = [r for r in rows if "/FAULT/" in r["path"]]
+        other = c.post("/api/dashboards", json={"name": "Faults", "endpoint": url, "tags": faults_only}).json()["id"]
+
+        def wait(cond, secs=10):
+            end = time.time() + secs
+            while time.time() < end:
+                if cond():
+                    return True
+                time.sleep(0.2)
+            return False
+
+        live = app.state.live
+        assert wait(lambda: did in live._s and other in live._s and live.sessions()[0]["open"])
+        assert len(live.sessions()) == 1 and live.sessions()[0]["dashboards"] == 2
+        assert c.get(f"/api/dashboards/{did}/health").json()["shared_with"] == 1
+        assert wait(lambda: app.state.history.current(did)["stop"] is None)  # clear before the test fault
+
+        c.portal.call(sim.set_fault, "E_Stop_Flt", True)
+        time.sleep(1.5)
+        c.portal.call(sim.set_fault, "Roll_Drive_Flt", True)
+        time.sleep(1.5)
+        cur = c.get(f"/api/dashboards/{did}/values").json()
+        assert cur["recording"] and len(cur["first_out"]) == 1 and cur["first_out"][0].endswith("E_Stop_Flt")
+        c.portal.call(sim.set_fault, "E_Stop_Flt", False)
+        c.portal.call(sim.set_fault, "Roll_Drive_Flt", False)
+        assert wait(lambda: app.state.history.current(did)["stop"] is None)
+
+        h = c.get(f"/api/dashboards/{did}/history", params={"hours": 1}).json()
+        stop = next(s for s in h["stops"] if s["first_known"])
+        assert stop["alarms"] == 2 and stop["tie"] == 1 and stop["end"] is not None
+        assert [f["key"] for f in stop["first_out"]] == cur["first_out"]
+        assert h["summary"]["first_out"][0]["key"].endswith("E_Stop_Flt")
+        assert "E_Stop_Flt,2," in c.get(f"/api/dashboards/{did}/history.csv", params={"hours": 1}).text
+        assert c.get(f"/api/dashboards/{did}/history", params={"hours": 0}).status_code == 400
+
+        # Deleting a dashboard stops its collection; the gateway session stays for the other one.
+        c.delete(f"/api/dashboards/{other}")
+        assert wait(lambda: live.sessions() and live.sessions()[0]["dashboards"] == 1)

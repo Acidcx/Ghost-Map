@@ -7,6 +7,7 @@ ghostmap/
   analysis/    pure functions: topology correlation, diagnostics rules, scan diff
   scanner.py   orchestrates a scan -> ScanResult
   store.py     JSON scan history + CSV export
+  history.py   alarm history with first-out (SQLite), fed by web/collector.py
   web/         FastAPI app + static single-page UI (no external assets)
   sim/         simulated machine cell, ListIdentity responder, demo data
   cli.py       argparse CLI
