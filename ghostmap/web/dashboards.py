@@ -176,7 +176,8 @@ class LiveValues:
         level = logging.WARNING if kind in ("drop", "error") else logging.INFO
         log.log(level, "dashboard %s: %s %s", did, kind, detail)
 
-    async def read(self, dash: dict, node_ids: list[str]) -> dict:
+    async def read(self, dash: dict, node_ids: list[str], max_age: float = CACHE_S) -> dict:
+        """The dashboard's values, from a read no older than ``max_age`` seconds (shared by everyone asking)."""
         did = dash["id"]
         lock = self._locks.setdefault(did, asyncio.Lock())
         async with lock:
@@ -184,7 +185,7 @@ class LiveValues:
             s = self._state(did, dash)
             now = time.time()
             s["used"] = now
-            if s.get("result") and now - s["at"] < CACHE_S:
+            if s.get("result") and now - s["at"] < max_age:
                 return s["result"]
             # The gateway just failed: don't queue another 15 s connect attempt behind every waiting request.
             if s.get("fail") and now - s["fail_at"] < FAIL_HOLD_S:

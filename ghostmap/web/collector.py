@@ -97,7 +97,9 @@ class Collector:
             t0 = time.monotonic()
             try:
                 dash = self._dash[did]
-                r = await self.live.read(dash, visible_node_ids(dash, node_ids(dash["layout"])))
+                # Always a fresh read (a page's read from a moment ago is fine): with the one-second cache a
+                # read exactly a period later could be served from cache, halving the history's resolution.
+                r = await self.live.read(dash, visible_node_ids(dash, node_ids(dash["layout"])), max_age=self.period / 4)
                 at = r.get("at") if r.get("ok") else None
                 self.history.observe(dash, r, now=at)
                 st = self._status.setdefault(did, {})

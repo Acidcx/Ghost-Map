@@ -394,10 +394,14 @@ def test_collector_records_first_out_on_one_shared_session(tmp_path, monkeypatch
         assert wait(lambda: did in live._s and other in live._s and live.sessions()[0]["open"])
         assert len(live.sessions()) == 1 and live.sessions()[0]["dashboards"] == 2
         assert c.get(f"/api/dashboards/{did}/health").json()["shared_with"] == 1
+        # A fresh read every second, not every other second from the one-second cache.
+        n0 = live._s[did]["health"]["cycles"]
+        time.sleep(4)
+        assert live._s[did]["health"]["cycles"] - n0 >= 3
         assert wait(lambda: app.state.history.current(did)["stop"] is None)  # clear before the test fault
 
         c.portal.call(sim.set_fault, "E_Stop_Flt", True)
-        time.sleep(1.5)
+        time.sleep(2.5)  # more than one read apart, so not a tie
         c.portal.call(sim.set_fault, "Roll_Drive_Flt", True)
         time.sleep(1.5)
         cur = c.get(f"/api/dashboards/{did}/values").json()
