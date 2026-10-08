@@ -102,15 +102,20 @@ ghostmap discover 127.0.10.0/24
 
 ## Web UI
 
-`ghostmap web` serves on `127.0.0.1:8470` by default. It has these tabs:
+`ghostmap web` serves on `127.0.0.1:8470` by default. Its pages are grouped by where their data comes from:
 
-- **Machine**: a dashboard for the machine, laid out automatically from its PLC tags (see below). Viewers can watch it; admins build and edit it.
-- **Overview**: counts and all findings, with a hint for each.
-- **Devices**: a sortable, filterable inventory. Click a device for its full CIP identity, decoded status word, related findings, and a one-click probe.
-- **Switches**: a port faceplate coloured by health, a port table, and per-port detail (counters, neighbours, MACs mapped to devices).
-- **Compare**: the diff of any two scans.
-- **Probe**: a single-device check.
-- **Tags (OPC UA)**: a read-only tag browser in the style of UaExpert, for FactoryTalk Linx Gateway or any OPC UA server. Type an endpoint (a bare IP works; FT Linx Gateway's default port 4990 is added), optionally pick a security policy and login, and connect. Browse the address space, see a node's attributes, double-click tags to watch them live, and **Export tags** to get every tag under a node as CSV, which is handy for comparing naming between machines. Type `demo` as the endpoint (or start with `ghostmap web --demo`) to connect to a simulated gateway with two presses whose tag names drift.
+- **Machine** (OPC UA, from the PLCs through FactoryTalk Linx Gateway)
+  - **Dashboard**: a dashboard for the machine, laid out automatically from its PLC tags (see below). Viewers can watch it; admins build and edit it.
+  - **Tags**: a read-only tag browser in the style of UaExpert, for FactoryTalk Linx Gateway or any OPC UA server. Type an endpoint (a bare IP works; FT Linx Gateway's default port 4990 is added), optionally pick a security policy and login, and connect. Browse the address space, see a node's attributes, double-click tags to watch them live, and **Export tags** to get every tag under a node as CSV, which is handy for comparing naming between machines. Type `demo` as the endpoint (or start with `ghostmap web --demo`) to connect to a simulated gateway with two presses whose tag names drift.
+- **Production** (SQL, from the TSC database)
+  - **Line**: the line's part schedule (see below).
+  - **Connection**: the TSC database settings, and moving dashboards and settings to another PC.
+- **Network** (TCP/IP: EtherNet/IP and SNMP scans)
+  - **Overview**: counts and all findings, with a hint for each.
+  - **Devices**: a sortable, filterable inventory. Click a device for its full CIP identity, decoded status word, related findings, and a one-click probe.
+  - **Switches**: a port faceplate coloured by health, a port table, and per-port detail (counters, neighbours, MACs mapped to devices).
+  - **Compare**: the diff of any two scans.
+  - **Probe**: a single-device check.
 
 **Export CSV** downloads the device inventory.
 
@@ -127,6 +132,34 @@ A whole controller is laid out in three levels: **Overview** (the tiles, everyth
 **Debug log.** Ghost Map writes its own log to `~/.ghostmap/logs/ghostmap.log`: server errors with stack traces, OPC UA drops and reconnects, and uncaught errors from the browser pages. Admins open it with **Debug log** in the top bar, and **Download debug bundle** zips it with versions and comms health (no tag values, but it does contain gateway addresses and user names).
 
 Scans are stored as JSON in `~/.ghostmap/scans` (override with `--data-dir` or `GHOSTMAP_DATA`). SNMP credentials are never written to disk.
+
+### Production (TSC part schedule)
+
+**Production > Line** shows one line from the TSC part schedule: parts, pieces and feet made this shift, feet and pieces per hour, scrap and remakes, the part running now with its progress and a finish estimate, parts on hold, feet per clock hour for the last 12 hours, the orders still on the schedule, the next 10 parts and the last 15 finished. It refreshes every 15 seconds; the server reuses each read for 30 seconds, so many people watching cost one query.
+
+It reads one view, `DataView.vPartScheduleCommon`, with three fixed SELECTs on a read-only connection (`ApplicationIntent=ReadOnly`). A part is done when it has an end time, running when it has a start time and no end, and on hold when its status says so; TSC's `1900-01-01` means "no time yet". Customer names and comments are never read.
+
+Set it up under **Production > Connection** (admin):
+
+- **Server**: the SQL Server's name or IP. Add the instance (`SQLHOST\TSC`) or the port (`10.0.0.5,1433`) if it isn't the default instance on 1433.
+- **Database**: the TSC database's name.
+- **SQL login** and **password**: a SQL Server login (not a Windows account) that can only read the view's schema, for example:
+  ```sql
+  CREATE LOGIN ghostmap_ro WITH PASSWORD = '...';
+  USE <TSC database>;
+  CREATE USER ghostmap_ro FOR LOGIN ghostmap_ro;
+  GRANT SELECT ON SCHEMA::DataView TO ghostmap_ro;
+  ```
+- **Encrypt the connection** if the server requires it; **Trust the server's certificate** accepts its self-signed certificate (like the SSMS option), or untick it and give the CA file.
+- Under **More settings**: the view, the unit of the Length column (inches by default), the shift start times (default `06:00,18:00`) and how long a read is reused.
+
+**Test connection** connects and lists the lines without saving. The password is saved sealed with Windows DPAPI for this PC (`~/.ghostmap/tsc.json`) and is never sent back to a browser, written to the log or included in an export. GhostMap.exe brings its own SQL driver (python-tds), so nothing needs installing on the HMI. Type `demo` as the server to try a simulated schedule.
+
+### Moving to another PC
+
+**Export everything** (Production > Connection) saves every machine dashboard (layout, flipped areas, hidden tags and the tag list behind it) and the TSC settings in one JSON file; **Export** on the Machine toolbar saves just the one dashboard. **Import...** adds the dashboards from such a file, optionally pointed at another gateway, and never overwrites one that's already there. Passwords and recorded history are never exported: enter the SQL password again after an import.
+
+Upgrading GhostMap.exe keeps everything in `~/.ghostmap` (dashboards, history, TSC settings, users). The version and build (commit) show next to the name in the top bar and in the debug bundle.
 
 ### Logins and remote access (IXON)
 

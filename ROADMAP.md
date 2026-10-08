@@ -83,6 +83,20 @@ Then the service:
   - [x] First-out fault and alarm history: stops with their first-out, alarm log, most frequent and longest alarms, comms gaps, CSV export
   - [ ] Fault text from the L5X
 
+## Phase 4b: production data (TSC, SQL Server)
+
+- [x] Read-only link to the TSC part schedule view (`DataView.vPartScheduleCommon`): SELECT-only, read-only intent, bundled driver, DPAPI-sealed password, Test button and status
+- [x] Production page per line: shift totals, running part, queue, holds, feet per hour, orders, recent parts
+- [ ] Completed-parts history beyond 12 hours (day / week reports)
+- [ ] Combine with the machine dashboard: feet per hour against run time and stops (OEE performance)
+
+## Test-phase readiness
+
+- [x] Export and import of dashboards and settings (no passwords or history)
+- [x] Build info (commit, CI run) next to the version and in the debug bundle; debug bundle covers the collector, history and TSC link
+- [x] Upgrades keep dashboards, history and settings (schema numbers on history and config)
+- [ ] Signed installer
+
 ## Phase 5: cross-layer correlation ("the brain")
 
 - [ ] One timeline that combines network, device and process events (e.g. press faulted with drive comms loss ← CRC errors on the drive's port for the previous hour)

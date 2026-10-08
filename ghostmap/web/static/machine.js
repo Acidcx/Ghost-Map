@@ -26,6 +26,7 @@ async function machineLoadList(selectId) {
   $("#mSelect").innerHTML = mach.list.map((d) => `<option value="${esc(d.id)}">${esc(d.name)}</option>`).join("");
   $("#mEmpty").classList.toggle("hidden", mach.list.length > 0);
   $("#mDelete").classList.toggle("hidden", !mach.list.length);
+  $("#mExport").classList.toggle("hidden", !mach.list.length);
   let id = selectId;
   try { id = id || localStorage.getItem("gm.dash"); } catch (_) { /* ignore */ }
   if (!mach.list.some((d) => d.id === id)) id = mach.list[0]?.id;
@@ -50,6 +51,7 @@ async function machineShow(id) {
   mach.histAt = 0;
   mach.histStop = null;
   try { localStorage.setItem("gm.dash", id); } catch (_) { /* ignore */ }
+  $("#mExport").href = `api/export?dash=${encodeURIComponent(id)}&settings=false`;
   machineRender();
   machinePoll();
 }
@@ -950,6 +952,34 @@ $("#mImportForm").addEventListener("submit", async (ev) => {
     f.reset();
     await machineLoadList(d.id);
   } catch (e) { $("#mImportErr").textContent = e.message; }
+});
+
+// Import from a Ghost Map export file (dashboards, and optionally the TSC settings). Also opened from
+// Production > Connection.
+function openImport() {
+  $("#importErr").textContent = "";
+  $("#importDialog").showModal();
+}
+window.openImport = openImport;
+$("#mImportFile").addEventListener("click", openImport);
+$("#importCancel").addEventListener("click", () => $("#importDialog").close());
+$("#importForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const f = ev.target;
+  try {
+    let data;
+    try { data = JSON.parse(await f.file.files[0].text()); } catch (_) { throw new Error("that file is not a Ghost Map export (not JSON)"); }
+    const r = await api("api/import", { method: "POST", body: JSON.stringify({ data, endpoint: f.endpoint.value.trim(), settings: f.settings.checked }) });
+    if (r.problems.length && !r.added.length && !r.tsc) throw new Error(r.problems.join("; "));
+    $("#importDialog").close();
+    f.reset();
+    const msg = [r.added.length ? `Added ${r.added.length} dashboard(s): ${r.added.map((a) => a.name).join(", ")}.` : "",
+      r.tsc ? "TSC settings applied; enter the SQL password under Production > Connection." : "",
+      r.problems.length ? `Skipped: ${r.problems.join("; ")}` : ""].filter(Boolean).join("\n");
+    alert(msg || "Nothing to import in that file.");
+    if (r.added.length) await machineLoadList(r.added[0].id);
+    document.dispatchEvent(new CustomEvent("gm:imported"));
+  } catch (e) { $("#importErr").textContent = e.message; }
 });
 
 machineLoadList().catch(() => { /* not logged in yet, or no dashboards */ });

@@ -33,6 +33,7 @@ RETENTION_DAYS = 90
 ALIVE_EVERY_S = 10.0    # how often "still recording" is noted, so a restart can close what was open
 PRUNE_EVERY_S = 3600.0
 DB_NAME = "history.db"
+SCHEMA_VERSION = 1  # PRAGMA user_version; bump it with a migration when the tables change
 log = logging.getLogger("ghostmap.history")
 
 SCHEMA = """
@@ -68,11 +69,25 @@ class History:
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.execute("PRAGMA synchronous=NORMAL")
             self._db.executescript(SCHEMA)
+            ver = self._db.execute("PRAGMA user_version").fetchone()[0]
+            if ver > SCHEMA_VERSION:
+                log.warning("%s was written by a newer Ghost Map (schema %d, this one knows %d); recording anyway",
+                            self.path, ver, SCHEMA_VERSION)
+            elif ver < SCHEMA_VERSION:  # upgrades add columns or tables here, keeping the rows already recorded
+                self._db.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             self._close_after_restart()
             self._db.commit()
         # Per dashboard: open events {key: row id}, the open stop, the open gap, last run state.
         self._st: dict[str, dict] = {}
         self._pruned = 0.0
+
+    def counts(self) -> dict:
+        """Row counts and file size, for the debug bundle."""
+        with self._lock:
+            n = {t: self._db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in ("events", "stops", "gaps", "runs")}
+            n["schema"] = self._db.execute("PRAGMA user_version").fetchone()[0]
+        n["bytes"] = sum(p.stat().st_size for p in self.path.parent.glob(self.path.name + "*") if p.is_file())
+        return n
 
     def close(self) -> None:
         with self._lock:

@@ -59,19 +59,38 @@ function findingHtml(f) {
 }
 
 // ------------------------------------------------------------------ tabs
+// Pages are grouped by data source (Machine: OPC UA, Production: SQL, Network: TCP/IP); the top row picks the
+// group, the second row the page within it. Each group remembers its last page.
 document.querySelectorAll("#tabs button").forEach((b) =>
   b.addEventListener("click", () => showTab(b.dataset.tab)));
-const SCANLESS_TABS = ["opcua", "machine"];  // tabs that work without any scan loaded
+document.querySelectorAll("#groups button").forEach((b) =>
+  b.addEventListener("click", () => showGroup(b.dataset.group)));
+const SCANLESS_TABS = ["opcua", "machine", "production", "tscconn"];  // tabs that work without any scan loaded
+const isViewer = () => document.body.classList.contains("viewer");
+const tabGroup = (name) => document.querySelector(`#tabs button[data-tab="${name}"]`)?.closest(".tabgroup")?.dataset.group;
+function showGroup(group) {
+  let name = null;
+  try { name = localStorage.getItem(`gm.tab.${group}`); } catch (_) { /* ignore */ }
+  const usable = (b) => b && !(b.classList.contains("admin-only") && isViewer());
+  if (!usable(document.querySelector(`#tabs button[data-tab="${name}"]`)) || tabGroup(name) !== group) {
+    name = [...document.querySelectorAll(`#tabs .tabgroup[data-group="${group}"] button`)].find(usable)?.dataset.tab;
+  }
+  showTab(name || "machine");
+}
 function showTab(name) {
   // A tab remembered from an admin login is hidden for a viewer: fall back to the first visible one.
   const btn = document.querySelector(`#tabs button[data-tab="${name}"]`);
-  if (!btn || (btn.classList.contains("admin-only") && document.body.classList.contains("viewer"))) name = "machine";
+  if (!btn || (btn.classList.contains("admin-only") && isViewer())) name = "machine";
+  const group = tabGroup(name);
   const free = SCANLESS_TABS.includes(name);
+  document.querySelectorAll("#groups button").forEach((b) => b.classList.toggle("active", b.dataset.group === group));
+  document.querySelectorAll("#tabs .tabgroup").forEach((g) => g.classList.toggle("hidden", g.dataset.group !== group));
   document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("hidden", t.id !== `tab-${name}` || (!state.scan && !free)));
   $("#empty").classList.toggle("hidden", !!state.scan || free);
-  $("#scanpickScan")?.classList.toggle("hidden", free);
-  try { localStorage.setItem("gm.tab", name); } catch (_) { /* ignore */ }
+  $("#scanpickScan")?.classList.toggle("hidden", group !== "network" || !state.scan);
+  $("#newScanBtn")?.classList.toggle("hidden", group !== "network");
+  try { localStorage.setItem("gm.tab", name); localStorage.setItem(`gm.tab.${group}`, name); } catch (_) { /* ignore */ }
   document.dispatchEvent(new CustomEvent("gm:tab", { detail: name }));
 }
 
@@ -420,7 +439,9 @@ $("#loadDemo").addEventListener("click", async () => { await api("api/demo", { m
 (async () => {
   try {
     const info = await api("api/info");
-    $("#ver").textContent = "v" + info.version;
+    const b = info.build || {};
+    $("#ver").textContent = "v" + info.version + (b.commit ? ` (${b.commit.slice(0, 7)})` : "");
+    $("#ver").title = b.commit ? `Build ${b.run ? "#" + b.run + " " : ""}${b.commit} ${b.branch || ""}, ${b.built || ""}` : "Run from source";
     state.info = info;
     document.body.classList.toggle("viewer", info.role !== "admin");
     if (info.user) {

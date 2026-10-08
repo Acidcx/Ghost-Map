@@ -26,14 +26,26 @@
     </div>
   </header>
 
+  <!-- Pages are grouped by where their data comes from: the PLCs over OPC UA, the TSC database over SQL,
+       and the network itself over TCP/IP. -->
+  <nav class="groups" id="groups">
+    <button data-group="machine">Machine <small>OPC UA</small></button>
+    <button data-group="production">Production <small>SQL</small></button>
+    <button data-group="network" class="active">Network <small>TCP/IP</small></button>
+  </nav>
   <nav class="tabs" id="tabs">
-    <button data-tab="machine">Machine</button>
-    <button data-tab="overview" class="active">Overview</button>
-    <button data-tab="devices">Devices</button>
-    <button data-tab="switches">Switches</button>
-    <button data-tab="compare">Compare</button>
-    <button data-tab="probe" class="admin-only">Probe</button>
-    <button data-tab="opcua" class="admin-only">Tags (OPC UA)</button>
+    <span class="tabgroup hidden" data-group="machine">
+      <button data-tab="machine">Dashboard</button>
+      <button data-tab="opcua" class="admin-only">Tags</button></span>
+    <span class="tabgroup hidden" data-group="production">
+      <button data-tab="production">Line</button>
+      <button data-tab="tscconn" class="admin-only">Connection</button></span>
+    <span class="tabgroup" data-group="network">
+      <button data-tab="overview" class="active">Overview</button>
+      <button data-tab="devices">Devices</button>
+      <button data-tab="switches">Switches</button>
+      <button data-tab="compare">Compare</button>
+      <button data-tab="probe" class="admin-only">Probe</button></span>
   </nav>
 
   <main>
@@ -52,6 +64,8 @@
           <span class="grow"></span>
           <label class="admin-only small"><input type="checkbox" id="mEdit"> Edit</label>
           <button class="btn ghost small admin-only" id="mImport" title="Build a dashboard from a tag export CSV">From CSV...</button>
+          <a class="btn ghost small admin-only hidden" id="mExport" href="#" download title="Save this dashboard (layout, flips, hidden tags and its tag list) to a file">Export</a>
+          <button class="btn ghost small admin-only" id="mImportFile" title="Add dashboards from a Ghost Map export file">Import...</button>
           <button class="btn ghost small admin-only hidden" id="mDelete">Delete</button>
         </div>
         <div id="mNotes"></div>
@@ -65,6 +79,68 @@
       <div class="tiles" id="mTiles"></div>
       <nav class="mnav" id="mNav"></nav>
       <div id="mAreas"></div>
+    </section>
+
+    <section id="tab-production" class="tab hidden">
+      <div class="panel">
+        <div class="toolbar">
+          <label>Line <select id="pLine"></select></label>
+          <span id="pLive" class="small muted"></span>
+          <span class="grow"></span>
+          <span id="pShift" class="small muted"></span>
+        </div>
+        <div id="pNote"></div>
+      </div>
+      <div id="pBody"></div>
+    </section>
+
+    <section id="tab-tscconn" class="tab hidden">
+      <div class="panel">
+        <h2>TSC database</h2>
+        <p class="small muted">Ghost Map reads the part schedule view with three fixed SELECT queries on a read-only connection. Use a SQL login that can only SELECT from the view's schema
+          (for example <span class="mono">GRANT SELECT ON SCHEMA::DataView TO ghostmap_ro</span>). Type <b>demo</b> as the server to try a simulated schedule.</p>
+        <form id="tForm" class="tform" autocomplete="off">
+          <div class="row">
+            <label>Server <input name="server" required maxlength="200" placeholder="SQLHOST, SQLHOST\INSTANCE or 10.0.0.5,1433"></label>
+            <label>Database <input name="database" maxlength="128" placeholder="TSC database name"></label>
+          </div>
+          <div class="row">
+            <label>SQL login <input name="username" maxlength="128" autocomplete="off"></label>
+            <label>Password <input name="password" type="password" maxlength="256" autocomplete="new-password" placeholder=""></label>
+          </div>
+          <div class="row">
+            <label class="inline"><input type="checkbox" name="encrypt"> Encrypt the connection</label>
+            <label class="inline"><input type="checkbox" name="trust_cert" checked> Trust the server's certificate</label>
+            <label class="tca">CA certificate file (PEM) <input name="cafile" maxlength="500" placeholder="C:\certs\sql-ca.pem"></label>
+          </div>
+          <details class="small"><summary>More settings</summary>
+            <div class="row">
+              <label>View <input name="view" maxlength="260" value="DataView.vPartScheduleCommon"></label>
+              <label>Length column unit <select name="length_unit"><option value="in">inches</option><option value="ft">feet</option><option value="mm">mm</option></select></label>
+            </div>
+            <div class="row">
+              <label>Shift start times <input name="shifts" maxlength="100" value="06:00,18:00"></label>
+              <label>Reuse a read for (s) <input name="cache_s" type="number" min="5" max="3600" value="30"></label>
+            </div>
+          </details>
+          <p class="err" id="tErr"></p>
+          <div class="actions left">
+            <button type="button" class="btn" id="tTest">Test connection</button>
+            <button type="submit" class="btn primary">Save</button>
+            <button type="button" class="btn ghost hidden" id="tClear">Remove</button>
+          </div>
+        </form>
+        <div id="tTestOut" class="small"></div>
+      </div>
+      <div class="panel">
+        <h2>Status</h2>
+        <div id="tStatus" class="small muted">Not set up yet.</div>
+      </div>
+      <div class="panel">
+        <h2>Move to another PC</h2>
+        <p class="small muted">One file with every machine dashboard (layout, flips, hidden tags and tag lists) and these TSC settings. Passwords and recorded history are not included.</p>
+        <p><a class="btn" href="api/export" download>Export everything</a> <button type="button" class="btn" id="tImport">Import...</button></p>
+      </div>
     </section>
 
     <section id="tab-overview" class="tab">
@@ -205,6 +281,21 @@
     </form>
   </dialog>
 
+  <dialog id="importDialog">
+    <form id="importForm" method="dialog">
+      <h2>Import from a Ghost Map export</h2>
+      <p class="small muted">Adds the dashboards in the file; nothing already here is changed. Passwords are never in an export: enter the SQL password again under Production &gt; Connection.</p>
+      <label>Export file <input name="file" type="file" accept=".json,application/json" required></label>
+      <label>OPC UA endpoint (optional) <input name="endpoint" placeholder="leave blank to keep the one in the file"></label>
+      <label class="inline"><input type="checkbox" name="settings" checked> Also use the TSC connection settings in the file</label>
+      <p class="err" id="importErr"></p>
+      <div class="actions">
+        <button type="button" class="btn" id="importCancel">Cancel</button>
+        <button type="submit" class="btn primary">Import</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="setupDialog">
     <form id="setupForm" method="dialog">
       <h2>Set up login</h2>
@@ -291,5 +382,6 @@
   <script src="static/app.js"></script>
   <script src="static/opcua.js"></script>
   <script src="static/machine.js"></script>
+  <script src="static/production.js"></script>
 </body>
 </html>

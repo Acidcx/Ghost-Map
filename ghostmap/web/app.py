@@ -26,7 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from ghostmap import __version__, debuglog
+from ghostmap import BUILD, __version__, debuglog
 from ghostmap.analysis.diff import diff_scans
 from ghostmap.collectors import discovery
 from ghostmap.models import to_dict
@@ -37,6 +37,7 @@ from ghostmap.web.auth import AuditLog, Lockout, Sessions, UserStore, client_all
 from ghostmap.history import RETENTION_DAYS, History
 from ghostmap.web.collector import Collector
 from ghostmap.web.dashboards import DashboardStore, LiveValues, visible_node_ids
+from ghostmap.web.tsc import TscService, error_text as tsc_error
 
 UA_IDLE_S = 600        # close OPC UA sessions nobody has used for 10 minutes (re-opened on next use)
 UA_FORGET_S = 8 * 3600  # forget them (and the login kept for re-opening) after 8 hours
@@ -117,6 +118,30 @@ class OverridesIn(BaseModel):
     invert: dict[str, bool] = {}
     hidden: list[str] = Field([], max_length=50000)
     name: Optional[str] = Field(None, max_length=80)
+
+
+class TscConfigIn(BaseModel):
+    server: str = Field(..., max_length=200)
+    database: str = Field("", max_length=128)
+    username: str = Field("", max_length=128)
+    password: str = Field("", max_length=256)  # blank: keep the saved one
+    encrypt: bool = False
+    trust_cert: bool = True
+    cafile: str = Field("", max_length=500)
+    view: str = Field("DataView.vPartScheduleCommon", max_length=260)
+    length_unit: str = Field("in", pattern="^(in|ft|mm)$")
+    shifts: str = Field("06:00,18:00", max_length=100)
+    cache_s: int = Field(30, ge=5, le=3600)
+
+
+class ImportIn(BaseModel):
+    data: dict
+    endpoint: str = Field("", max_length=300)  # use this gateway instead of the one in the file
+    settings: bool = True  # also apply the TSC connection settings in the file (never a password)
+
+
+EXPORT_KIND = "ghostmap-export"
+EXPORT_FORMAT = 1
 
 
 class SnmpIn(BaseModel):
@@ -231,9 +256,10 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     live = LiveValues(resolve_ua_url)
     history = History(store.root)
     collector = Collector(dashboards, live, history)
+    tsc = TscService(store.root, demo=demo)
     tasks: set[asyncio.Task] = set()
     app.state.demo_ua, app.state.live, app.state.ua_sessions = demo_ua, live, ua_sessions  # for tests
-    app.state.history, app.state.collector = history, collector
+    app.state.history, app.state.collector, app.state.tsc = history, collector, tsc
 
     def client_of(request: Request) -> str:
         return request.client.host if request.client else ""
@@ -323,7 +349,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     def info(request: Request):
         s = request.state.session
         auth = users.has_users()
-        return {"version": __version__, "data_dir": str(store.root), "auth": auth,
+        return {"version": __version__, "build": BUILD, "data_dir": str(store.root), "auth": auth,
                 "user": s.user if s else None, "role": s.role if s else ("admin" if not auth else None),
                 "local": _is_loopback(client_of(request)),
                 "demo_opcua": demo_ua["server"].endpoint if "server" in demo_ua else None}
@@ -761,6 +787,139 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         log.info("dashboard %s alarm check: %s", dash_id, {k: v for k, v in out["summary"].items() if k != "bad_by_plc"})
         return {"ok": True, "error": None, **out}
 
+    # ------------------------------------------------------------- export / import
+    @app.get("/api/export")
+    def export_settings(request: Request, dash: str = "", settings: bool = True):
+        """Dashboards (layout, flips, hidden tags and the tag export behind them) and the TSC settings as one
+        JSON file, to move them to another HMI or keep a copy. Never includes passwords or recorded history."""
+        require_admin(request)
+        ids = [dash] if dash else [d["id"] for d in dashboards.list()]
+        out = []
+        for did in ids:
+            d = load_dashboard(did)
+            out.append({**{k: d.get(k) for k in ("id", "name", "endpoint", "source", "created", "layout", "overrides")},
+                        "tags": dashboards.load_tags(did)})
+        data = {"kind": EXPORT_KIND, "format": EXPORT_FORMAT, "version": __version__,
+                "exported": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "dashboards": out}
+        if settings and tsc.cfg is not None:
+            data["tsc"] = {k: v for k, v in tsc.public().items()
+                           if k not in ("configured", "has_password", "demo", "load_error")}
+        audit.write(client_of(request), who(request), "export", ",".join(ids) or "-")
+        stem = re.sub(r"[^A-Za-z0-9_-]+", "-", out[0]["name"]).strip("-") if dash else "all"
+        return JSONResponse(data, headers={"Content-Disposition":
+                                           f'attachment; filename="ghostmap-{stem or "machine"}-{time.strftime("%Y%m%d")}.json"'})
+
+    @app.post("/api/import")
+    def import_settings(body: ImportIn, request: Request):
+        """Add the dashboards from an export file. Each keeps its id when that id is free here (so a re-install
+        picks its history up again) and gets a new one otherwise; nothing already here is overwritten."""
+        from ghostmap.analysis.dashboard import clean_layout
+
+        data = body.data
+        if data.get("kind") != EXPORT_KIND or not isinstance(data.get("dashboards"), list):
+            raise HTTPException(400, "not a Ghost Map export file")
+        if int(data.get("format") or 0) > EXPORT_FORMAT:
+            raise HTTPException(400, "this file comes from a newer Ghost Map; update this one first")
+        here = {d["id"] for d in dashboards.list()}
+        added, problems = [], []
+        for i, d in enumerate(data["dashboards"][:50]):
+            try:
+                name = str(d.get("name") or "").strip()[:80]
+                if not name:
+                    raise ValueError("no name")
+                tags = [t for t in (d.get("tags") or []) if isinstance(t, list) and len(t) == 4][:250000]
+                layout = clean_layout(d.get("layout") or {}, {t[1] for t in tags} if tags else None)
+                endpoint = (body.endpoint or str(d.get("endpoint") or "")).strip()[:300]
+                if not endpoint:
+                    raise ValueError("no gateway endpoint")
+                new = dashboards.create(name, endpoint, str(d.get("source") or "")[:1000], layout)
+                old_id = str(d.get("id") or "")
+                if old_id and old_id not in here:
+                    try:
+                        dashboards._path(old_id)  # a valid id: keep it
+                        dashboards.delete(new["id"])
+                        new["id"] = old_id
+                    except KeyError:
+                        pass
+                ov = d.get("overrides") or {}
+                areas = {a["id"] for a in layout["areas"]}
+                new["overrides"] = {"invert": {k: True for k, v in (ov.get("invert") or {}).items() if v and k in areas},
+                                    "hidden": [str(x) for x in (ov.get("hidden") or [])][:50000]}
+                dashboards.save(new)
+                if tags:
+                    dashboards.save_tags(new["id"], [{"path": p, "node_id": n, "type": t, "value": v} for p, n, t, v in tags])
+                here.add(new["id"])
+                added.append({"id": new["id"], "name": name})
+            except (ValueError, TypeError, AttributeError) as exc:
+                problems.append(f"dashboard {i + 1} ({d.get('name') if isinstance(d, dict) else '?'}): {exc}")
+        applied = False
+        if body.settings and isinstance(data.get("tsc"), dict):
+            try:
+                tsc.save(tsc.merged(TscConfigIn(**data["tsc"]).model_dump()))
+                applied = True
+            except Exception as exc:
+                problems.append(f"TSC settings: {tsc_error(exc)}")
+        audit.write(client_of(request), who(request), "import", ",".join(a["id"] for a in added) or "-")
+        return {"added": added, "tsc": applied, "problems": problems}
+
+    # ------------------------------------------------------------- TSC part schedule (SQL Server, read-only)
+    @app.get("/api/tsc/config")
+    def tsc_config(request: Request):
+        require_admin(request)
+        return tsc.public()
+
+    @app.post("/api/tsc/config")
+    def tsc_set_config(body: TscConfigIn, request: Request):
+        try:
+            cfg = tsc.merged(body.model_dump())
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        tsc.save(cfg)
+        audit.write(client_of(request), who(request), "tsc.config", f"{cfg.server} {cfg.database} {cfg.view}")
+        return tsc.public()
+
+    @app.delete("/api/tsc/config")
+    def tsc_clear(request: Request):
+        tsc.clear()
+        audit.write(client_of(request), who(request), "tsc.clear")
+        return {"ok": True}
+
+    @app.post("/api/tsc/test")
+    async def tsc_test(body: TscConfigIn, request: Request):
+        """Try the settings in the form (not saved yet): connect, list the lines."""
+        from ghostmap.collectors.tsc import test_connection
+
+        try:
+            cfg = tsc.merged(body.model_dump())
+            r = await asyncio.to_thread(test_connection, cfg)
+        except Exception as exc:
+            log.info("TSC test failed: %s", tsc_error(exc))
+            return {"ok": False, "error": tsc_error(exc)}
+        audit.write(client_of(request), who(request), "tsc.test", cfg.server)
+        return {**r, "lines": [{"id": x["LineID"], "name": x.get("LineName")} for x in r["lines"]]}
+
+    @app.get("/api/tsc/status")
+    def tsc_status():
+        return tsc.status()
+
+    @app.get("/api/tsc/lines")
+    async def tsc_lines():
+        try:
+            return {"ok": True, "lines": await tsc.lines()}
+        except LookupError as exc:
+            return {"ok": False, "configured": False, "error": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "configured": True, "error": tsc_error(exc)}
+
+    @app.get("/api/tsc/production")
+    async def tsc_production(line: int):
+        try:
+            return {"ok": True, **await tsc.production(line)}
+        except LookupError as exc:
+            return {"ok": False, "configured": False, "error": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "configured": True, "error": tsc_error(exc)}
+
     # ------------------------------------------------------------- debug log
     client_log_seen: dict[str, list[float]] = {}
 
@@ -778,7 +937,10 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         return {"ok": True}
 
     def debug_info() -> dict:
-        return {"version": __version__, "data_dir": str(store.root), "log": str(log_path), "uptime_s": int(time.time() - started),
+        return {"version": __version__, "build": BUILD, "data_dir": str(store.root), "log": str(log_path),
+                "uptime_s": int(time.time() - started),
+                "collector": {d["id"]: collector.status(d["id"]) for d in dashboards.list()},
+                "history": history.counts(), "tsc": tsc.status(),
                 "dashboards": [{k: d[k] for k in ("id", "name", "endpoint", "summary")} for d in dashboards.list()],
                 "comms": live.snapshot(), "gateway_sessions": live.sessions(),
                 "opcua_sessions": [{"url": e[3]["url"], "open": e[0] is not None, "idle_s": int(time.time() - e[1]),

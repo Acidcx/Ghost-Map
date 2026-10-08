@@ -81,7 +81,7 @@ def bundle(data_dir: Path, info: dict, extra: Optional[dict] = None) -> bytes:
 
     meta = {"generated": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "python": sys.version, "platform": platform.platform(),
             "frozen": bool(getattr(sys, "frozen", False)),
-            "packages": {p: version(p) for p in ("asyncua", "fastapi", "uvicorn", "pysnmp", "cryptography")},
+            "packages": {p: version(p) for p in ("asyncua", "fastapi", "uvicorn", "pysnmp", "cryptography", "python-tds", "pyOpenSSL")},
             **info, **(extra or {})}
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
