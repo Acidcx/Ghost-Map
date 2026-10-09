@@ -11,7 +11,8 @@ ghostmap/
   store.py     JSON scan history + CSV export
   history.py   alarm history with first-out (SQLite), fed by web/collector.py
   secret.py    saved passwords sealed with Windows DPAPI (a local key file elsewhere)
-  web/         FastAPI app + static single-page UI (no external assets); tsc.py = TSC settings and cache
+  web/         FastAPI app + static single-page UI (no external assets); tsc.py = TSC settings and cache;
+               maintenance.py = service items
   sim/         simulated machine cell, ListIdentity responder, OPC UA gateway, TSC schedule, demo data
   cli.py       argparse CLI
   models.py    dataclasses shared by everything (+ JSON (de)serialisation)
@@ -35,7 +36,7 @@ ghostmap/
 
 `FakeSnmpClient` and the ListIdentity responder let the whole pipeline run with no hardware. `build_demo_scan()` runs the real collector, correlation and diagnostics against the simulated "Packaging Line 1" cell. It is used by the tests and by `ghostmap web --demo`.
 
-The TSC schedule (`sim/tsc.py`) stands in for the SQL view in the demo and tests. `tests/test_production.py` also has a test against a real SQL Server, skipped unless `GHOSTMAP_TEST_SQL="host,port;admin;password"` points at a scratch server (for example the `mcr.microsoft.com/mssql/server` docker image): it builds a made-up TSC database and a SELECT-only login and reads it the way Ghost Map does.
+The TSC schedule (`sim/tsc.py`) stands in for the SQL view in the demo and tests. `tests/test_production.py` also has a test against a real SQL Server, skipped unless `GHOSTMAP_TEST_SQL="host,port;admin;password"` points at a scratch server (for example the `mcr.microsoft.com/mssql/server` docker image): it builds a made-up TSC database (the views, stations, shifts, downtime and pattern tables) and a SELECT-only login, reads it the way Ghost Map does with only DataView granted and again with the optional tables granted, and checks the punch stroke SQL against the simulator's count.
 
 ## Upgrades
 

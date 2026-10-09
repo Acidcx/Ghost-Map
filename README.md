@@ -109,7 +109,10 @@ ghostmap discover 127.0.10.0/24
   - **Tags**: a read-only tag browser in the style of UaExpert, for FactoryTalk Linx Gateway or any OPC UA server. Type an endpoint (a bare IP works; FT Linx Gateway's default port 4990 is added), optionally pick a security policy and login, and connect. Browse the address space, see a node's attributes, double-click tags to watch them live, and **Export tags** to get every tag under a node as CSV, which is handy for comparing naming between machines. Type `demo` as the endpoint (or start with `ghostmap web --demo`) to connect to a simulated gateway with two presses whose tag names drift.
 - **Production** (SQL, from the TSC database)
   - **Line**: the line's part schedule (see below).
-  - **Connection**: the TSC database settings, and moving dashboards and settings to another PC.
+  - **Connection**: the TSC database settings, what the SQL login can read, and moving dashboards and settings to another PC.
+- **Maintenance** (counters from TSC and the PLCs)
+  - **Service**: service items with an interval (strokes, pieces, feet, hours or days), due-soon warnings and a log of the work done.
+  - **Counters**: feet, pieces, production hours and punch strokes per tool from TSC, and run hours per machine from the PLC.
 - **Network** (TCP/IP: EtherNet/IP and SNMP scans)
   - **Overview**: counts and all findings, with a hint for each.
   - **Devices**: a sortable, filterable inventory. Click a device for its full CIP identity, decoded status word, related findings, and a one-click probe.
@@ -135,9 +138,11 @@ Scans are stored as JSON in `~/.ghostmap/scans` (override with `--data-dir` or `
 
 ### Production (TSC part schedule)
 
-**Production > Line** shows one line from the TSC part schedule: parts, pieces and feet made this shift, feet and pieces per hour, scrap and remakes, the part running now with its progress and a finish estimate, parts on hold, feet per clock hour for the last 12 hours, the orders still on the schedule, the next 10 parts and the last 15 finished. It refreshes every 15 seconds; the server reuses each read for 30 seconds, so many people watching cost one query.
+**Production > Line** shows one line from the TSC part schedule. TSC's words: an **order** holds jobs, a job holds **bundles**, a bundle holds **part lines** (one row of the cut list: a profile, a length and a quantity), and each part line is made as **pieces**. The page shows, for this shift: orders worked, pieces and feet made, feet per hour, uptime and stops with TSC's stop reasons, scrap pieces and remakes; one card per **station** (a separate machine on the line, such as a punch, a notcher, or the pan and back skin rollformers that feed a sandwich press, which waits for both); the part running now with its progress at each station and a finish estimate; parts on hold; feet per clock hour for the last 12 hours; the orders on the schedule with bundles, pieces done of the whole order and feet left; the queue in TSC's run order; and the last 15 part lines finished. It refreshes every 15 seconds; the server reuses each read for 30 seconds, so many people watching cost one query.
 
-It reads one view, `DataView.vPartScheduleCommon`, with three fixed SELECTs on a read-only connection (`ApplicationIntent=ReadOnly`). A part is done when it has an end time, running when it has a start time and no end, and on hold when its status says so; TSC's `1900-01-01` means "no time yet". Customer names and comments are never read.
+It reads TSC's own views with fixed SELECTs on a read-only connection (`ApplicationIntent=ReadOnly`): `DataView.vHmiPartScheduleQueueOrInProgress` for the queue (status 2 queued, 3 on hold, 4 in progress, ordered by `QueueIndex`), `DataView.vPartScheduleCompleted` for finished parts (status 5) and `DataView.vPartScheduleCommon` for the lines and whole-order totals. Imported and pending parts (status 0 and 1) aren't in the queue until TSC queues them. TSC's `1900-01-01` means "no time yet". Customer names and comments are never read, and Ghost Map never reads `dbo.Order`.
+
+With a few more read grants it also shows stations (`dbo.Station`, `dbo.StationPart`, `dbo.StationDependency`), the shift from TSC's calendar (`dbo.Shift`, `dbo.DayOfWeek`; otherwise the shift start times in the settings), stops and reasons (`dbo.vGetDownTimeData`) and punch strokes (`dbo.PartPattern`, `dbo.PatternHole`, `dbo.Hole`, `dbo.PartNotch`, `Machine.ToolType`). Without them the page still works; **What Ghost Map can read** on the Connection page lists what each one adds and the exact GRANT to run. None of these tables hold customer data.
 
 Set it up under **Production > Connection** (admin):
 
@@ -151,9 +156,22 @@ Set it up under **Production > Connection** (admin):
   GRANT SELECT ON SCHEMA::DataView TO ghostmap_ro;
   ```
 - **Encrypt the connection** if the server requires it; **Trust the server's certificate** accepts its self-signed certificate (like the SSMS option), or untick it and give the CA file.
-- Under **More settings**: the view, the unit of the Length column (inches by default), the shift start times (default `06:00,18:00`) and how long a read is reused.
+- Under **More settings**: the three views, the unit of the Length column (inches by default), the shift start times (default `06:00,18:00`) and how long a read is reused.
 
 **Test connection** connects and lists the lines without saving. The password is saved sealed with Windows DPAPI for this PC (`~/.ghostmap/tsc.json`) and is never sent back to a browser, written to the log or included in an export. GhostMap.exe brings its own SQL driver (python-tds), so nothing needs installing on the HMI. Type `demo` as the server to try a simulated schedule.
+
+### Maintenance
+
+**Maintenance > Service** lists service items, overdue first. Each one counts up from when it was last done, against an interval:
+
+- **Punch strokes** at a station, for one tool type or all of them: pieces made times the holes and notches on each part (TSC's patterns, holes and notches; a repeat pattern counts once per repeat along the part's length).
+- **Pieces made** (each piece is a shear cut), **feet made**, or **production hours** (start to end of each part) on a TSC line.
+- **Run hours**: time the machine's PLC said it was running (the dashboard's Machine running tag), measured by Ghost Map's background reads. **Powered-on hours**: time the PLC could be read at all.
+- **Calendar days**.
+
+An item turns "due soon" at 90% of its interval (change it per item) and "overdue" past it. When adding an item you can say when it was last done and how much it was already used, for example the strokes a die already has. **Mark done** logs who did it, when, the reading at the time and a note, and starts the count again. Admins add, edit and mark items done; everything is in the audit log. Items are saved in `~/.ghostmap/maintenance.json`.
+
+**Maintenance > Counters** shows a TSC line's feet, pieces, part lines, production hours and scrap over the last 24 hours, 7 days, 30 days and all time, punch strokes per station and tool for the last 30 days and all time, and the run and powered-on hours of every machine dashboard. Ghost Map's hour meters only count while it is running and can read the PLC, so they trail the machine's own hour meter; they are kept for good in `history.db` (not pruned with the alarm history).
 
 ### Moving to another PC
 

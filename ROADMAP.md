@@ -75,6 +75,8 @@ Then the service:
   - Quality from good/reject counts, where the PLC has them
 - [ ] Downtime tracking: first-out fault, duration, Pareto by fault
 - [ ] Maintenance counters: blade / die / cylinder life by stroke count, runtime hours, and "due soon" warnings
+  - [x] First version: service items (strokes per station and tool, pieces, feet, production hours from TSC; run and powered-on hours measured from the PLC's running tag; days), due soon / overdue, service log; Counters page
+  - [ ] Counters read straight from PLC counter tags (shear and press fire counts) as well as TSC
 - [ ] Machine dashboard: an andon-style status screen on the HMI, plus the same page via IXON
   - [x] First version: layout generated from a tag export (areas, alarms with severity and category, timers, fault words, counters, run state), live values, per-area "on = healthy" flip and hidden tags
   - [x] Editing: rename, remove, re-point items to other discovered tags, add tags and areas; motion axes as one item; whole-controller builds trimmed (I/O module tags, arrays, long status lists)
@@ -87,6 +89,8 @@ Then the service:
 
 - [x] Read-only link to the TSC part schedule view (`DataView.vPartScheduleCommon`): SELECT-only, read-only intent, bundled driver, DPAPI-sealed password, Test button and status
 - [x] Production page per line: shift totals, running part, queue, holds, feet per hour, orders, recent parts
+- [x] Queue in TSC's run order (QueueIndex) with status codes; orders, bundles and pieces counted as TSC counts them
+- [x] Stations (paired stations shown together), TSC shift calendar, stops and reasons; optional grants listed on the Connection page
 - [ ] Completed-parts history beyond 12 hours (day / week reports)
 - [ ] Combine with the machine dashboard: feet per hour against run time and stops (OEE performance)
 

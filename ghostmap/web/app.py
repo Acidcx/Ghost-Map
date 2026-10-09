@@ -37,6 +37,7 @@ from ghostmap.web.auth import AuditLog, Lockout, Sessions, UserStore, client_all
 from ghostmap.history import RETENTION_DAYS, History
 from ghostmap.web.collector import Collector
 from ghostmap.web.dashboards import DashboardStore, LiveValues, visible_node_ids
+from ghostmap.web.maintenance import KINDS as MAINT_KINDS, METER_OF, MaintenanceStore, view as maint_view
 from ghostmap.web.tsc import TscService, error_text as tsc_error
 
 UA_IDLE_S = 600        # close OPC UA sessions nobody has used for 10 minutes (re-opened on next use)
@@ -129,9 +130,37 @@ class TscConfigIn(BaseModel):
     trust_cert: bool = True
     cafile: str = Field("", max_length=500)
     view: str = Field("DataView.vPartScheduleCommon", max_length=260)
+    queue_view: str = Field("DataView.vHmiPartScheduleQueueOrInProgress", max_length=260)
+    done_view: str = Field("DataView.vPartScheduleCompleted", max_length=260)
     length_unit: str = Field("in", pattern="^(in|ft|mm)$")
     shifts: str = Field("06:00,18:00", max_length=100)
     cache_s: int = Field(30, ge=5, le=3600)
+
+
+class MaintItemIn(BaseModel):
+    name: str = Field(..., max_length=120)
+    kind: str = Field(..., max_length=20)
+    interval: float = Field(..., gt=0, le=1e12)
+    warn_pct: float = Field(90, ge=1, le=100)
+    line: Optional[int] = None
+    station: Optional[int] = None
+    tool: str = Field("", max_length=60)
+    dash: str = Field("", max_length=64)
+    notes: str = Field("", max_length=1000)
+    offset: float = Field(0, ge=0, le=1e12)          # already used before Ghost Map started counting
+    last_service: Optional[float] = None              # when it was last done (default: now)
+
+
+class MaintEditIn(BaseModel):
+    name: Optional[str] = Field(None, max_length=120)
+    interval: Optional[float] = Field(None, gt=0, le=1e12)
+    warn_pct: Optional[float] = Field(None, ge=1, le=100)
+    tool: Optional[str] = Field(None, max_length=60)
+    notes: Optional[str] = Field(None, max_length=1000)
+
+
+class MaintServiceIn(BaseModel):
+    note: str = Field("", max_length=1000)
 
 
 class ImportIn(BaseModel):
@@ -257,6 +286,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     history = History(store.root)
     collector = Collector(dashboards, live, history)
     tsc = TscService(store.root, demo=demo)
+    maint = MaintenanceStore(store.root)
     tasks: set[asyncio.Task] = set()
     app.state.demo_ua, app.state.live, app.state.ua_sessions = demo_ua, live, ua_sessions  # for tests
     app.state.history, app.state.collector, app.state.tsc = history, collector, tsc
@@ -308,6 +338,11 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
 
     if demo:
         load_demo()
+        if not maint.list():
+            from ghostmap.sim.tsc import demo_service_items
+
+            for data in demo_service_items():
+                maint.add(data, "demo")
 
     @app.get("/")
     def index():
@@ -919,6 +954,107 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
             return {"ok": False, "configured": False, "error": str(exc)}
         except Exception as exc:
             return {"ok": False, "configured": True, "error": tsc_error(exc)}
+
+    # ------------------------------------------------------------- maintenance (service items and counters)
+    def meter_hours(dash_id: str, kind: str) -> float:
+        return float((history.meters(dash_id).get(METER_OF[kind]) or {}).get("value", 0.0)) / 3600
+
+    async def maint_value(it: dict) -> tuple[Optional[float], Optional[str]]:
+        """The item's count since its last service, or an error saying why it can't be read."""
+        kind = it["kind"]
+        try:
+            if kind == "days":
+                return (time.time() - it["last_service"]) / 86400, None
+            if kind in METER_OF:
+                if it["dash"] not in {d["id"] for d in dashboards.list()}:
+                    return None, "the machine dashboard was deleted"
+                return meter_hours(it["dash"], kind) - float(it.get("baseline") or 0), None
+            v = await tsc.values_since(int(it["line"]), it["last_service"])
+            if kind == "strokes":
+                return float(sum(n for (sid, tool), n in v["strokes"].items()
+                                 if sid == int(it["station"]) and (not it.get("tool") or tool == it["tool"]))), None
+            return float(v[kind]), None
+        except LookupError as exc:
+            return None, str(exc)
+        except Exception as exc:
+            return None, tsc_error(exc)
+
+    def maint_baseline(kind: str, dash: str) -> float:
+        return meter_hours(dash, kind) if kind in METER_OF and dash else 0.0
+
+    def maint_item(item_id: str) -> dict:
+        try:
+            return maint.get(item_id)
+        except KeyError:
+            raise HTTPException(404, "service item not found")
+
+    @app.get("/api/maintenance")
+    async def maint_list():
+        items = maint.list()
+        vals = await asyncio.gather(*(maint_value(it) for it in items))
+        return {"kinds": MAINT_KINDS, "items": [maint_view(it, v, e) for it, (v, e) in zip(items, vals)]}
+
+    @app.post("/api/maintenance/items")
+    def maint_add(body: MaintItemIn, request: Request):
+        data = body.model_dump()
+        if data["kind"] in METER_OF and data["dash"]:
+            load_dashboard(data["dash"])
+        try:
+            it = maint.add(data, who(request), maint_baseline(data["kind"], data["dash"]))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        audit.write(client_of(request), who(request), "maint.add", f"{it['id']} {it['name']}")
+        return it
+
+    @app.post("/api/maintenance/items/{item_id}")
+    def maint_edit(item_id: str, body: MaintEditIn, request: Request):
+        maint_item(item_id)
+        try:
+            it = maint.update(item_id, body.model_dump())
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        audit.write(client_of(request), who(request), "maint.edit", f"{item_id} {it['name']}")
+        return it
+
+    @app.post("/api/maintenance/items/{item_id}/service")
+    async def maint_service(item_id: str, body: MaintServiceIn, request: Request):
+        it = maint_item(item_id)
+        reading, _ = await maint_value(it)
+        if reading is not None:
+            reading = round(reading + float(it.get("offset") or 0), 1)
+        it = maint.service(item_id, who(request), body.note, reading, maint_baseline(it["kind"], it["dash"]))
+        audit.write(client_of(request), who(request), "maint.service", f"{item_id} {it['name']} at {reading}")
+        return it
+
+    @app.delete("/api/maintenance/items/{item_id}")
+    def maint_delete(item_id: str, request: Request):
+        it = maint_item(item_id)
+        maint.delete(item_id)
+        audit.write(client_of(request), who(request), "maint.delete", f"{item_id} {it['name']}")
+        return {"ok": True}
+
+    @app.get("/api/maintenance/counters")
+    async def maint_counters(line: Optional[int] = None):
+        """Production counters for a TSC line (when one is set up) and the PLC hour meters of every dashboard."""
+        machines = []
+        for d in dashboards.list():
+            m = history.meters(d["id"])
+            run, online = m.get("run_s") or {}, m.get("online_s") or {}
+            machines.append({"id": d["id"], "name": d["name"], "first": online.get("first") or run.get("first"),
+                             "run_h": round(float(run.get("value", 0)) / 3600, 1),
+                             "online_h": round(float(online.get("value", 0)) / 3600, 1),
+                             "run_7d": round(history.meter_window(d["id"], "run_s", 7) / 3600, 1),
+                             "online_7d": round(history.meter_window(d["id"], "online_s", 7) / 3600, 1),
+                             "recording": collector.status(d["id"])["recording"]})
+        out: dict = {"machines": machines, "tsc": None}
+        if line is not None:
+            try:
+                out["tsc"] = {"ok": True, **await tsc.counters(line)}
+            except LookupError as exc:
+                out["tsc"] = {"ok": False, "configured": False, "error": str(exc)}
+            except Exception as exc:
+                out["tsc"] = {"ok": False, "configured": True, "error": tsc_error(exc)}
+        return out
 
     # ------------------------------------------------------------- debug log
     client_log_seen: dict[str, list[float]] = {}

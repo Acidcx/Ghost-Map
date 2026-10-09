@@ -295,3 +295,34 @@ tr.maxisdetail td { background: var(--panel-2); }
 .pchart text { fill: var(--muted); font-size: 11px; }
 .pchart .pval { fill: var(--text); font-size: 10px; }
 .ptable tbody tr:hover { cursor: default; }
+
+/* Production: stations, stops, queue */
+.tile .s { color: var(--muted); font-size: 11px; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pstations { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; }
+.pstation { border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: 6px; padding: 10px 12px; display: grid; gap: 6px; min-width: 0; }
+.pstation.running { border-left-color: var(--ok); }
+.pstation.done { border-left-color: var(--accent); }
+.pstation.joins { background: var(--panel-2); }
+.pststrip { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px 16px; margin-bottom: 12px; }
+.pststrip > div { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.pststrip .pbarwrap.sm { flex: 1 1 60px; width: auto; }
+.preason { display: grid; grid-template-columns: minmax(0, 140px) minmax(0, 1fr) auto; gap: 10px; align-items: center; margin: 4px 0; font-size: 13px; }
+.preason .l { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pbarwrap span.down, .pbarwrap span.overdue { background: var(--err); }
+.pbarwrap span.soon { background: var(--warn); }
+.ptable tr.held td { color: var(--warn); }
+pre.tgrant { background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; white-space: pre-wrap; word-break: break-all; user-select: all; }
+
+/* Maintenance */
+.svitem { border-bottom: 1px solid var(--line); padding: 10px 0; display: grid; gap: 6px; }
+.svitem:last-child { border-bottom: 0; }
+.svhead { display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; }
+.svhead > div:first-child { min-width: 0; }
+.svbar { display: grid; grid-template-columns: minmax(80px, 1fr) auto auto; gap: 12px; align-items: center; }
+.svbar .pbarwrap { height: 12px; }
+@media (max-width: 600px) { .svbar { grid-template-columns: 1fr; gap: 4px; } }
+.svlog { padding: 4px 0 0 12px; border-left: 2px solid var(--line); }
+.ctable td:not(:first-child), .ctable th:not(:first-child) { text-align: right; }
+.mhealth .v.mono { word-break: break-all; }
+.tfeat td:first-child { width: 1%; white-space: nowrap; }
+.tfeat td:last-child { white-space: normal; }

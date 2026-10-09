@@ -31,6 +31,7 @@
   <nav class="groups" id="groups">
     <button data-group="machine">Machine <small>OPC UA</small></button>
     <button data-group="production">Production <small>SQL</small></button>
+    <button data-group="maintenance">Maintenance <small>counters</small></button>
     <button data-group="network" class="active">Network <small>TCP/IP</small></button>
   </nav>
   <nav class="tabs" id="tabs">
@@ -40,6 +41,9 @@
     <span class="tabgroup hidden" data-group="production">
       <button data-tab="production">Line</button>
       <button data-tab="tscconn" class="admin-only">Connection</button></span>
+    <span class="tabgroup hidden" data-group="maintenance">
+      <button data-tab="service">Service</button>
+      <button data-tab="counters">Counters</button></span>
     <span class="tabgroup" data-group="network">
       <button data-tab="overview" class="active">Overview</button>
       <button data-tab="devices">Devices</button>
@@ -94,11 +98,35 @@
       <div id="pBody"></div>
     </section>
 
+    <section id="tab-service" class="tab hidden">
+      <div class="panel">
+        <div class="toolbar">
+          <h2 class="grow">Service items</h2>
+          <label class="small">Show <select id="svFilter"><option value="">all</option><option value="due">due soon and overdue</option></select></label>
+          <button class="btn primary small admin-only" id="svAdd">Add item</button>
+        </div>
+        <p class="small muted">Each item counts up from when it was last done: feet or pieces made and punch strokes (from TSC), production hours,
+          run hours measured from the PLC's running bit, or days. Mark it done when the work is finished and it starts again.</p>
+      </div>
+      <div id="svBody"></div>
+    </section>
+
+    <section id="tab-counters" class="tab hidden">
+      <div class="panel">
+        <div class="toolbar">
+          <label>Line <select id="ctLine"></select></label>
+          <span id="ctLive" class="small muted"></span>
+        </div>
+        <div id="ctNote"></div>
+      </div>
+      <div id="ctBody"></div>
+    </section>
+
     <section id="tab-tscconn" class="tab hidden">
       <div class="panel">
         <h2>TSC database</h2>
-        <p class="small muted">Ghost Map reads the part schedule view with three fixed SELECT queries on a read-only connection. Use a SQL login that can only SELECT from the view's schema
-          (for example <span class="mono">GRANT SELECT ON SCHEMA::DataView TO ghostmap_ro</span>). Type <b>demo</b> as the server to try a simulated schedule.</p>
+        <p class="small muted">Ghost Map reads TSC's part schedule views with fixed SELECT queries on a read-only connection. Use a SQL login that can only SELECT
+          (for example <span class="mono">GRANT SELECT ON SCHEMA::DataView TO ghostmap_ro</span>). Stations, shifts, stops and punch strokes need a few more read grants: see <b>What Ghost Map can read</b> below. Type <b>demo</b> as the server to try a simulated schedule.</p>
         <form id="tForm" class="tform" autocomplete="off">
           <div class="row">
             <label>Server <input name="server" required maxlength="200" placeholder="SQLHOST, SQLHOST\INSTANCE or 10.0.0.5,1433"></label>
@@ -115,11 +143,15 @@
           </div>
           <details class="small"><summary>More settings</summary>
             <div class="row">
-              <label>View <input name="view" maxlength="260" value="DataView.vPartScheduleCommon"></label>
+              <label>Part schedule view <input name="view" maxlength="260" value="DataView.vPartScheduleCommon"></label>
+              <label>Queue view (run order) <input name="queue_view" maxlength="260" value="DataView.vHmiPartScheduleQueueOrInProgress"></label>
+              <label>Completed parts view <input name="done_view" maxlength="260" value="DataView.vPartScheduleCompleted"></label>
+            </div>
+            <div class="row">
               <label>Length column unit <select name="length_unit"><option value="in">inches</option><option value="ft">feet</option><option value="mm">mm</option></select></label>
             </div>
             <div class="row">
-              <label>Shift start times <input name="shifts" maxlength="100" value="06:00,18:00"></label>
+              <label title="Used when Ghost Map can't read TSC's shift calendar">Shift start times (if no TSC calendar) <input name="shifts" maxlength="100" value="06:00,18:00"></label>
               <label>Reuse a read for (s) <input name="cache_s" type="number" min="5" max="3600" value="30"></label>
             </div>
           </details>
@@ -135,6 +167,12 @@
       <div class="panel">
         <h2>Status</h2>
         <div id="tStatus" class="small muted">Not set up yet.</div>
+      </div>
+      <div class="panel">
+        <h2>What Ghost Map can read</h2>
+        <p class="small muted">The part schedule views are enough for the Line page. Each item below adds to it when the SQL login may read the tables it needs.
+          None of them hold customer data. Ghost Map never reads dbo.Order (customer names) or comments.</p>
+        <div id="tFeatures" class="small muted">Shown after the first read.</div>
       </div>
       <div class="panel">
         <h2>Move to another PC</h2>
@@ -281,6 +319,50 @@
     </form>
   </dialog>
 
+  <dialog id="svDialog" class="wide">
+    <form id="svForm" method="dialog">
+      <h2 id="svTitle">Add a service item</h2>
+      <label>What needs doing <input name="name" required maxlength="120" placeholder="e.g. Shear blade: rotate or sharpen"></label>
+      <div class="row">
+        <label>Count <select name="kind"></select></label>
+        <label>Every <input name="interval" type="number" min="0" step="any" required></label>
+        <label>Warn at (%) <input name="warn_pct" type="number" min="1" max="100" value="90"></label>
+      </div>
+      <div class="row svtsc">
+        <label>TSC line <select name="line"></select></label>
+        <label class="svstroke">Station <select name="station"></select></label>
+        <label class="svstroke">Tool type (blank = every tool at the station) <input name="tool" maxlength="60" list="svTools"></label>
+        <datalist id="svTools"></datalist>
+      </div>
+      <div class="row svplc"><label>Machine <select name="dash"></select></label></div>
+      <div class="row svnew">
+        <label>Last done (blank = now) <input name="last_service" type="date"></label>
+        <label>Already used since then <input name="offset" type="number" min="0" step="any" value="0" title="Count from before Ghost Map was counting, e.g. strokes on the die's own counter"></label>
+      </div>
+      <label>Notes <textarea name="notes" rows="2" maxlength="1000"></textarea></label>
+      <p class="err" id="svErr"></p>
+      <div class="actions">
+        <button type="button" class="btn hidden" id="svDelete">Delete item</button>
+        <span class="grow"></span>
+        <button type="button" class="btn" id="svCancel">Cancel</button>
+        <button type="submit" class="btn primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="svDoneDialog">
+    <form id="svDoneForm" method="dialog">
+      <h2 id="svDoneTitle">Mark done</h2>
+      <p class="small muted" id="svDoneInfo"></p>
+      <label>Note (what was done, parts used) <textarea name="note" rows="3" maxlength="1000"></textarea></label>
+      <p class="err" id="svDoneErr"></p>
+      <div class="actions">
+        <button type="button" class="btn" id="svDoneCancel">Cancel</button>
+        <button type="submit" class="btn primary">Mark done and restart the count</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="importDialog">
     <form id="importForm" method="dialog">
       <h2>Import from a Ghost Map export</h2>
@@ -383,5 +465,6 @@
   <script src="static/opcua.js"></script>
   <script src="static/machine.js"></script>
   <script src="static/production.js"></script>
+  <script src="static/maintenance.js"></script>
 </body>
 </html>
