@@ -8,7 +8,8 @@ is looking, and keeps what it saw in ``<data_dir>/network.db``:
   saw it until a poll no longer does, with its peak; kept ``EVENTS_DAYS`` days.
 
 A rate is the average over one poll interval, so a storm shorter than the interval shows up diluted. Reads are
-SNMP GET/GETBULK only, about a dozen small walks per switch per poll. A switch named ``demo`` is the simulated one.
+SNMP GET/GETBULK only, about a dozen small walks per switch per poll. Switches named ``demo`` and ``demo2`` are the simulated ones
+(CELL1-SW01 and CELL1-SW02, daisy-chained off its Gi1/3).
 """
 
 from __future__ import annotations
@@ -27,11 +28,13 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from ghostmap import secret
-from ghostmap.analysis.diagnostics import Thresholds, _switch_health, traffic_findings
+from ghostmap.analysis.diagnostics import FOLDED_CODES, Thresholds, _switch_health, traffic_findings
 from ghostmap.analysis.traffic import traffic_between
 from ghostmap.collectors.portstats import read_counters
+from ghostmap.analysis.topology import mark_inter_switch_links
 from ghostmap.collectors.stratix import collect_layout, read_cpu
 from ghostmap.models import Port, SwitchHealth, SwitchInfo
+from ghostmap.protocols.oui import mac_vendor
 from ghostmap.protocols.snmp import PySnmpClient, SnmpClient, SnmpCredentials
 
 log = logging.getLogger("ghostmap.netmon")
@@ -40,7 +43,8 @@ CONFIG_VERSION = 1
 SCHEMA_VERSION = 1
 RATES_DAYS = 7
 EVENTS_DAYS = 90
-LAYOUT_EVERY_S = 600.0  # names, link speeds and uplinks are re-read this often
+LAYOUT_EVERY_S = 600.0  # names, link speeds, MACs per port and uplinks are re-read this often
+DEVICES_SHOWN = 12  # device names listed per port
 PRUNE_EVERY_S = 3600.0
 SECRETS = ("community", "auth_key", "priv_key")
 SEVERITY_RANK = {"error": 0, "warning": 1, "info": 2}
@@ -56,9 +60,12 @@ PEAK_OF = {
 }
 
 
+DEMO_SWITCHES = {"demo": "chain", "demo2": "sw02"}  # name in the settings -> demo_switch_client(which=)
+
+
 @dataclass
 class NetmonConfig:
-    switches: list[str] = field(default_factory=list)  # IPs or host names; "demo" = the simulated switch
+    switches: list[str] = field(default_factory=list)  # IPs or host names; "demo" / "demo2" = the simulated ones
     interval_s: int = 30
     version: str = "2c"
     community: str = field(default="", repr=False)
@@ -80,7 +87,7 @@ class NetmonConfig:
             raise ValueError("poll interval must be 10 to 3600 seconds")
         if self.version not in ("2c", "3"):
             raise ValueError("SNMP version must be 2c or 3")
-        real = [s for s in self.switches if s.lower() != "demo"]
+        real = [s for s in self.switches if s.lower() not in DEMO_SWITCHES]
         if real and self.version == "2c" and not self.community:
             raise ValueError("a read-only community is required for SNMP v2c")
         if real and self.version == "3" and not self.username:
@@ -244,14 +251,18 @@ class NetMonitor:
 
     def __init__(self, root: Path, demo: bool = False, snmp_factory: Optional[Callable] = None,
                  thresholds: Optional[Thresholds] = None, clock: Callable[[], float] = time.time,
-                 mono: Callable[[], float] = time.monotonic):
-        """``clock``: wall time for what is stored; ``mono``: for rates (tests pass simulated time to both)."""
+                 mono: Callable[[], float] = time.monotonic,
+                 devices: Optional[Callable[[], dict[str, str]]] = None):
+        """``clock``: wall time for what is stored; ``mono``: for rates (tests pass simulated time to both).
+        ``devices``: MAC -> device name (from the latest scan), to say what is on each port."""
         self.root = Path(root)
         self.path = self.root / CONFIG_NAME
         self.store = TrafficStore(self.root)
         self.thresholds = thresholds or Thresholds()
         self.snmp_factory = snmp_factory or PySnmpClient
         self.clock, self.mono = clock, mono
+        self.devices = devices or (lambda: {})
+        self._layouts: dict[str, SwitchInfo] = {}  # every monitored switch, to find the links between them
         self.cfg: Optional[NetmonConfig] = None
         self.load_error: Optional[str] = None
         self._tasks: dict[str, asyncio.Task] = {}
@@ -264,7 +275,7 @@ class NetMonitor:
                 self.load_error = _error_text(exc)
                 log.warning("can't load %s: %s", self.path, self.load_error)
         elif demo:
-            self.cfg = NetmonConfig(switches=["demo"], interval_s=10)
+            self.cfg = NetmonConfig(switches=list(DEMO_SWITCHES), interval_s=10)
 
     # ------------------------------------------------------------- config
     def _read(self) -> NetmonConfig:
@@ -316,10 +327,10 @@ class NetMonitor:
 
     # ------------------------------------------------------------- polling
     def client_for(self, ip: str, cfg: NetmonConfig) -> SnmpClient:
-        if ip.lower() == "demo":
+        if ip.lower() in DEMO_SWITCHES:
             from ghostmap.sim.machine import demo_switch_client
 
-            return demo_switch_client("today")
+            return demo_switch_client("today", which=DEMO_SWITCHES[ip.lower()])
         return self.snmp_factory(ip, cfg.creds())
 
     def start(self) -> None:
@@ -339,6 +350,7 @@ class NetMonitor:
         if t:
             t.cancel()
         st = self._st.pop(ip, None)
+        self._layouts.pop(ip, None)
         if st:
             for eid, *_ in st["open"].values():
                 self.store.event_close(eid, st.get("last_ok") or self.clock())
@@ -376,6 +388,18 @@ class NetMonitor:
         if st["layout"] is None or now - st["layout_at"] >= LAYOUT_EVERY_S:
             sw = await collect_layout(ip, client)
             st["layout"], st["layout_at"] = sw, now
+            self._layouts[ip] = sw
+            mark_inter_switch_links(list(self._layouts.values()))
+            try:
+                names = self.devices()
+            except Exception:
+                log.debug("traffic monitor: device names unavailable", exc_info=True)
+                names = {}
+            if ip.lower() in DEMO_SWITCHES:  # the demo scan only covers CELL1-SW01
+                from ghostmap.sim.machine import demo_device_names
+
+                names = {**demo_device_names(), **names}
+            st["names"] = names
         layout: SwitchInfo = st["layout"]
         sample = await read_counters(client, self.mono)
         cpu_sw = SwitchInfo(ip=ip)
@@ -399,8 +423,14 @@ class NetMonitor:
             port = Port(if_index=p.if_index, name=p.name, alias=p.alias, speed_mbps=sample.speed_mbps.get(p.if_index, p.speed_mbps),
                         is_uplink=p.is_uplink, traffic=tr, if_type=p.if_type)
             vals = (tr.in_bps, tr.out_bps, tr.in_util, tr.out_util, *(getattr(tr, _TRAFFIC_ATTR[c]) for c in RATE_COLS[4:]))
+            port.macs, port.link_to = p.macs, p.link_to
+            names = st.get("names") or {}
             latest[p.name] = {"if_index": p.if_index, "port": p.name, "alias": p.alias, "speed_mbps": port.speed_mbps,
-                              "uplink": p.is_uplink, "oper": p.oper_status, "seconds": tr.seconds, **dict(zip(RATE_COLS, vals))}
+                              "uplink": p.is_uplink, "link_to": p.link_to, "oper": p.oper_status, "seconds": tr.seconds,
+                              "macs": len(p.macs), "chain": not p.is_uplink and len(p.macs) > 1,
+                              "devices": [] if p.is_uplink else [{"name": names.get(m, ""), "vendor": mac_vendor(m), "mac": m}
+                                                                 for m in p.macs[:DEVICES_SHOWN]],
+                              **dict(zip(RATE_COLS, vals))}
             if any(vals):  # idle and down ports cost no rows
                 rows.append((ip, p.if_index, p.name, now, tr.seconds, *vals))
             for f in traffic_findings(f"{name} {p.name}", port, self.thresholds):
@@ -439,28 +469,75 @@ class NetMonitor:
 
         end = self.clock()
         t = [end - hours * 3600]
-        client = demo_switch_client("today", clock=lambda: t[0] - end + hours * 3600)
+        sims = {ip: (demo_switch_client("today", clock=lambda: t[0] - end + hours * 3600, which=which),
+                     {"open": {}, "prev": None, "layout": None, "layout_at": 0.0, "last_ok": None, "error": None,
+                      "polls": 0, "latest": {}, "cpu": None}) for ip, which in DEMO_SWITCHES.items()}
         saved = self.clock, self.mono
         self.clock = self.mono = lambda: t[0]
-        st = {"open": {}, "prev": None, "layout": None, "layout_at": 0.0, "last_ok": None, "error": None, "polls": 0,
-              "latest": {}, "cpu": None}
         try:
             while t[0] < end - step:
-                await self.poll_once("demo", client, st)
+                for ip, (client, st) in sims.items():
+                    await self.poll_once(ip, client, st)
                 t[0] += step
-            for eid, *_ in st["open"].values():
-                self.store.event_close(eid, t[0])
+            for _, st in sims.values():
+                for eid, *_ in st["open"].values():
+                    self.store.event_close(eid, t[0])
         finally:
             self.clock, self.mono = saved
 
     # ------------------------------------------------------------- status
+    def chain_order(self) -> list[tuple[str, int, str]]:
+        """Monitored switches in wiring order: (ip, depth, "the port it hangs off"). Starts from the first switch
+        in the settings and follows the links between monitored switches; unlinked ones come last."""
+        ips = list(self.cfg.switches) if self.cfg else []
+        by_name = {}
+        for ip in ips:
+            lay = self._layouts.get(ip)
+            if lay and lay.sys_name:
+                by_name[lay.sys_name.split(".")[0].lower()] = ip
+        order, seen = [], set()
+        for root in ips:
+            if root in seen:
+                continue
+            queue = [(root, 0, "")]
+            seen.add(root)
+            while queue:
+                ip, depth, via = queue.pop(0)
+                order.append((ip, depth, via))
+                lay = self._layouts.get(ip)
+                for p in (lay.ports if lay else []):
+                    other = by_name.get(p.link_to.split(" ")[0].split(".")[0].lower()) if p.link_to else None
+                    if other and other not in seen:
+                        seen.add(other)
+                        queue.append((other, depth + 1, f"{lay.sys_name or ip} {p.name}"))
+        return order
+
+    def events(self, since: float, switch: Optional[str] = None) -> list[dict]:
+        """Events, with a storm seen on a link between switches marked ``passing_from`` its source port(s) when the
+        same storm was also seen at the same time on an ordinary port: one storm, shown once, where it starts."""
+        evs = self.store.events(since, switch)
+        links = {(ip, p.name) for ip, lay in self._layouts.items() for p in lay.ports if p.is_uplink}
+        pool = evs if switch is None else self.store.events(since)
+        sources = [e for e in pool if e["code"] in FOLDED_CODES and (e["switch"], e["port"]) not in links]
+        slack = 2 * (self.cfg.interval_s if self.cfg else 30)
+        for e in evs:
+            if e["code"] not in FOLDED_CODES or (e["switch"], e["port"]) not in links:
+                continue
+            end = e["end"] or e["last"]
+            hit = {f"{s['name'] or s['switch']} {s['port']}" for s in sources if s["code"] == e["code"]
+                   and s["start"] <= end + slack and (s["end"] or s["last"]) >= e["start"] - slack}
+            if hit:
+                e["passing_from"] = sorted(hit)
+        return evs
+
     def status(self) -> dict:
         cfg = self.cfg
         out = []
-        for ip in (cfg.switches if cfg else []):
+        for ip, depth, via in self.chain_order():
             st = self._st.get(ip) or {}
             layout = st.get("layout")
-            out.append({"switch": ip, "name": layout.sys_name if layout else None,
+            links = [{"port": p.name, "to": p.link_to} for p in (layout.ports if layout else []) if p.is_uplink and p.link_to]
+            out.append({"switch": ip, "depth": depth, "via": via, "links": links, "name": layout.sys_name if layout else None,
                         "model": layout.model if layout else None, "last_ok": st.get("last_ok"),
                         "error": st.get("error"), "error_at": st.get("error_at"), "polls": st.get("polls", 0),
                         "cpu": st.get("cpu"), "open_events": len(st.get("open") or {})})

@@ -85,9 +85,9 @@ def test_netmon_api_with_demo_switch(tmp_path):
     app = create_app(str(tmp_path), demo=True, demo_opcua=False, collect=False)
     with TestClient(app, headers=H) as c:
         cfg = c.get("/api/netmon/config").json()
-        assert cfg["switches"] == ["demo"]
-        r = c.post("/api/netmon/test", json={"switches": ["demo"]}).json()
-        assert r["ok"] and r["switches"][0]["name"] == "CELL1-SW01" and r["switches"][0]["ports"] == 10
+        assert cfg["switches"] == ["demo", "demo2"]
+        r = c.post("/api/netmon/test", json={"switches": ["demo", "demo2"]}).json()
+        assert r["ok"] and [(s["name"], s["ports"]) for s in r["switches"]] == [("CELL1-SW01", 11), ("CELL1-SW02", 5)]
         assert c.post("/api/netmon/config", json={"switches": ["10.1.1.1"]}).status_code == 400  # no community
         saved = c.post("/api/netmon/config", json={"switches": ["demo"], "interval_s": 15}).json()
         assert saved["interval_s"] == 15
@@ -98,3 +98,24 @@ def test_netmon_api_with_demo_switch(tmp_path):
         assert c.get("/api/netmon/series?switch=demo&port=Fa1/6").json()["rates"] == []
         assert c.delete("/api/netmon/config").json() == {"ok": True}
         assert not c.get("/api/netmon/status").json()["configured"]
+
+
+def test_daisy_chained_switches_and_storm_passing_through(tmp_path):
+    """Demo: CELL1-SW02 hangs off CELL1-SW01 Gi1/3, its drives are daisy-chained on Fa1/1, and the HMI's
+    broadcast storm on SW01 Fa1/6 crosses the link into SW02 Gi1/1."""
+    mon = NetMonitor(tmp_path, demo=True)
+    asyncio.run(mon.seed_demo(hours=1))
+    assert [(ip, depth, via) for ip, depth, via in mon.chain_order()] == [("demo", 0, ""), ("demo2", 1, "CELL1-SW01 Gi1/3")]
+    sw01, sw02 = mon._layouts["demo"], mon._layouts["demo2"]
+    assert sw01.port_by_name("Gi1/3").link_to == "CELL1-SW02 Gi1/1"
+    assert sw02.port_by_name("Gi1/1").link_to == "CELL1-SW01 Gi1/3"
+    assert sw01.port_by_name("Gi1/2").link_to == "PLANT-CORE Gi1/0/24"
+    daisy = sw02.port_by_name("Fa1/1")
+    assert not daisy.is_uplink and len(daisy.macs) == 6  # six drives, not a link to another switch
+
+    evs = mon.events(0)
+    storms = {(e["switch"], e["port"]): e for e in evs if e["code"] == "port.broadcast_storm"}
+    assert "passing_from" not in storms[("demo", "Fa1/6")]
+    assert storms[("demo2", "Gi1/1")]["passing_from"] == ["CELL1-SW01 Fa1/6"]
+    assert "6 devices" not in storms[("demo", "Fa1/6")]["message"]
+    mon.store.close()

@@ -198,3 +198,35 @@ def test_traffic_thresholds():
     assert codes_for(out_mcast_pps=3000) == {"port.multicast_flood": "info"}
     assert codes_for(out_mcast_pps=3000, uplink=True) == {}  # an uplink carries the VLAN's multicast
     assert codes_for(out_discards_ps=4, in_errors_ps=0.5) == {"port.drops": "warning", "port.errors_rising": "warning"}
+
+
+def test_daisy_chain_is_not_a_switch_link():
+    """Drives with two-port switches, daisy-chained: many MACs on one port, but it's not the way to another switch."""
+    from ghostmap.collectors.stratix import _mark_uplinks
+    from ghostmap.models import Port, SwitchInfo, short_port
+
+    drives = [f"00:00:bc:ee:00:{i:02x}" for i in range(10)]  # Rockwell
+    pcs = [f"00:50:56:00:00:{i:02x}" for i in range(10)]     # VMware: a plant network behind an unmanaged switch
+    sw = SwitchInfo(ip="10.0.0.2", sys_name="SW", ports=[Port(if_index=1, name="Fa1/1", macs=drives),
+                                                         Port(if_index=2, name="Gi1/1", macs=pcs)])
+    _mark_uplinks(sw)
+    assert [p.is_uplink for p in sw.ports] == [False, True]
+    assert short_port("GigabitEthernet1/3") == "Gi1/3" and short_port("Fa1/1") == "Fa1/1"
+
+
+def test_storm_reads_once_at_its_source():
+    """A storm from a daisy chain on SW1 Fa1/1 also shows on the SW1 -> SW2 link: the link's finding becomes a note."""
+    from ghostmap.analysis.topology import mark_inter_switch_links
+    from ghostmap.models import Neighbor, Port, PortTraffic, SwitchInfo
+
+    storm = PortTraffic(seconds=30, in_bcast_pps=6000)
+    sw1 = SwitchInfo(ip="10.0.0.2", sys_name="SW1", ports=[
+        Port(if_index=1, name="Fa1/1", if_type=6, oper_status="up", speed_mbps=100, macs=["00:00:bc:ee:00:01", "00:00:bc:ee:00:02"], traffic=storm)])
+    sw2 = SwitchInfo(ip="10.0.0.3", sys_name="SW2", ports=[
+        Port(if_index=1, name="Gi1/1", if_type=6, oper_status="up", speed_mbps=1000, traffic=storm,
+             neighbors=[Neighbor("cdp", "Gi1/1", remote_name="SW1", remote_port="GigabitEthernet1/3")])])
+    mark_inter_switch_links([sw1, sw2])
+    f = {x.target: x for x in run_diagnostics([], [], [sw1, sw2]) if x.code == "port.broadcast_storm"}
+    assert f["SW1 Fa1/1"].severity == "error" and "the 2 devices on this port" in f["SW1 Fa1/1"].message
+    assert f["SW2 Gi1/1"].severity == "info"
+    assert "from SW1 Gi1/3" in f["SW2 Gi1/1"].message and "Same storm as SW1 Fa1/1" in f["SW2 Gi1/1"].message

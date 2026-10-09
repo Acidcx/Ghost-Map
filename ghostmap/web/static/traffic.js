@@ -50,7 +50,32 @@ function netSwitchList() {
   if ($("#nSwitch").innerHTML !== opts) $("#nSwitch").innerHTML = opts;
   if (!sws.some((s) => s.switch === net.sw)) net.sw = sws[0]?.switch || null;
   if (net.sw) $("#nSwitch").value = net.sw;
-  $("#nSwitch").closest("label").classList.toggle("hidden", sws.length < 2);
+  // With several switches the wiring-order list on the page picks one; the drop-down is only for a long list.
+  $("#nSwitch").closest("label").classList.toggle("hidden", sws.length < 2 || sws.length <= 8);
+}
+
+// Description cell: a link to another switch says which switch and port it goes to (a button when that switch is
+// monitored); a port with several devices behind it (a daisy chain of drives, a ring, an unmanaged switch) says how
+// many and names them.
+function netDescHtml(p) {
+  let h = esc(p.alias);
+  if (p.uplink) {
+    const ip = netLinkTarget(p.link_to);
+    h += ` <span class="chip">switch link</span>`;
+    if (p.link_to) h += ip && ip !== net.sw
+      ? ` <a href="#" class="small" data-goto="${esc(ip)}">to ${esc(p.link_to)}</a>`
+      : ` <span class="small muted">to ${esc(p.link_to)}</span>`;
+  } else if (p.chain) {
+    // Named from the newest scan when it found them; otherwise by maker, and the same names counted once.
+    const devs = (p.devices || []).map((d) => ({ ...d, label: d.name || d.vendor || "unknown device" }));
+    const counts = new Map();
+    for (const d of devs) counts.set(d.label, (counts.get(d.label) || 0) + 1);
+    const shown = [...counts].map(([l, n]) => (n > 1 ? `${l} \u00d7${n}` : l));
+    const rest = p.macs - devs.length;
+    h += ` <span class="chip" title="${esc(devs.map((d) => `${d.label}  ${d.mac}`).join("\n"))}">${esc(p.macs)} devices</span>
+      <div class="small muted nchainlist">${esc(shown.slice(0, 4).join(", "))}${shown.length > 4 || rest > 0 ? ", and more" : ""}</div>`;
+  }
+  return h;
 }
 
 // ------------------------------------------------------------------ page
@@ -61,7 +86,7 @@ function netRender() {
     $("#nNote").innerHTML = s.load_error ? `<p class="errtext small">The saved settings could not be loaded: ${esc(s.load_error)}</p>` : "";
     $("#nBody").innerHTML = `<div class="panel"><h3>Not set up yet</h3><p class="small muted">${isViewer()
       ? "An admin can set up the traffic monitor with the machine's switch IPs and a read-only SNMP login."
-      : "Click <b>Settings</b> and enter the machine's switch IPs and a read-only SNMP community (or v3 user). Type <b>demo</b> to try the simulated switch."}</p></div>`;
+      : "Click <b>Settings</b> and enter the machine's switch IPs and a read-only SNMP community (or v3 user). Type <b>demo, demo2</b> to try two simulated, daisy-chained switches."}</p></div>`;
     if (!isViewer()) netShowSettings(true);
     return;
   }
@@ -72,12 +97,13 @@ function netRender() {
   $("#nNote").innerHTML = sw.error ? `<p class="errtext small">Last poll failed (${esc(nTime(sw.error_at))}): ${esc(sw.error)}</p>` : "";
   const ports = net.now?.ports || [];
   if (!ports.length) {
-    $("#nBody").innerHTML = `<div class="panel"><p class="muted small">${sw.error ? "No readings from this switch yet." :
+    $("#nBody").innerHTML = `${netChainHtml()}<div class="panel"><p class="muted small">${sw.error ? "No readings from this switch yet." :
       "Waiting for the second reading: rates need two readings one poll interval apart."}</p></div>${netEventsHtml()}`;
+    netChainWire();
     return;
   }
   const keep = $("#nChart");
-  $("#nBody").innerHTML = `${netPortsHtml(ports)}<div id="nChartSlot"></div>${netEventsHtml()}`;
+  $("#nBody").innerHTML = `${netChainHtml()}${netPortsHtml(ports)}<div id="nChartSlot"></div>${netEventsHtml()}`;
   if (keep && net.port) $("#nChartSlot").replaceWith(keep);
   else $("#nChartSlot").outerHTML = `<div id="nChart"></div>`;
   document.querySelectorAll("#nPorts tbody tr").forEach((tr) => tr.addEventListener("click", () => {
@@ -85,7 +111,50 @@ function netRender() {
     net.chartKey = null;
     netRender();
   }));
+  document.querySelectorAll("#nPorts [data-goto]").forEach((a) => a.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    netPick(a.dataset.goto);
+  }));
+  netChainWire();
   netChart();
+}
+
+function netPick(ip) {
+  net.sw = ip; net.port = null; net.chartKey = null;
+  netPoll();
+}
+
+// Switch name (as LLDP/CDP and the links report it) -> its IP in the settings, for switches being monitored.
+function netByName() {
+  const m = {};
+  for (const s of net.status?.switches || []) if (s.name) m[s.name.split(".")[0].toLowerCase()] = s.switch;
+  return m;
+}
+const netLinkTarget = (to) => netByName()[(to || "").split(" ")[0].split(".")[0].toLowerCase()];
+
+// The monitored switches in wiring order: each one indented under the switch port it hangs off, so a machine with
+// daisy-chained switches reads top to bottom. Links to switches that aren't monitored (the plant network) are named.
+function netChainHtml() {
+  const sws = net.status.switches;
+  if (sws.length < 2) return "";
+  const t = Date.now() / 1000, every = net.status.interval_s || 30;
+  const rows = sws.map((s) => {
+    const fresh = s.last_ok && t - s.last_ok < every * 3;
+    const dot = s.error || !fresh ? "err" : s.open_events ? "warn" : "ok";
+    const other = (s.links || []).filter((l) => !netLinkTarget(l.to));
+    return `<button type="button" class="nsw ${s.switch === net.sw ? "sel" : ""}" data-sw="${esc(s.switch)}" style="margin-left:${Math.min(s.depth, 6) * 26}px">
+      ${s.depth ? `<span class="nbranch">&#x2514;</span>` : ""}<span class="dot ${dot}"></span>
+      <b>${esc(s.name || s.switch)}</b> <span class="small muted mono">${esc(s.switch)}</span>
+      ${s.via ? `<span class="small muted">on ${esc(s.via)}</span>` : ""}
+      ${other.map((l) => `<span class="small muted">&middot; ${esc(l.port)} to ${esc(l.to)}</span>`).join(" ")}
+      ${s.open_events ? `<span class="chip warnchip">${esc(s.open_events)} open</span>` : ""}
+      ${s.cpu ? `<span class="small muted">CPU ${esc(s.cpu.cpu_5s)}%</span>` : ""}</button>`;
+  }).join("");
+  return `<div class="panel"><h3>Switches in wiring order <span class="small muted">(click one for its ports)</span></h3>
+    <div class="nchain">${rows}</div></div>`;
+}
+function netChainWire() {
+  document.querySelectorAll(".nchain [data-sw]").forEach((b) => b.addEventListener("click", () => netPick(b.dataset.sw)));
 }
 
 function netPortsHtml(ports) {
@@ -99,7 +168,7 @@ function netPortsHtml(ports) {
     const dot = codes.length ? (codes.includes("port.broadcast_storm") && (p.in_bcast ?? 0) >= t.bcast_storm_pps ? "err" : "warn")
       : p.oper === "up" ? "ok" : "";
     return `<tr data-port="${esc(p.port)}" class="${net.port === p.port ? "sel" : ""}"><td><span class="dot ${dot}"></span></td>
-      <td class="mono">${esc(p.port)}</td><td>${esc(p.alias)}${p.uplink ? ` <span class="chip">uplink</span>` : ""}</td>
+      <td class="mono">${esc(p.port)}</td><td>${netDescHtml(p)}</td>
       <td>${p.oper === "up" && p.speed_mbps ? esc(p.speed_mbps + "M") : esc(p.oper || "")}</td>
       <td class="num">${nMbps(p.in_bps)}</td><td class="num">${nMbps(p.out_bps)}</td>
       <td><div class="ubar ${busy >= t.util_percent ? "warn" : ""}"><span style="width:${Math.min(100, busy)}%"></span></div>
@@ -121,19 +190,24 @@ function netPortsHtml(ports) {
       A broadcast storm shows as high <b>Bcast in</b> on the port it comes from.</p></div>`;
 }
 
+// Events from every monitored switch: a storm crosses the links between switches, so the machine is one story.
+// A storm seen on a link at the same time as on an ordinary port is shown greyed, pointing at where it comes from.
 function netEventsHtml() {
-  const all = (net.events || []).filter((e) => !net.sw || e.switch === net.sw);
+  const many = (net.status?.switches || []).length > 1;
+  const all = (net.events || []).filter((e) => many || !net.sw || e.switch === net.sw);
   const evs = all.slice(0, 25);
   const now = Date.now() / 1000;
   const rows = evs.map((e) => {
-    const end = e.end ?? null, lasted = (end ?? now) - e.start;
-    return `<tr class="${end ? "" : "sel"}"><td>${esc(nDate(e.start))}</td><td>${esc(nDur(lasted))}${end ? "" : ", ongoing"}</td>
-      <td class="mono">${esc(e.port || "switch")}</td><td><span class="sev ${esc(e.severity)}">${esc(N_TITLES[e.code] || e.code)}</span></td>
-      <td class="num">${e.peak != null ? `${esc(nRate(e.peak))} ${esc(e.unit)}` : ""}</td><td class="wrap" title="${esc(e.hint)}">${esc(e.message)}</td></tr>`;
+    const end = e.end ?? null, lasted = (end ?? now) - e.start, passing = e.passing_from?.length;
+    const msg = passing ? `Passing through this link: the same storm started at ${e.passing_from.join(", ")}.` : e.message;
+    return `<tr class="${passing ? "passing" : end ? "" : "sel"}"><td>${esc(nDate(e.start))}</td><td>${esc(nDur(lasted))}${end ? "" : ", ongoing"}</td>
+      ${many ? `<td>${esc(e.name || e.switch)}</td>` : ""}
+      <td class="mono">${esc(e.port || "switch")}</td><td><span class="sev ${esc(passing ? "info" : e.severity)}">${esc(N_TITLES[e.code] || e.code)}</span></td>
+      <td class="num">${e.peak != null ? `${esc(nRate(e.peak))} ${esc(e.unit)}` : ""}</td><td class="wrap" title="${esc(passing ? e.message : e.hint)}">${esc(msg)}</td></tr>`;
   }).join("");
-  return `<div class="panel"><div class="toolbar"><h3 style="margin:0">Storms and congestion</h3><span class="grow"></span>
+  return `<div class="panel"><div class="toolbar"><h3 style="margin:0">Storms and congestion${many ? ` <span class="small muted">(all switches)</span>` : ""}</h3><span class="grow"></span>
     <a class="btn ghost" href="api/netmon/events.csv?hours=168" download>Download CSV (7 days)</a></div>
-    ${evs.length ? `<div class="tablewrap"><table class="ptable"><thead><tr><th>Start</th><th>Lasted</th><th>Port</th><th>What</th>
+    ${evs.length ? `<div class="tablewrap"><table class="ptable"><thead><tr><th>Start</th><th>Lasted</th>${many ? "<th>Switch</th>" : ""}<th>Port</th><th>What</th>
       <th class="num">Peak</th><th>Details</th></tr></thead><tbody>${rows}</tbody></table></div>
       ${all.length > evs.length ? `<p class="small muted">The newest ${evs.length} of ${all.length}; the CSV has them all.</p>` : ""}`
     : `<p class="muted small">Nothing in this period: no broadcast storms, busy links, climbing errors or drops.</p>`}</div>`;

@@ -98,11 +98,21 @@ def traffic_findings(where: str, port: Port, t: Optional[Thresholds] = None) -> 
     if tr is None:
         return out
     window = f"over {tr.seconds:.0f} s"
+    peer = port.link_to or "the next switch"
+    chain = len(port.macs) > 1 and not port.is_uplink
+    # Where packets "in" on this port come from: one device, a chain of them, or everything beyond a link.
+    source = (f"arriving on the link from {peer}" if port.is_uplink
+              else f"coming from the {len(port.macs)} devices on this port" if chain else "coming from this port")
+    beyond = (f" The source is on the far side of this link: look at {peer}'s ports, or further along." if port.is_uplink
+              else " Several devices share this port (daisy chain, ring or unmanaged switch): the source is one of them."
+              if chain else "")
     for direction, util, bps in (("in", tr.in_util, tr.in_bps), ("out", tr.out_util, tr.out_bps)):
         if util is not None and util >= t.util_percent:
             what = "receiving from the device" if direction == "in" else "sending to the device"
+            if chain:
+                what = f"receiving from the {len(port.macs)} devices on this port" if direction == "in" else "sending to the devices on this port"
             if port.is_uplink:
-                what = "arriving on this uplink" if direction == "in" else "leaving on this uplink"
+                what = f"on the link from {peer}" if direction == "in" else f"on the link to {peer}"
             out.append(Finding("warning", "port.utilization", where,
                                f"Link {util:.0f}% busy {what} ({_mbps(bps)} of {port.speed_mbps} Mbps, {window}).",
                                "A port this busy adds delay and drops packets in bursts, which shows up as I/O "
@@ -112,16 +122,16 @@ def traffic_findings(where: str, port: Port, t: Optional[Thresholds] = None) -> 
     if b is not None and b >= t.bcast_pps:
         storm = b >= t.bcast_storm_pps
         out.append(Finding("error" if storm else "warning", "port.broadcast_storm", where,
-                           f"{_rate(b)} broadcast packets/s {'arriving on this uplink' if port.is_uplink else 'coming from this port'} ({window}).",
+                           f"{_rate(b)} broadcast packets/s {source} ({window}).",
                            "Healthy devices send a few broadcasts a second (ARP, DHCP). This many usually means a loop "
                            "(an unmanaged switch or a ring cabled twice), a faulty NIC, or a PC flooding discovery. "
-                           "Unplug what is on this port to confirm; storm-control on the port limits the damage."))
+                           "Unplug what is on this port to confirm; storm-control on the port limits the damage." + beyond))
     m = tr.in_mcast_pps
     if m is not None and m >= t.mcast_pps:
         out.append(Finding("info", "port.multicast_high", where,
-                           f"{_rate(m)} multicast packets/s {'arriving on this uplink' if port.is_uplink else 'coming from this port'} ({window}).",
+                           f"{_rate(m)} multicast packets/s {source} ({window}).",
                            "EtherNet/IP multicast I/O at a fast RPI can be this busy. If this device isn't producing "
-                           "multicast I/O, look for a camera or PC streaming, or switch its connections to unicast."))
+                           "multicast I/O, look for a camera or PC streaming, or switch its connections to unicast." + beyond))
     m = tr.out_mcast_pps
     if m is not None and m >= t.mcast_flood_pps and not port.is_uplink:
         out.append(Finding("info", "port.multicast_flood", where,
@@ -286,9 +296,27 @@ def run_diagnostics(
                                 "MAC address unknown, so the switch port can't be determined.",
                                 "Device is routed (not on the scanner's subnet) and no scanned switch has it in its ARP table."))
 
+    _fold_passing_storms(findings, switches)
     order = {s: i for i, s in enumerate(("error", "warning", "info"))}
     findings.sort(key=lambda f: (order.get(f.severity, 9), f.code, f.target))
     return findings
+
+
+FOLDED_CODES = ("port.broadcast_storm", "port.multicast_high")
+
+
+def _fold_passing_storms(findings: list[Finding], switches: list[SwitchInfo]) -> None:
+    """A storm shows on its source port and on every switch-to-switch link it crosses. When the source port is in
+    this scan, the links' findings become notes that point at it, so one storm reads as one problem."""
+    uplinks = {f"{sw.sys_name or sw.ip} {p.name}" for sw in switches for p in sw.ports if p.is_uplink}
+    for code in FOLDED_CODES:
+        sources = [f.target for f in findings if f.code == code and f.target not in uplinks]
+        if not sources:
+            continue
+        for f in findings:
+            if f.code == code and f.target in uplinks:
+                f.severity = "info"
+                f.message += f" Same storm as {', '.join(sources)}, passing through this link."
 
 
 def _check_baseline(devices: list[Device], baseline: dict[str, Any]) -> list[Finding]:

@@ -322,3 +322,12 @@ td.wrap { white-space: normal; min-width: 260px; }
 .lg { display: inline-block; margin-left: 8px; } .lg::before { content: ""; display: inline-block; width: 14px; height: 3px;
   border-radius: 2px; vertical-align: middle; margin-right: 4px; }
 .lg.a::before { background: var(--series-a); } .lg.b::before { background: var(--series-b); }
+
+/* Traffic: switches in wiring order, daisy-chained ports, storms passing through links */
+.nchain { display: flex; flex-direction: column; gap: 4px; }
+.nsw { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; text-align: left; font: inherit; color: inherit;
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; cursor: pointer; max-width: 100%; }
+.nsw.sel { outline: 2px solid var(--accent); outline-offset: 1px; }
+.nbranch { color: var(--muted); }
+.nchainlist { white-space: normal; max-width: 34em; }
+tbody tr.passing td { color: var(--muted); }

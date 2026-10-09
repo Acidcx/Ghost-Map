@@ -72,6 +72,17 @@ class Neighbor:
     remote_address: str = ""
 
 
+_PORT_ABBREV = (("TenGigabitEthernet", "Te"), ("GigabitEthernet", "Gi"), ("FastEthernet", "Fa"), ("Ethernet", "Eth"))
+
+
+def short_port(name: str) -> str:
+    """"GigabitEthernet1/3" -> "Gi1/3", as the switch's own CLI prints it."""
+    for long, short in _PORT_ABBREV:
+        if name.startswith(long):
+            return short + name[len(long):]
+    return name
+
+
 @dataclass
 class PortTraffic:
     """Rates on one port, from two counter readings ``seconds`` apart. "in" is what the port received from
@@ -115,6 +126,7 @@ class Port:
     macs: list[str] = field(default_factory=list)
     neighbors: list[Neighbor] = field(default_factory=list)
     is_uplink: bool = False
+    link_to: str = ""  # for a switch-to-switch link: the switch (and port) at the other end, when known
     traffic: Optional[PortTraffic] = None
 
     @property

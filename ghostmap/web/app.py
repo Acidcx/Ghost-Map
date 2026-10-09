@@ -37,7 +37,7 @@ from ghostmap.web.auth import AuditLog, Lockout, Sessions, UserStore, client_all
 from ghostmap.history import RETENTION_DAYS, History
 from ghostmap.web.collector import Collector
 from ghostmap.web.dashboards import DashboardStore, LiveValues, visible_node_ids
-from ghostmap.netmon import NetMonitor
+from ghostmap.netmon import DEMO_SWITCHES, NetMonitor
 from ghostmap.web.tsc import TscService, error_text as tsc_error
 
 UA_IDLE_S = 600        # close OPC UA sessions nobody has used for 10 minutes (re-opened on next use)
@@ -245,7 +245,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     async def lifespan(_app):
         if demo_opcua:
             await start_demo_ua()
-        if collect and demo and netmon.cfg and netmon.cfg.switches == ["demo"]:
+        if collect and demo and netmon.cfg and set(netmon.cfg.switches) <= set(DEMO_SWITCHES):
             await netmon.seed_demo()
         if collect:
             collector.start()
@@ -277,7 +277,16 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     history = History(store.root)
     collector = Collector(dashboards, live, history)
     tsc = TscService(store.root, demo=demo)
-    netmon = NetMonitor(store.root, demo=demo, snmp_factory=snmp_factory)
+    def scan_device_names() -> dict[str, str]:
+        """MAC -> device name from the newest scan, so the traffic monitor can say what is on each port."""
+        scans = sorted(store.list(), key=lambda x: x.get("started") or "", reverse=True)
+        if not scans:
+            return {}
+        scan = store.load(scans[0]["id"])
+        return {d.mac: (f"{d.identity.product_name} {d.ip or ''}".strip() if d.identity else (d.ip or d.mac_vendor or d.mac))
+                for d in scan.devices if d.mac}
+
+    netmon = NetMonitor(store.root, demo=demo, snmp_factory=snmp_factory, devices=scan_device_names)
     tasks: set[asyncio.Task] = set()
     app.state.demo_ua, app.state.live, app.state.ua_sessions = demo_ua, live, ua_sessions  # for tests
     app.state.history, app.state.collector, app.state.tsc, app.state.netmon = history, collector, tsc, netmon
@@ -1011,7 +1020,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
 
     @app.get("/api/netmon/events")
     def netmon_events(hours: float = 24, switch: Optional[str] = None):
-        return {"events": netmon.store.events(time.time() - min(max(hours, 0.1), 24 * 90) * 3600, switch)}
+        return {"events": netmon.events(time.time() - min(max(hours, 0.1), 24 * 90) * 3600, switch)}
 
     @app.get("/api/netmon/events.csv")
     def netmon_events_csv(hours: float = 24 * 7):

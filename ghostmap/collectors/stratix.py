@@ -14,8 +14,9 @@ import re
 from typing import Any, Awaitable, Callable
 
 from ghostmap.collectors.arp import normalize_mac
-from ghostmap.models import Neighbor, Port, Sensor, StpInfo, SwitchInfo
+from ghostmap.models import Neighbor, Port, Sensor, StpInfo, SwitchInfo, short_port
 from ghostmap.protocols import mibs
+from ghostmap.protocols.oui import mac_vendor
 from ghostmap.protocols.snmp import SnmpClient, column
 
 log = logging.getLogger(__name__)
@@ -74,13 +75,14 @@ async def collect_switch(ip: str, client: SnmpClient) -> SwitchInfo:
 
 
 async def collect_layout(ip: str, client: SnmpClient) -> SwitchInfo:
-    """The light part of ``collect_switch`` for the background traffic monitor: name, ports and which ports
-    link to other switches (LLDP/CDP). No MAC or ARP tables."""
+    """The part of ``collect_switch`` the background traffic monitor needs: name, ports, the MACs behind each
+    port (to tell daisy chains from links to other switches) and LLDP/CDP neighbours. No ARP, no environment."""
     sw = SwitchInfo(ip=ip)
     await _system(sw, client)
     await _interfaces(sw, client)
     ports = {p.if_index: p for p in sw.ports}
-    for name, fn in (("lldp", lambda: _lldp(sw, ports, client)), ("cdp", lambda: _cdp(ports, client))):
+    for name, fn in (("mac-table", lambda: _mac_table(ports, client)), ("lldp", lambda: _lldp(sw, ports, client)),
+                     ("cdp", lambda: _cdp(ports, client))):
         try:
             await fn()
         except Exception as exc:
@@ -423,12 +425,39 @@ async def _cdp(ports: dict[int, Port], client: SnmpClient) -> None:
 
 _INFRA_HINTS = ("stratix", "switch", "cisco", "ws-c", "ie-", "1783-")
 UPLINK_MAC_COUNT = 8
+# Makers of drives, I/O and sensors. A port whose MACs are mostly these is a daisy chain (devices with
+# embedded two-port switches, or a DLR ring), not the way to another switch, however many MACs it has.
+AUTOMATION_VENDORS = ("rockwell", "allen-bradley", "sick", "turck", "balluff", "banner", "festo", "smc ", "keyence",
+                      "ifm ", "siemens", "schneider", "phoenix", "wago", "beckhoff", "murrelektronik", "cognex",
+                      "pepperl", "yaskawa", "kollmorgen", "hms ", "hms industrial", "molex", "omron", "mitsubishi",
+                      "b&r", "lenze", "sew-", "danfoss", "abb", "hilscher", "weidm", "pilz", "parker", "rexroth",
+                      "fanuc", "prosoft", "red lion", "hirschmann", "eaton", "puls", "datalogic", "zebra")
+
+
+def is_automation_vendor(vendor: str) -> bool:
+    v = vendor.lower() + " "
+    return any(k in v for k in AUTOMATION_VENDORS)
+
+
+def looks_like_chain(macs: list[str]) -> bool:
+    """Mostly drives / I/O / sensors behind one port: a daisy chain or ring of devices, not another switch."""
+    if not macs:
+        return False
+    auto = sum(1 for m in macs if is_automation_vendor(mac_vendor(m)))
+    return auto * 2 >= len(macs)
 
 
 def _mark_uplinks(sw: SwitchInfo) -> None:
-    """A port facing another switch must not be used to locate end devices."""
+    """A port facing another switch must not be used to locate end devices.
+
+    Evidence, strongest first: a CDP neighbour (only network gear speaks CDP), an LLDP neighbour that names a
+    switch, or many MACs on the port. Many MACs alone doesn't count when they are mostly drives and I/O: that is
+    a daisy chain, which is how most machines are wired."""
     for port in sw.ports:
         for n in port.neighbors:
             hay = f"{n.remote_name} {n.remote_platform}".lower()
-            if n.protocol == "cdp" or any(h in hay for h in _INFRA_HINTS) or len(port.macs) >= UPLINK_MAC_COUNT:
+            if n.protocol == "cdp" or any(h in hay for h in _INFRA_HINTS):
                 port.is_uplink = True
+                port.link_to = port.link_to or f"{n.remote_name.split('.')[0]} {short_port(n.remote_port)}".strip()
+        if not port.is_uplink and len(port.macs) >= UPLINK_MAC_COUNT and not looks_like_chain(port.macs):
+            port.is_uplink = True
