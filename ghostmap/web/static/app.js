@@ -65,7 +65,7 @@ document.querySelectorAll("#tabs button").forEach((b) =>
   b.addEventListener("click", () => showTab(b.dataset.tab)));
 document.querySelectorAll("#groups button").forEach((b) =>
   b.addEventListener("click", () => showGroup(b.dataset.group)));
-const SCANLESS_TABS = ["opcua", "machine", "production", "tscconn"];  // tabs that work without any scan loaded
+const SCANLESS_TABS = ["opcua", "machine", "production", "tscconn", "traffic"];  // tabs that work without any scan loaded
 const isViewer = () => document.body.classList.contains("viewer");
 const tabGroup = (name) => document.querySelector(`#tabs button[data-tab="${name}"]`)?.closest(".tabgroup")?.dataset.group;
 function showGroup(group) {
@@ -233,6 +233,48 @@ function portHealth(sw, p) {
   return p.oper_status === "up" ? "up" : "";
 }
 
+const fmtMbps = (bps) => (bps == null ? "" : (bps / 1e6).toFixed(bps < 1e7 ? 2 : 1));
+const fmtPps = (v) => (v == null ? "" : v >= 100 ? Math.round(v).toLocaleString() : v.toFixed(1));
+const ENV_STATE_TEXT = { notFunctioning: "not working", notPresent: "not present" };
+function fmtAgo(s) {
+  return s < 120 ? `${s} s` : s < 7200 ? `${Math.floor(s / 60)} min` : s < 172800 ? `${Math.floor(s / 3600)} h` : `${Math.floor(s / 86400)} d`;
+}
+
+// CPU, memory, temperature, power and spanning tree tiles, coloured by the switch's own findings.
+function switchHealthHtml(sw) {
+  const h = sw.health || {};
+  const fs = state.findingsByTarget[sw.sys_name || sw.ip] || [];
+  const cls = (...codes) => { const w = worst(fs.filter((f) => codes.includes(f.code))); return w ? sevClass(w) : "ok"; };
+  const tiles = [];
+  if (h.cpu_5m != null) tiles.push([cls("switch.cpu_high", "switch.cpu_spike"), `${h.cpu_5m}%`, "CPU 5 min avg",
+    `5 s ${h.cpu_5s ?? "-"}% &middot; 1 min ${h.cpu_1m ?? "-"}%`]);
+  if (h.memory_percent != null) tiles.push([cls("switch.memory_high"), `${Math.round(h.memory_percent)}%`, "Memory used",
+    `${Math.round(h.memory_used / 1048576)} of ${Math.round((h.memory_used + h.memory_free) / 1048576)} MB`]);
+  const temps = (h.temperatures || []).filter((t) => t.celsius != null);
+  if (temps.length) {
+    const hot = temps.reduce((a, b) => (b.celsius > a.celsius ? b : a));
+    tiles.push([cls("switch.temperature"), `${Math.round(hot.celsius)} &deg;C`, "Temperature",
+      hot.threshold ? `limit ${Math.round(hot.threshold)} &deg;C` : esc(hot.name)]);
+  }
+  const ps = h.power_supplies || [];
+  if (ps.length) {
+    const good = ps.filter((x) => x.state === "normal").length;
+    tiles.push([cls("switch.power"), `${good}/${ps.length}`, "Power inputs OK",
+      ps.filter((x) => x.state !== "normal").map((x) => esc(`${x.name}: ${ENV_STATE_TEXT[x.state] || x.state}`)).join("<br>") || "all normal"]);
+  }
+  const fans = h.fans || [];
+  if (fans.length) tiles.push([cls("switch.fan"), `${fans.filter((x) => x.state === "normal").length}/${fans.length}`, "Fans OK", ""]);
+  const stp = (h.stp || []).filter((x) => x.seconds_since_change != null);
+  if (stp.length) {
+    const last = stp.reduce((a, b) => (b.seconds_since_change < a.seconds_since_change ? b : a));
+    tiles.push([cls("switch.stp_change"), `${fmtAgo(last.seconds_since_change)} ago`, "Last spanning tree change",
+      `${last.vlan != null ? `VLAN ${esc(last.vlan)} &middot; ` : ""}${esc(last.topology_changes)} changes since boot`]);
+  }
+  if (!tiles.length) return `<p class="small muted">The switch did not report CPU, memory or environment readings.</p>`;
+  return `<div class="sw-health">${tiles.map(([c, v, l, sub]) => `<div class="sw-tile ${c}"><div class="v">${v}</div>
+    <div class="l">${l}</div>${sub ? `<div class="s">${sub}</div>` : ""}</div>`).join("")}</div>`;
+}
+
 function renderSwitches() {
   const s = state.scan;
   if (!s.switches.length) {
@@ -254,6 +296,8 @@ function renderSwitches() {
         <td class="mono">${esc(p.name)}</td><td>${esc(p.alias)}</td><td>${esc(p.oper_status)}</td>
         <td>${p.oper_status === "up" && p.speed_mbps ? esc(p.speed_mbps + "M") : ""}</td><td>${p.oper_status === "up" ? esc(p.duplex) : ""}</td><td>${esc(p.vlan ?? "")}</td>
         <td>${p.macs.length}</td><td>${p.fcs_errors + p.alignment_errors}</td><td>${p.in_errors}</td>
+        <td class="num">${fmtMbps(p.traffic?.in_bps)}</td><td class="num">${fmtMbps(p.traffic?.out_bps)}</td>
+        <td class="num">${fmtPps(p.traffic?.in_bcast_pps)}</td>
         <td>${p.is_uplink ? "uplink " : ""}${p.neighbors.map((n) => esc(n.remote_name)).join(", ")}</td>
         <td>${devs.map((d) => esc(d.identity ? d.identity.product_name : d.ip || d.mac)).join(", ")}</td></tr>`;
     }).join("");
@@ -263,10 +307,12 @@ function renderSwitches() {
         <div class="switch-meta">${esc(sw.model)} &middot; IOS ${esc(sw.software_version)} &middot; HW ${esc(sw.hardware_revision || "-")}
         &middot; S/N ${esc(sw.serial || "-")} &middot; up ${fmtUptime(sw.uptime_seconds)} &middot; ${esc(sw.location)}</div></div></div>
       ${errs}
+      ${switchHealthHtml(sw)}
       <div class="faceplate">${plate}</div>
       <div id="portDetail-${si}"></div>
       <div class="tablewrap"><table><thead><tr><th></th><th>Port</th><th>Description</th><th>Link</th><th>Speed</th><th>Duplex</th>
-        <th>VLAN</th><th>MACs</th><th>CRC/Align</th><th>In err</th><th>Neighbor</th><th>Devices</th></tr></thead>
+        <th>VLAN</th><th>MACs</th><th>CRC/Align</th><th>In err</th><th class="num" title="Average over the scan's traffic window">In Mbps</th>
+        <th class="num">Out Mbps</th><th class="num" title="Broadcast packets per second received from the device">Bcast /s</th><th>Neighbor</th><th>Devices</th></tr></thead>
         <tbody>${rows}</tbody></table></div></div>`;
   }).join("");
   document.querySelectorAll("#switches [data-if]").forEach((el) => el.addEventListener("click", () => selectPort(+el.dataset.sw, +el.dataset.if)));
@@ -288,6 +334,11 @@ function selectPort(si, ifIndex) {
       <dt>Speed/duplex</dt><dd>${esc(p.speed_mbps)} Mbps ${esc(p.duplex)}</dd>
       <dt>Counters</dt><dd class="mono">in_err ${p.in_errors} out_err ${p.out_errors} fcs ${p.fcs_errors} align ${p.alignment_errors}
         late_coll ${p.late_collisions} in_disc ${p.in_discards} out_disc ${p.out_discards}</dd>
+      ${p.traffic ? `<dt>Traffic</dt><dd class="mono">over ${esc(p.traffic.seconds)} s: in ${fmtMbps(p.traffic.in_bps)} Mbps
+        (${esc(p.traffic.in_util ?? "-")}%) out ${fmtMbps(p.traffic.out_bps)} Mbps (${esc(p.traffic.out_util ?? "-")}%)<br>
+        broadcast in ${fmtPps(p.traffic.in_bcast_pps)}/s out ${fmtPps(p.traffic.out_bcast_pps)}/s &middot;
+        multicast in ${fmtPps(p.traffic.in_mcast_pps)}/s out ${fmtPps(p.traffic.out_mcast_pps)}/s<br>
+        errors ${fmtPps(p.traffic.in_errors_ps)}/s &middot; drops ${fmtPps(p.traffic.out_discards_ps)}/s</dd>` : ""}
       <dt>Neighbors</dt><dd>${p.neighbors.map((n) => `${esc(n.protocol.toUpperCase())}: ${esc(n.remote_name)} ${esc(n.remote_port)} ${esc(n.remote_platform)} ${esc(n.remote_address)}`).join("<br>") || "-"}</dd>
       <dt>MACs (${p.macs.length})</dt><dd class="mono">${p.macs.slice(0, 64).map((m) => {
         const d = devByMac[m];
@@ -358,7 +409,7 @@ form.addEventListener("submit", async (e) => {
   const f = form;
   const body = {
     label: f.label.value, targets: split(f.targets.value), broadcast: split(f.broadcast.value), switches: split(f.switches.value),
-    auto_switches: f.auto_switches.checked, rate: +f.rate.value, timeout: +f.timeout.value,
+    auto_switches: f.auto_switches.checked, rate: +f.rate.value, timeout: +f.timeout.value, traffic_window: +f.traffic_window.value,
     snmp: { version: f.snmp_version.value, community: f.community.value, username: f.username.value,
       auth_protocol: f.auth_protocol.value, auth_key: f.auth_key.value, priv_protocol: f.priv_protocol.value, priv_key: f.priv_key.value },
   };

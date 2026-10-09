@@ -72,6 +72,36 @@ class Neighbor:
     remote_address: str = ""
 
 
+_PORT_ABBREV = (("TenGigabitEthernet", "Te"), ("GigabitEthernet", "Gi"), ("FastEthernet", "Fa"), ("Ethernet", "Eth"))
+
+
+def short_port(name: str) -> str:
+    """"GigabitEthernet1/3" -> "Gi1/3", as the switch's own CLI prints it."""
+    for long, short in _PORT_ABBREV:
+        if name.startswith(long):
+            return short + name[len(long):]
+    return name
+
+
+@dataclass
+class PortTraffic:
+    """Rates on one port, from two counter readings ``seconds`` apart. "in" is what the port received from
+    the device plugged into it; "out" is what the switch sent to that device. ``None`` = not reported."""
+
+    seconds: float
+    in_bps: Optional[float] = None
+    out_bps: Optional[float] = None
+    in_util: Optional[float] = None  # percent of link speed
+    out_util: Optional[float] = None
+    in_bcast_pps: Optional[float] = None
+    out_bcast_pps: Optional[float] = None
+    in_mcast_pps: Optional[float] = None
+    out_mcast_pps: Optional[float] = None
+    in_errors_ps: Optional[float] = None
+    in_discards_ps: Optional[float] = None
+    out_discards_ps: Optional[float] = None
+
+
 @dataclass
 class Port:
     if_index: int
@@ -96,11 +126,54 @@ class Port:
     macs: list[str] = field(default_factory=list)
     neighbors: list[Neighbor] = field(default_factory=list)
     is_uplink: bool = False
+    link_to: str = ""  # for a switch-to-switch link: the switch (and port) at the other end, when known
+    traffic: Optional[PortTraffic] = None
 
     @property
     def is_physical(self) -> bool:
         # ethernetCsmacd(6), gigabitEthernet(117)
         return self.if_type in (6, 117)
+
+
+@dataclass
+class Sensor:
+    """A temperature sensor, fan or power supply reported by the switch."""
+
+    name: str
+    state: str = "unknown"  # normal | warning | critical | shutdown | notPresent | notFunctioning | unknown
+    celsius: Optional[float] = None  # temperatures only
+    threshold: Optional[float] = None  # temperatures only, when the switch reports one
+
+
+@dataclass
+class StpInfo:
+    """Spanning tree as seen by one VLAN's bridge instance (IOS runs one per VLAN)."""
+
+    vlan: Optional[int]  # None = the switch's default context
+    topology_changes: int = 0  # since the switch started
+    seconds_since_change: Optional[int] = None
+    root: str = ""  # "priority/mac" of the root bridge
+
+
+@dataclass
+class SwitchHealth:
+    """Switch CPU, memory and environment. ``None`` / empty means the switch didn't report it."""
+
+    cpu_5s: Optional[int] = None  # percent busy, highest CPU when there are several
+    cpu_1m: Optional[int] = None
+    cpu_5m: Optional[int] = None
+    memory_used: Optional[int] = None  # bytes
+    memory_free: Optional[int] = None
+    temperatures: list[Sensor] = field(default_factory=list)
+    fans: list[Sensor] = field(default_factory=list)
+    power_supplies: list[Sensor] = field(default_factory=list)
+    stp: list[StpInfo] = field(default_factory=list)
+
+    @property
+    def memory_percent(self) -> Optional[float]:
+        if self.memory_used is None or self.memory_free is None or self.memory_used + self.memory_free <= 0:
+            return None
+        return round(100.0 * self.memory_used / (self.memory_used + self.memory_free), 1)
 
 
 @dataclass
@@ -118,6 +191,7 @@ class SwitchInfo:
     hardware_revision: str = ""
     ports: list[Port] = field(default_factory=list)
     arp: dict[str, str] = field(default_factory=dict)  # ip -> mac
+    health: SwitchHealth = field(default_factory=SwitchHealth)
     errors: list[str] = field(default_factory=list)
 
     def port_by_name(self, name: str) -> Optional[Port]:
@@ -197,6 +271,8 @@ def to_dict(obj: Any) -> Any:
             out["serial_hex"] = obj.serial_hex
         elif isinstance(obj, Device):
             out["key"] = obj.key
+        elif isinstance(obj, SwitchHealth):
+            out["memory_percent"] = obj.memory_percent
         return out
     if isinstance(obj, dict):
         return {k: to_dict(v) for k, v in obj.items()}

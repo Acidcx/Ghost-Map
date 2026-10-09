@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from ghostmap.models import Device, DiscoveredIdentity, Finding, SwitchInfo
+from ghostmap.models import Device, DiscoveredIdentity, Finding, Port, SwitchInfo
 from ghostmap.protocols import cip_tables
 
 
@@ -18,6 +18,143 @@ class Thresholds:
     late_collisions: int = 1
     macs_on_access_port: int = 1  # more than this on a non-uplink port is worth noting
     recent_reboot_seconds: int = 3600
+    cpu_5min_percent: int = 80  # sustained switch CPU load
+    cpu_5sec_percent: int = 95  # momentary spike, only noted
+    memory_percent: float = 90.0
+    stp_change_seconds: int = 3600  # a spanning tree change this recent is worth a look
+    # Traffic (from two counter readings): link use, broadcast / multicast packets per second, drops
+    util_percent: float = 70.0
+    bcast_pps: float = 500.0  # received from one device: a storm or a loop starting
+    bcast_storm_pps: float = 5000.0
+    mcast_pps: float = 5000.0  # received from one device (EtherNet/IP multicast I/O is legitimately busy)
+    mcast_flood_pps: float = 2000.0  # sent to an edge device: IGMP snooping off or no querier
+    errors_per_s: float = 0.1  # input errors still climbing now
+    drops_per_s: float = 1.0  # output drops: the port is congested
+
+
+_STATE_TEXT = {"notFunctioning": "not working", "notPresent": "not present"}
+_ENV_SEVERITY = {"warning": "warning", "critical": "error", "shutdown": "error", "notFunctioning": "warning"}
+
+
+def _switch_health(sw: SwitchInfo, name: str, t: Thresholds) -> list[Finding]:
+    h, out = sw.health, []
+    if h.cpu_5m is not None and h.cpu_5m >= t.cpu_5min_percent:
+        out.append(Finding("warning", "switch.cpu_high", name,
+                           f"Switch CPU at {h.cpu_5m}% averaged over 5 minutes (1 min {h.cpu_1m}%, 5 s {h.cpu_5s}%).",
+                           "A busy CPU answers SNMP, LLDP and spanning tree late. Usual causes: a broadcast or multicast "
+                           "storm (IGMP snooping off), a loop, or many SNMP pollers. Check 'show processes cpu sorted'."))
+    elif h.cpu_5s is not None and h.cpu_5s >= t.cpu_5sec_percent:
+        out.append(Finding("info", "switch.cpu_spike", name, f"Switch CPU at {h.cpu_5s}% over the last 5 seconds.",
+                           "Short spikes are normal during a scan or config save. Re-scan; if it stays high, see 'show processes cpu'."))
+    mem = h.memory_percent
+    if mem is not None and mem >= t.memory_percent:
+        out.append(Finding("warning", "switch.memory_high", name, f"Switch memory {mem:.0f}% used.",
+                           "Can lead to dropped management sessions or a crash. Check 'show memory statistics'; "
+                           "a slow climb across scans points to a leak fixed in newer firmware."))
+    for s in h.temperatures:
+        sev = _ENV_SEVERITY.get(s.state)
+        reading = f" ({s.celsius:.0f} °C)" if s.celsius is not None else ""
+        if sev:
+            out.append(Finding(sev, "switch.temperature", name, f"Temperature sensor '{s.name}' is {_STATE_TEXT.get(s.state, s.state)}{reading}.",
+                               "Check the enclosure: blocked vents, failed panel fan or A/C, or the switch mounted next to a drive."))
+        elif s.celsius is not None and s.threshold and s.celsius >= s.threshold:
+            out.append(Finding("warning", "switch.temperature", name,
+                               f"Temperature sensor '{s.name}' at {s.celsius:.0f} °C, at or above its {s.threshold:.0f} °C threshold.",
+                               "Check the enclosure: blocked vents, failed panel fan or A/C, or the switch mounted next to a drive."))
+    for kind, sensors, hint in (
+        ("power", h.power_supplies, "One of the switch's power inputs is out. Fine if that input is deliberately "
+                                    "unwired; otherwise check the 24 V supply, its breaker and the terminal block."),
+        ("fan", h.fans, "Replace the fan or check what is blocking it."),
+    ):
+        for s in sensors:
+            sev = _ENV_SEVERITY.get(s.state)
+            if sev:
+                out.append(Finding(sev, f"switch.{kind}", name, f"{kind.capitalize()} '{s.name}' is {_STATE_TEXT.get(s.state, s.state)}.", hint))
+    for st in h.stp:
+        if st.seconds_since_change is not None and st.seconds_since_change < t.stp_change_seconds and st.topology_changes:
+            where = f"VLAN {st.vlan}" if st.vlan is not None else "spanning tree"
+            rebooted = 0 < sw.uptime_seconds < t.recent_reboot_seconds  # the tree forms at boot; expected then
+            out.append(Finding("info" if rebooted else "warning", "switch.stp_change", name,
+                               f"{where}: topology changed {_ago(st.seconds_since_change)} ago "
+                               f"({st.topology_changes} changes since the switch started).",
+                               "Each change flushes MAC tables and can drop EtherNet/IP I/O connections. Look for a flapping link, "
+                               "a device port without PortFast, or someone plugging in a switch. "
+                               "'show spanning-tree detail' names the port that last changed."))
+    return out
+
+
+def _rate(v: float) -> str:
+    return f"{v:,.0f}" if v >= 10 else f"{v:.1f}"
+
+
+def _mbps(bps: float) -> str:
+    return f"{bps / 1e6:.1f} Mbps" if bps < 1e8 else f"{bps / 1e6:,.0f} Mbps"
+
+
+def traffic_findings(where: str, port: Port, t: Optional[Thresholds] = None) -> list[Finding]:
+    """Findings from one port's rates (``port.traffic``). Also used by the background monitor."""
+    t = t or Thresholds()
+    tr, out = port.traffic, []
+    if tr is None:
+        return out
+    window = f"over {tr.seconds:.0f} s"
+    peer = port.link_to or "the next switch"
+    chain = len(port.macs) > 1 and not port.is_uplink
+    # Where packets "in" on this port come from: one device, a chain of them, or everything beyond a link.
+    source = (f"arriving on the link from {peer}" if port.is_uplink
+              else f"coming from the {len(port.macs)} devices on this port" if chain else "coming from this port")
+    beyond = (f" The source is on the far side of this link: look at {peer}'s ports, or further along." if port.is_uplink
+              else " Several devices share this port (daisy chain, ring or unmanaged switch): the source is one of them."
+              if chain else "")
+    for direction, util, bps in (("in", tr.in_util, tr.in_bps), ("out", tr.out_util, tr.out_bps)):
+        if util is not None and util >= t.util_percent:
+            what = "receiving from the device" if direction == "in" else "sending to the device"
+            if chain:
+                what = f"receiving from the {len(port.macs)} devices on this port" if direction == "in" else "sending to the devices on this port"
+            if port.is_uplink:
+                what = f"on the link from {peer}" if direction == "in" else f"on the link to {peer}"
+            out.append(Finding("warning", "port.utilization", where,
+                               f"Link {util:.0f}% busy {what} ({_mbps(bps)} of {port.speed_mbps} Mbps, {window}).",
+                               "A port this busy adds delay and drops packets in bursts, which shows up as I/O "
+                               "connection timeouts. Look for a camera or PC streaming on the machine network, "
+                               "a 10/100 link that should be gigabit, or a loop."))
+    b = tr.in_bcast_pps
+    if b is not None and b >= t.bcast_pps:
+        storm = b >= t.bcast_storm_pps
+        out.append(Finding("error" if storm else "warning", "port.broadcast_storm", where,
+                           f"{_rate(b)} broadcast packets/s {source} ({window}).",
+                           "Healthy devices send a few broadcasts a second (ARP, DHCP). This many usually means a loop "
+                           "(an unmanaged switch or a ring cabled twice), a faulty NIC, or a PC flooding discovery. "
+                           "Unplug what is on this port to confirm; storm-control on the port limits the damage." + beyond))
+    m = tr.in_mcast_pps
+    if m is not None and m >= t.mcast_pps:
+        out.append(Finding("info", "port.multicast_high", where,
+                           f"{_rate(m)} multicast packets/s {source} ({window}).",
+                           "EtherNet/IP multicast I/O at a fast RPI can be this busy. If this device isn't producing "
+                           "multicast I/O, look for a camera or PC streaming, or switch its connections to unicast." + beyond))
+    m = tr.out_mcast_pps
+    if m is not None and m >= t.mcast_flood_pps and not port.is_uplink:
+        out.append(Finding("info", "port.multicast_flood", where,
+                           f"The switch sends {_rate(m)} multicast packets/s to this device ({window}).",
+                           "Fine if the device consumes that multicast I/O. Otherwise IGMP snooping is off or no IGMP "
+                           "querier is running on this VLAN, so every device gets every multicast packet."))
+    e = tr.in_errors_ps
+    if e is not None and e >= t.errors_per_s:
+        out.append(Finding("warning", "port.errors_rising", where,
+                           f"Input errors are climbing now: {_rate(e)} per second ({window}).",
+                           "The cable, connector or device NIC is failing right now, or a duplex mismatch. Re-terminate "
+                           "or swap the patch cable, and keep it away from VFD output and motor leads."))
+    d = tr.out_discards_ps
+    if d is not None and d >= t.drops_per_s:
+        out.append(Finding("warning", "port.drops", where,
+                           f"The switch is dropping {_rate(d)} packets/s it should send on this port ({window}).",
+                           "Output drops mean more traffic is headed to this port than the link can take. Check the "
+                           "link speed, a storm elsewhere on the VLAN, or a busy device sharing this port."))
+    return out
+
+
+def _ago(seconds: int) -> str:
+    return f"{seconds} s" if seconds < 120 else f"{seconds // 60} min"
 
 
 def load_baseline(path: str | Path) -> dict[str, Any]:
@@ -118,6 +255,7 @@ def run_diagnostics(
         if sw.uptime_seconds and sw.uptime_seconds < t.recent_reboot_seconds:
             add(Finding("info", "switch.recent_reboot", name, f"Switch has been up only {sw.uptime_seconds // 60} min.",
                         "Error counters were reset; MAC table may still be populating."))
+        findings.extend(_switch_health(sw, name, t))
         for p in sw.ports:
             if not p.is_physical:
                 continue
@@ -140,6 +278,7 @@ def run_diagnostics(
             if p.admin_status == "up" and p.oper_status == "down" and p.alias:
                 add(Finding("info", "port.down", where, f"Port '{p.alias}' is down.",
                             "Device off, unplugged, or port err-disabled (check 'show interfaces status err-disabled')."))
+            findings.extend(traffic_findings(where, p, t))
             if not p.is_uplink and len(p.macs) > t.macs_on_access_port:
                 add(Finding("info", "port.multi_mac", where, f"{len(p.macs)} MAC addresses learned on this edge port.",
                             "Daisy-chained devices (embedded switch / DLR) or an unmanaged switch downstream."))
@@ -157,9 +296,27 @@ def run_diagnostics(
                                 "MAC address unknown, so the switch port can't be determined.",
                                 "Device is routed (not on the scanner's subnet) and no scanned switch has it in its ARP table."))
 
+    _fold_passing_storms(findings, switches)
     order = {s: i for i, s in enumerate(("error", "warning", "info"))}
     findings.sort(key=lambda f: (order.get(f.severity, 9), f.code, f.target))
     return findings
+
+
+FOLDED_CODES = ("port.broadcast_storm", "port.multicast_high")
+
+
+def _fold_passing_storms(findings: list[Finding], switches: list[SwitchInfo]) -> None:
+    """A storm shows on its source port and on every switch-to-switch link it crosses. When the source port is in
+    this scan, the links' findings become notes that point at it, so one storm reads as one problem."""
+    uplinks = {f"{sw.sys_name or sw.ip} {p.name}" for sw in switches for p in sw.ports if p.is_uplink}
+    for code in FOLDED_CODES:
+        sources = [f.target for f in findings if f.code == code and f.target not in uplinks]
+        if not sources:
+            continue
+        for f in findings:
+            if f.code == code and f.target in uplinks:
+                f.severity = "info"
+                f.message += f" Same storm as {', '.join(sources)}, passing through this link."
 
 
 def _check_baseline(devices: list[Device], baseline: dict[str, Any]) -> list[Finding]:

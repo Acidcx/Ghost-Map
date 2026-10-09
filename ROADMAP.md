@@ -48,7 +48,7 @@ Web face first, because it's the biggest risk:
 
 Then the service:
 - [ ] `GhostMap.exe service install|uninstall|start|stop` to run as a Windows service at boot
-- [ ] Scheduled background scans and polling, with history in SQLite
+- [ ] Scheduled background scans and polling, with history in SQLite (switch traffic, CPU and storm events: done, Network > Traffic)
   - [x] Background reading of every machine dashboard (resident collector), one OPC UA session per gateway, alarm history in SQLite (90 days)
 - [ ] Change timeline: device added or removed, firmware changed, port down, new MAC on a port
 - [ ] Alerts: thresholds and rate of change (e.g. CRC errors climbing); notifications through the IXON-approved path
