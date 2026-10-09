@@ -33,7 +33,8 @@ RETENTION_DAYS = 90
 ALIVE_EVERY_S = 10.0    # how often "still recording" is noted, so a restart can close what was open
 PRUNE_EVERY_S = 3600.0
 DB_NAME = "history.db"
-SCHEMA_VERSION = 1  # PRAGMA user_version; bump it with a migration when the tables change
+SCHEMA_VERSION = 2  # PRAGMA user_version; bump it with a migration when the tables change (2: meters)
+METER_STEP_MAX_S = 10.0  # a longer gap between good reads is not counted (Ghost Map was off or comms were down)
 log = logging.getLogger("ghostmap.history")
 
 SCHEMA = """
@@ -54,7 +55,13 @@ CREATE INDEX IF NOT EXISTS gaps_dash_start ON gaps (dash, start);
 CREATE TABLE IF NOT EXISTS runs (id INTEGER PRIMARY KEY, dash TEXT NOT NULL, at REAL NOT NULL, running INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS runs_dash_at ON runs (dash, at);
 CREATE TABLE IF NOT EXISTS alive (dash TEXT PRIMARY KEY, at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS meters (dash TEXT NOT NULL, name TEXT NOT NULL, value REAL NOT NULL, first REAL NOT NULL,
+    updated REAL NOT NULL, PRIMARY KEY (dash, name));
+CREATE TABLE IF NOT EXISTS meter_days (dash TEXT NOT NULL, day TEXT NOT NULL, name TEXT NOT NULL, value REAL NOT NULL,
+    PRIMARY KEY (dash, day, name));
 """
+# Meters are lifetime totals (hour meters), kept forever: machine running time and time with good reads.
+# meter_days holds the same per local calendar day, for "last 7 days" style windows.
 
 
 class History:
@@ -84,13 +91,18 @@ class History:
     def counts(self) -> dict:
         """Row counts and file size, for the debug bundle."""
         with self._lock:
-            n = {t: self._db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in ("events", "stops", "gaps", "runs")}
+            n = {t: self._db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0] for t in ("events", "stops", "gaps", "runs", "meters")}
             n["schema"] = self._db.execute("PRAGMA user_version").fetchone()[0]
         n["bytes"] = sum(p.stat().st_size for p in self.path.parent.glob(self.path.name + "*") if p.is_file())
         return n
 
     def close(self) -> None:
         with self._lock:
+            now = time.time()
+            for did, st in self._st.items():
+                if st.get("acc"):
+                    self._flush_meters(did, st, now)
+            self._db.commit()
             self._db.close()
 
     # ----------------------------------------------------------------- recording
@@ -107,7 +119,7 @@ class History:
         st = self._st.get(did)
         if st is None:
             st = self._st[did] = {"open": {}, "stop": None, "stop_keys": set(), "gap": None, "running": None,
-                                  "first": True, "alive": 0.0, "gap_cleared": set()}
+                                  "first": True, "alive": 0.0, "gap_cleared": set(), "last_ok": None, "acc": {}}
         return st
 
     def observe(self, dash: dict, result: dict, now: Optional[float] = None) -> dict:
@@ -168,6 +180,14 @@ class History:
                 st["stop"], st["stop_keys"] = None, set()
                 changed = True
 
+            # Hour meters: time between two good reads counts as online, and as running when the machine was
+            # running at the first of them.
+            if st["last_ok"] is not None and 0 < now - st["last_ok"] <= METER_STEP_MAX_S and not in_gap:
+                dt = now - st["last_ok"]
+                st["acc"]["online_s"] = st["acc"].get("online_s", 0.0) + dt
+                if st["running"]:
+                    st["acc"]["run_s"] = st["acc"].get("run_s", 0.0) + dt
+            st["last_ok"] = now
             running = running_state(dash.get("layout") or {}, result.get("values") or {}, result.get("bad") or [])
             if running is not None and running != st["running"]:
                 db.execute("INSERT INTO runs (dash, at, running) VALUES (?, ?, ?)", (did, now, int(running)))
@@ -176,6 +196,7 @@ class History:
 
             st["first"] = False
             if now - st["alive"] >= ALIVE_EVERY_S:
+                self._flush_meters(did, st, now)
                 db.execute("INSERT INTO alive (dash, at) VALUES (?, ?) ON CONFLICT(dash) DO UPDATE SET at = excluded.at",
                            (did, now))
                 st["alive"] = now
@@ -186,6 +207,34 @@ class History:
             if changed:
                 db.commit()
             return self._current(st)
+
+    def _flush_meters(self, did: str, st: dict, now: float) -> None:
+        day = time.strftime("%Y-%m-%d", time.localtime(now))
+        for name, v in st["acc"].items():
+            self._db.execute("INSERT INTO meters (dash, name, value, first, updated) VALUES (?, ?, ?, ?, ?) "
+                             "ON CONFLICT(dash, name) DO UPDATE SET value = value + excluded.value, updated = excluded.updated",
+                             (did, name, v, now, now))
+            self._db.execute("INSERT INTO meter_days (dash, day, name, value) VALUES (?, ?, ?, ?) "
+                             "ON CONFLICT(dash, day, name) DO UPDATE SET value = value + excluded.value", (did, day, name, v))
+        st["acc"] = {}
+
+    def meters(self, did: str) -> dict:
+        """Lifetime hour meters for a dashboard: {name: {"value": seconds, "first": when counting began}}, plus the
+        part not written yet."""
+        with self._lock:
+            out = {r["name"]: {"value": r["value"], "first": r["first"]}
+                   for r in self._db.execute("SELECT name, value, first FROM meters WHERE dash = ?", (did,))}
+            for name, v in (self._st.get(did) or {}).get("acc", {}).items():
+                out.setdefault(name, {"value": 0.0, "first": time.time()})["value"] += v
+        return out
+
+    def meter_window(self, did: str, name: str, days: int) -> float:
+        """Seconds counted on a meter over the last ``days`` calendar days (today included)."""
+        first = time.strftime("%Y-%m-%d", time.localtime(time.time() - (days - 1) * 86400))
+        with self._lock:
+            v = self._db.execute("SELECT COALESCE(SUM(value), 0) FROM meter_days WHERE dash = ? AND name = ? AND day >= ?",
+                                 (did, name, first)).fetchone()[0]
+            return v + (self._st.get(did) or {}).get("acc", {}).get(name, 0.0)
 
     def _current(self, st: dict) -> dict:
         if st["stop"] is None:

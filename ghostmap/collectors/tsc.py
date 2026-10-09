@@ -1,9 +1,12 @@
-"""Read-only queries against the TSC (Total System Control) part schedule on SQL Server.
+"""Read-only queries against the TSC (Total System Control) database on SQL Server.
 
-Ghost Map reads one view, ``DataView.vPartScheduleCommon`` by default, with three fixed SELECTs: the lines,
-a line's open parts (not finished yet) and a line's parts finished since a time. Nothing else is ever sent:
-no INSERT, UPDATE, DELETE, EXEC or DDL, and the connection asks for a read-only session
-(ApplicationIntent=ReadOnly). Give Ghost Map a SQL login that can only SELECT from the view's schema.
+Ghost Map reads the part schedule through TSC's own DataView views (``vPartScheduleCommon``, the queue view
+``vHmiPartScheduleQueueOrInProgress`` with the run order in QueueIndex, and ``vPartScheduleCompleted``), and,
+when the login is allowed to, a few lookup tables: stations and per-station progress, station dependencies,
+the shift calendar, downtime with stop reasons, and the tooling tables used to count punch strokes. Every
+query is a fixed SELECT; nothing else is ever sent (no INSERT, UPDATE, DELETE, EXEC or DDL), and the connection
+asks for a read-only session (ApplicationIntent=ReadOnly). Give Ghost Map a SQL login that can only SELECT.
+Customer names and comments are never read.
 
 The driver is python-tds (pure Python), so GhostMap.exe needs no ODBC driver on the HMI. Encryption uses
 pyOpenSSL: "trust server certificate" accepts the server's self-signed certificate, like the ODBC option of
@@ -19,8 +22,10 @@ from datetime import datetime
 from typing import Optional
 
 DEFAULT_VIEW = "DataView.vPartScheduleCommon"
+DEFAULT_QUEUE_VIEW = "DataView.vHmiPartScheduleQueueOrInProgress"  # status 2, 3, 4 with QueueIndex
+DEFAULT_DONE_VIEW = "DataView.vPartScheduleCompleted"              # status 5
 # The columns the Production page uses. CustomerName and the comments are left out on purpose.
-COLUMNS = ["PartID", "OrderNumber", "Status", "StatusDescription", "RequestedQuantity", "QuantityAdjust",
+COLUMNS = ["PartID", "Quantity", "RequestedCoil", "OrderNumber", "Status", "StatusDescription", "RequestedQuantity", "QuantityAdjust",
            "ActualQuantity", "QuantityRemaining", "ProfileName", "StandardPartName", "Thickness", "StripWidth",
            "Tooling", "Color", "BundleMark", "Length", "PieceMark", "RecordXofY", "IsEndOfBundle", "ErrorCode",
            "ErrorCodeDescription", "RemakeCode", "IsScrap", "IsForcedRemake", "PriorityIndex", "ImportIndex",
@@ -41,6 +46,8 @@ class TscConfig:
     trust_cert: bool = True     # with encrypt: accept the server's self-signed certificate
     cafile: str = ""            # with encrypt and not trust_cert: CA certificate (PEM) to check it against
     view: str = DEFAULT_VIEW
+    queue_view: str = DEFAULT_QUEUE_VIEW
+    done_view: str = DEFAULT_DONE_VIEW
     length_unit: str = "in"     # unit of the Length column: in, ft or mm
     shifts: str = "06:00,18:00"  # shift start times, for "this shift"
     cache_s: int = 30           # how long a read is reused (several people watching cost one query)
@@ -53,8 +60,9 @@ class TscConfig:
                 raise ValueError("database is required")
             if not self.username.strip():
                 raise ValueError("username is required")
-        if not _VIEW_RE.match(self.view.strip()):
-            raise ValueError("view must look like Schema.ViewName")
+        for v in (self.view, self.queue_view, self.done_view):
+            if not _VIEW_RE.match(v.strip()):
+                raise ValueError("views must look like Schema.ViewName")
         if self.length_unit not in ("in", "ft", "mm"):
             raise ValueError("length unit must be in, ft or mm")
         parse_shifts(self.shifts)
@@ -82,6 +90,24 @@ def _split_server(server: str) -> tuple[str, Optional[int]]:
     return s, None
 
 
+# Optional reads and the GRANT each needs; a read the login may not do is reported, not fatal.
+FEATURES = {
+    "stations": ("Station names, and progress at every station (3 and up)",
+                 "GRANT SELECT ON dbo.Station TO <login>; GRANT SELECT ON dbo.StationPart TO <login>;"),
+    "station_links": ("Stations that wait on others (e.g. pan + back skin)", "GRANT SELECT ON dbo.StationDependency TO <login>; "
+                      "GRANT SELECT ON dbo.StationDependencyType TO <login>;"),
+    "shifts": ("The shift calendar", "GRANT SELECT ON dbo.Shift TO <login>; GRANT SELECT ON dbo.DayOfWeek TO <login>;"),
+    "downtime": ("Stops and their reasons", "GRANT SELECT ON dbo.vGetDownTimeData TO <login>;"),
+    "strokes": ("Punch strokes per tool (maintenance)", "GRANT SELECT ON dbo.PartPattern TO <login>; GRANT SELECT ON dbo.PatternHole TO <login>; "
+                "GRANT SELECT ON dbo.Hole TO <login>; GRANT SELECT ON dbo.PartNotch TO <login>;"),
+    "tool_types": ("Tool names", "GRANT SELECT ON Machine.ToolType TO <login>;"),
+}
+
+# Holes one pattern puts on a part: once, or along the part every RepeatOffset between the lead and end offsets.
+_HITS = ("CASE WHEN pp.IsRepeat = 1 AND pp.RepeatOffset > 0 THEN CASE WHEN p.Length - pp.LeadOffset - pp.EndOffset >= 0 "
+         "THEN FLOOR((p.Length - pp.LeadOffset - pp.EndOffset) / pp.RepeatOffset) + 1 ELSE 0 END ELSE 1 END")
+
+
 class SqlTsc:
     """The real source: python-tds, a short-lived connection per query batch."""
 
@@ -90,7 +116,7 @@ class SqlTsc:
     def __init__(self, cfg: TscConfig):
         cfg.check()
         self.cfg = cfg
-        self.view = cfg.view.strip()
+        self.view, self.queue_view, self.done_view = cfg.view.strip(), cfg.queue_view.strip(), cfg.done_view.strip()
 
     def _connect(self):
         import pytds
@@ -114,17 +140,87 @@ class SqlTsc:
                 names = [d[0] for d in cur.description]
                 return [dict(zip(names, row)) for row in cur.fetchall()]
 
+    # ------------------------------------------------------------- the part schedule (DataView)
     def lines(self) -> list[dict]:
         return self._query(f"SELECT DISTINCT LineID, LineName FROM {self.view} ORDER BY LineID")
 
     def open_parts(self, line_id: int, limit: int = 300) -> list[dict]:
-        return self._query(f"SELECT TOP {int(limit)} {', '.join(COLUMNS)} FROM {self.view} "
-                           "WHERE LineID = %s AND (EndTime IS NULL OR EndTime < %s) ORDER BY PriorityIndex, ImportIndex",
-                           (int(line_id), UNSET_BEFORE))
+        """Queued, held and in-progress parts in the order the machine runs them."""
+        return self._query(f"SELECT TOP {int(limit)} QueueIndex, {', '.join(COLUMNS)} FROM {self.queue_view} "
+                           "WHERE LineID = %s ORDER BY QueueIndex", (int(line_id),))
 
     def done_parts(self, line_id: int, since: datetime, limit: int = 3000) -> list[dict]:
-        return self._query(f"SELECT TOP {int(limit)} {', '.join(COLUMNS)} FROM {self.view} "
+        return self._query(f"SELECT TOP {int(limit)} {', '.join(COLUMNS)} FROM {self.done_view} "
                            "WHERE LineID = %s AND EndTime >= %s ORDER BY EndTime DESC", (int(line_id), since))
+
+    def order_totals(self, line_id: int, orders: list[str]) -> list[dict]:
+        """Whole-order progress (every part of the order, not only the ones in view) for the given orders."""
+        orders = [str(o) for o in orders][:200]
+        if not orders:
+            return []
+        marks = ", ".join(["%s"] * len(orders))
+        return self._query(
+            "SELECT OrderNumber, COUNT(*) AS Parts, SUM(CASE WHEN Status = 5 THEN 1 ELSE 0 END) AS PartsDone, "
+            "SUM(CAST(Quantity AS bigint)) AS Pieces, SUM(CAST(ActualQuantity AS bigint)) AS PiecesDone, "
+            "COUNT(DISTINCT BundleID) AS Bundles, "
+            "SUM(CASE WHEN Quantity > ActualQuantity THEN CAST(Length AS float) * (Quantity - ActualQuantity) ELSE 0 END) AS LengthLeft "
+            f"FROM {self.view} WHERE LineID = %s AND OrderNumber IN ({marks}) GROUP BY OrderNumber",
+            (int(line_id), *orders))
+
+    def totals(self, line_id: int, since: datetime) -> dict:
+        """Finished parts since a time, summed on the server: parts, pieces, length, scrap and run time."""
+        rows = self._query(
+            "SELECT COUNT(*) AS Parts, SUM(CAST(ActualQuantity AS bigint)) AS Pieces, "
+            "SUM(CAST(Length AS float) * ActualQuantity) AS LengthTotal, "
+            "SUM(CASE WHEN IsScrap = 1 THEN CAST(ActualQuantity AS bigint) ELSE 0 END) AS ScrapPieces, "
+            "SUM(CASE WHEN StartTime > '19010101' AND EndTime > StartTime THEN CAST(DATEDIFF(second, StartTime, EndTime) AS bigint) ELSE 0 END) AS RunSeconds, "
+            f"MIN(EndTime) AS FirstEnd FROM {self.done_view} WHERE LineID = %s AND EndTime >= %s", (int(line_id), since))
+        return rows[0] if rows else {}
+
+    # ------------------------------------------------------------- optional lookups (dbo / Machine)
+    def station_parts(self, part_ids: list[str]) -> list[dict]:
+        out = []
+        ids = [str(i) for i in part_ids]
+        for i in range(0, len(ids), 100):
+            chunk = ids[i:i + 100]
+            out += self._query("SELECT StationID, PartID, QuantityCompleted, IsInProgress, IsCompleted FROM dbo.StationPart "
+                               f"WHERE PartID IN ({', '.join(['%s'] * len(chunk))})", tuple(chunk))
+        return out
+
+    def stations(self) -> list[dict]:
+        return self._query("SELECT StationID, LineID, Name, Description FROM dbo.Station ORDER BY StationID")
+
+    def station_links(self) -> list[dict]:
+        return self._query("SELECT d.DependentStationID, d.IndependentStationID, t.Name AS TypeName FROM dbo.StationDependency d "
+                           "LEFT JOIN dbo.StationDependencyType t ON t.StationDependencyTypeID = d.StationDependencyTypeID")
+
+    def shifts(self) -> list[dict]:
+        return self._query("SELECT s.ShiftID, s.Name, s.DayNumber, d.Name AS DayName, s.ShiftNumber, s.StartTime, s.EndTime "
+                           "FROM dbo.Shift s LEFT JOIN dbo.DayOfWeek d ON d.DayNumber = s.DayNumber ORDER BY s.DayNumber, s.ShiftNumber")
+
+    def downtime(self, line_id: int, since: datetime, limit: int = 500) -> list[dict]:
+        """Stops that ended after ``since`` or haven't ended (StartTime is the restart; 1900 = still stopped)."""
+        return self._query(f"SELECT TOP {int(limit)} LineID, StopTime, StartTime, StopCode, Description FROM dbo.vGetDownTimeData "
+                           "WHERE LineID = %s AND (StartTime >= %s OR StartTime < '19010101') ORDER BY StopTime DESC",
+                           (int(line_id), since))
+
+    def tool_types(self) -> list[dict]:
+        return self._query("SELECT HoleType, Description FROM Machine.ToolType")
+
+    def strokes(self, line_id: int, since: datetime) -> list[dict]:
+        """Punch strokes per station and tool type for parts finished since a time: pattern holes (repeats
+        counted along the part), one-off holes and notches, times the pieces made."""
+        q = int(line_id)
+        return self._query(
+            f"SELECT StationID, ToolType, SUM(Strokes) AS Strokes FROM ("
+            f"SELECT ph.StationID, ph.ToolType, CAST(p.ActualQuantity AS bigint) * {_HITS} AS Strokes "
+            f"FROM {self.done_view} p JOIN dbo.PartPattern pp ON pp.PartID = p.PartID "
+            "JOIN dbo.PatternHole ph ON ph.PatternName = pp.PatternName WHERE p.LineID = %s AND p.EndTime >= %s "
+            "UNION ALL SELECT h.StationID, h.ToolType, CAST(p.ActualQuantity AS bigint) "
+            f"FROM {self.done_view} p JOIN dbo.Hole h ON h.PartID = p.PartID WHERE p.LineID = %s AND p.EndTime >= %s "
+            "UNION ALL SELECT n.StationID, n.ToolType, CAST(p.ActualQuantity AS bigint) "
+            f"FROM {self.done_view} p JOIN dbo.PartNotch n ON n.PartID = p.PartID WHERE p.LineID = %s AND p.EndTime >= %s"
+            ") x GROUP BY StationID, ToolType", (q, since, q, since, q, since))
 
 
 def source_for(cfg: TscConfig):

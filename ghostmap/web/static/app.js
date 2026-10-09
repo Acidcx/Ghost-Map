@@ -59,13 +59,13 @@ function findingHtml(f) {
 }
 
 // ------------------------------------------------------------------ tabs
-// Pages are grouped by data source (Machine: OPC UA, Production: SQL, Network: TCP/IP); the top row picks the
+// Pages are grouped by data source (Machine: OPC UA, Production: SQL, Maintenance: counters from both, Network: TCP/IP); the top row picks the
 // group, the second row the page within it. Each group remembers its last page.
 document.querySelectorAll("#tabs button").forEach((b) =>
   b.addEventListener("click", () => showTab(b.dataset.tab)));
 document.querySelectorAll("#groups button").forEach((b) =>
   b.addEventListener("click", () => showGroup(b.dataset.group)));
-const SCANLESS_TABS = ["opcua", "machine", "production", "tscconn"];  // tabs that work without any scan loaded
+const SCANLESS_TABS = ["opcua", "machine", "production", "tscconn", "service", "counters"];  // tabs that work without any scan loaded
 const isViewer = () => document.body.classList.contains("viewer");
 const tabGroup = (name) => document.querySelector(`#tabs button[data-tab="${name}"]`)?.closest(".tabgroup")?.dataset.group;
 function showGroup(group) {
