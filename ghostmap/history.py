@@ -24,6 +24,7 @@ import logging
 import sqlite3
 import threading
 import time
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -230,7 +231,8 @@ class History:
 
     def meter_window(self, did: str, name: str, days: int) -> float:
         """Seconds counted on a meter over the last ``days`` calendar days (today included)."""
-        first = time.strftime("%Y-%m-%d", time.localtime(time.time() - (days - 1) * 86400))
+        # Date arithmetic, not localtime(): Windows can't convert times before 1970.
+        first = (date.today() - timedelta(days=min(max(int(days), 1), 365000) - 1)).isoformat()
         with self._lock:
             v = self._db.execute("SELECT COALESCE(SUM(value), 0) FROM meter_days WHERE dash = ? AND name = ? AND day >= ?",
                                  (did, name, first)).fetchone()[0]
