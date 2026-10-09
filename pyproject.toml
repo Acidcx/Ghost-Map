@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ghostmap"
-version = "0.1.0"
+version = "0.2.0"
 description = "Read-only OT network mapper and commissioning/debug tool for EtherNet/IP devices and Stratix switches."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -13,6 +13,9 @@ dependencies = [
     "fastapi>=0.110",
     "uvicorn>=0.27",
     "pysnmp>=7.1",
+    "asyncua>=1.1",
+    "python-tds>=1.15",  # TSC part schedule on SQL Server, read-only; pure Python, no ODBC driver needed
+    "pyOpenSSL>=23",     # encrypted SQL Server connections through python-tds
 ]
 
 [project.optional-dependencies]
@@ -25,7 +28,7 @@ ghostmap = "ghostmap.cli:main"
 include = ["ghostmap*"]
 
 [tool.setuptools.package-data]
-ghostmap = ["web/static/*", "data/*.json"]
+ghostmap = ["web/static/*", "data/*.json", "data/*.gz"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

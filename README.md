@@ -54,6 +54,13 @@ ghostmap            # same as: ghostmap web --open
    - **Compare**: against an earlier scan (e.g. the as-commissioned scan).
 5. **Export CSV** gives you the device list for the machine documentation.
 
+What you'll see in the device list:
+- **EtherNet/IP devices** with product, firmware, serial and status.
+- **PCs running RSLinx Classic or FactoryTalk Linx.** They answer too, as vendor *Rockwell Software*, type *Workstation*, with the PC's hostname as the product name. Your own laptop is tagged **this computer**.
+- **Everything else on the subnet that answered**, such as Moxa, Siemens and IT switches, cameras and PCs. These are listed with the manufacturer taken from the MAC address. They get no firmware or serial, because they don't speak EtherNet/IP.
+
+A device on a different subnet won't be seen. For example, Moxa switches ship with `192.168.127.253`. Give the laptop a second IP in that subnet and add it to Targets.
+
 If discovery finds nothing:
 - Check the laptop's IP and subnet mask.
 - Check that Windows Firewall allowed Ghost Map.
@@ -95,21 +102,80 @@ ghostmap discover 127.0.10.0/24
 
 ## Web UI
 
-`ghostmap web` serves on `127.0.0.1:8470` by default. It has these tabs:
+`ghostmap web` serves on `127.0.0.1:8470` by default. Its pages are grouped by where their data comes from:
 
-- **Overview**: counts and all findings, with a hint for each.
-- **Devices**: a sortable, filterable inventory. Click a device for its full CIP identity, decoded status word, related findings, and a one-click probe.
-- **Switches**: a port faceplate coloured by health, a port table, and per-port detail (counters, neighbours, MACs mapped to devices).
-- **Compare**: the diff of any two scans.
-- **Probe**: a single-device check.
+- **Machine** (OPC UA, from the PLCs through FactoryTalk Linx Gateway)
+  - **Dashboard**: a dashboard for the machine, laid out automatically from its PLC tags (see below). Viewers can watch it; admins build and edit it.
+  - **Tags**: a read-only tag browser in the style of UaExpert, for FactoryTalk Linx Gateway or any OPC UA server. Type an endpoint (a bare IP works; FT Linx Gateway's default port 4990 is added), optionally pick a security policy and login, and connect. Browse the address space, see a node's attributes, double-click tags to watch them live, and **Export tags** to get every tag under a node as CSV, which is handy for comparing naming between machines. Type `demo` as the endpoint (or start with `ghostmap web --demo`) to connect to a simulated gateway with two presses whose tag names drift.
+- **Production** (SQL, from the TSC database)
+  - **Line**: the line's part schedule (see below).
+  - **Connection**: the TSC database settings, and moving dashboards and settings to another PC.
+- **Network** (TCP/IP: EtherNet/IP and SNMP scans)
+  - **Overview**: counts and all findings, with a hint for each.
+  - **Devices**: a sortable, filterable inventory. Click a device for its full CIP identity, decoded status word, related findings, and a one-click probe.
+  - **Switches**: a port faceplate coloured by health, a port table, and per-port detail (counters, neighbours, MACs mapped to devices).
+  - **Compare**: the diff of any two scans.
+  - **Probe**: a single-device check.
 
 **Export CSV** downloads the device inventory.
 
+### Machine dashboards
+
+In **Tags (OPC UA)**, connect, select the controller (or just its fault folder) and press **Build dashboard**. Ghost Map reads every tag under it and lays out a dashboard: one card per folder (area) with its alarms, worst first, plus timers, fault words, counters and run state. Or press **From CSV...** on the Machine tab and pick an **Export tags** file. Tag names drift between machines, so the layout leans on structure first (TIMER and COUNTER members, data types, the folder a tag sits in) and on names second (`_Warn`, `E_Stop`, `_MS`, `Comms_Flt`, `OverTemp`...). Where it isn't sure it says so: for example, an area whose bits are mostly on when exported may use "on = healthy" (comms OK bits). Motion axes (AXIS_CIP_DRIVE, about 600 members each) collapse into one item showing state, enable/homed, position, velocity and fault words; **Which faults?** reads the axis's fault, alarm and inhibit bits once, on request. To keep live reads light, I/O module tags, arrays outside fault folders and long lists of status bits are left out (the dashboard says how many). Tick **Edit** to flip an area, rename or remove items and areas, change the tag behind an item, or add tags. Tags are picked from the ones found when the dashboard was built, so nothing is typed in by hand. Long names are cut short with "..."; hover for the full name and the raw tag. **Rebuild layout** (in Edit) lays an older dashboard out again with the current rules from the tags stored when it was built, keeping its running tags, heartbeat and flipped areas.
+
+A whole controller is laid out in three levels: **Overview** (the tiles, everything active right now, and one card per PLC program), **Drives** (every motion axis in one table, grouped by program, faulted first; **Details** opens an axis's active faults, alarms and inhibits, the status bits that are on, and motion, power, limit, tuning and fault-word values, refreshed while open), and one page per program (per controller and program when the dashboard spans several PLCs) with its area cards grouped by top folder, a filter, an "only areas with something active" switch, and a compact Signals panel. One-shot storage (`OSg`, `OS1`, `ONS`), command bits in fault folders (`Reset_Faults`) are left out, and bits like `No_Faults` count as active when off. FT Linx Gateway lists a program's InOut parameters and aliases as tags of their own, so the same UDT can appear a dozen times; copies of controller-scope tags are dropped (same members, types and BOOL values). Add-On Instruction EnableIn/EnableOut, MSG and motion instruction tags, strings and status bits with no recognisable job are left out too, and stay searchable in Add tag. The **Machine** tile reads the running tag Ghost Map guessed (it prefers `Running` or `RunF` over names like `AutoBatchRunout`); in Edit, its Edit button lets you add or remove running tags and choose whether any or all of them must be on. Live values are read by the Ghost Map service (read-only, at most once a second, shared by everyone watching), over one OPC UA session per gateway however many dashboards use it. Dashboards are saved in `~/.ghostmap/dashboards`.
+
+**Alarm history and first-out.** While Ghost Map runs, it reads every saved dashboard about once a second in the background, whether or not anyone has a page open, and records each alarm (and faulted motion axis) from when it went active until it cleared. A **stop** runs from the first alarm after a clear machine until every alarm has cleared; the alarm that started it is its **first out**, marked on the Overview while the stop is on. Reads are about a second apart, so alarms that go active within the same second are shown as a tie. The **History** page lists the stops with their first-out, the alarms that are first-out, active or active longest most often, the alarm log, and comms gaps (reads that failed: alarm states are held through a gap, never guessed), over the last 8 hours to 90 days, with **Download CSV**. History is a SQLite file, `~/.ghostmap/history.db`, kept for 90 days; open it with DB Browser for SQLite if you want to query it yourself. Ghost Map writes only to that file, never to a PLC or gateway. `ghostmap web --no-collect` turns background reading and history off.
+
+**Can the dashboard be trusted?** The **Comms** tile and the **Health** page show how many of the dashboard's tags read Good (per PLC, with the status the gateway returned for the rest), read time, drops and reconnects, and a heartbeat: a tag the PLC changes all the time (Ghost Map picks one named like `Heartbeat` or `Watchdog`; choose your own in Edit, preferably a counter). If the heartbeat stops changing, the data may be frozen even though every tag reads Good, so faults show "?" instead of OK. If there's no reliable heartbeat, set **Freshness check** to **Response time only** (Health page, in Edit): data then counts as fresh while every read comes back within the limit you set (default 2000 ms). A tag that can't be read shows grey, never OK. **Check all alarms** reads every alarm once and lists the ones that can't be trusted: tags the gateway doesn't know (renamed in the PLC), tags it can't read, alarms that aren't BOOLs, duplicates, and areas where most bits are on.
+
+**Debug log.** Ghost Map writes its own log to `~/.ghostmap/logs/ghostmap.log`: server errors with stack traces, OPC UA drops and reconnects, and uncaught errors from the browser pages. Admins open it with **Debug log** in the top bar, and **Download debug bundle** zips it with versions and comms health (no tag values, but it does contain gateway addresses and user names).
+
 Scans are stored as JSON in `~/.ghostmap/scans` (override with `--data-dir` or `GHOSTMAP_DATA`). SNMP credentials are never written to disk.
+
+### Production (TSC part schedule)
+
+**Production > Line** shows one line from the TSC part schedule: parts, pieces and feet made this shift, feet and pieces per hour, scrap and remakes, the part running now with its progress and a finish estimate, parts on hold, feet per clock hour for the last 12 hours, the orders still on the schedule, the next 10 parts and the last 15 finished. It refreshes every 15 seconds; the server reuses each read for 30 seconds, so many people watching cost one query.
+
+It reads one view, `DataView.vPartScheduleCommon`, with three fixed SELECTs on a read-only connection (`ApplicationIntent=ReadOnly`). A part is done when it has an end time, running when it has a start time and no end, and on hold when its status says so; TSC's `1900-01-01` means "no time yet". Customer names and comments are never read.
+
+Set it up under **Production > Connection** (admin):
+
+- **Server**: the SQL Server's name or IP. Add the instance (`SQLHOST\TSC`) or the port (`10.0.0.5,1433`) if it isn't the default instance on 1433.
+- **Database**: the TSC database's name.
+- **SQL login** and **password**: a SQL Server login (not a Windows account) that can only read the view's schema, for example:
+  ```sql
+  CREATE LOGIN ghostmap_ro WITH PASSWORD = '...';
+  USE <TSC database>;
+  CREATE USER ghostmap_ro FOR LOGIN ghostmap_ro;
+  GRANT SELECT ON SCHEMA::DataView TO ghostmap_ro;
+  ```
+- **Encrypt the connection** if the server requires it; **Trust the server's certificate** accepts its self-signed certificate (like the SSMS option), or untick it and give the CA file.
+- Under **More settings**: the view, the unit of the Length column (inches by default), the shift start times (default `06:00,18:00`) and how long a read is reused.
+
+**Test connection** connects and lists the lines without saving. The password is saved sealed with Windows DPAPI for this PC (`~/.ghostmap/tsc.json`) and is never sent back to a browser, written to the log or included in an export. GhostMap.exe brings its own SQL driver (python-tds), so nothing needs installing on the HMI. Type `demo` as the server to try a simulated schedule.
+
+### Moving to another PC
+
+**Export everything** (Production > Connection) saves every machine dashboard (layout, flipped areas, hidden tags and the tag list behind it) and the TSC settings in one JSON file; **Export** on the Machine toolbar saves just the one dashboard. **Import...** adds the dashboards from such a file, optionally pointed at another gateway, and never overwrites one that's already there. Passwords and recorded history are never exported: enter the SQL password again after an import.
+
+Upgrading GhostMap.exe keeps everything in `~/.ghostmap` (dashboards, history, TSC settings, users). The version and build (commit) show next to the name in the top bar and in the debug bundle.
+
+### Logins and remote access (IXON)
+
+On a laptop, the UI is open to whoever sits at it, and the top bar shows **No login**. Click **Set up login** there to create the first admin (this only works on the machine itself), or use the command line. Admins manage further users from the **Users** button. To make it reachable from the network, for example through the IXON IXrouter's HTTP service, add a login and allow only the IXrouter:
+
+```bash
+ghostmap user add maint --role admin      # prompts for a password; any user turns login on
+ghostmap user add operator                # viewer: can look, can't scan or probe
+ghostmap web --host 0.0.0.0 --allow 192.168.1.1
+```
+
+Ghost Map refuses to serve beyond localhost without `--allow` and at least one login. Logins and actions are written to `~/.ghostmap/audit.log`. The UI uses relative links, so it works under the path prefix IXON's proxy adds. Details are in [docs/OT-SAFETY.md](docs/OT-SAFETY.md#web-ui-access).
 
 ## Preparing a Stratix switch
 
-Ghost Map needs read-only SNMP. These are example IOS settings (Stratix 5400/5410/5700, or the equivalent in Device Manager):
+Ghost Map needs read-only SNMP. These are example IOS / IOS-XE settings (Stratix 5200/5400/5410/5700/5800, or the equivalent in Device Manager / the WebUI):
 
 ```
 ! v2c, restricted to the engineering laptop
@@ -122,6 +188,8 @@ snmp-server group GHOSTMAP v3 priv read GHOSTMAP
 snmp-server group GHOSTMAP v3 priv context vlan- match prefix read GHOSTMAP
 snmp-server user ghostmap GHOSTMAP v3 auth sha <auth-key> priv aes 128 <priv-key>
 ```
+
+**Several switches on one machine** (e.g. a line of Stratix 5200s, which run IOS-XE): list them all under *Switch IPs*, or just give SNMP credentials and let discovery add every Stratix it finds. All switches are read with the same credentials and at the same time. Ghost Map works out which ports link switches together (from LLDP/CDP, or from the switches' own MAC addresses when both are off), so each device is placed on the switch port it is actually plugged into.
 
 IOS exposes the MAC address table per VLAN, so Ghost Map reads the per-VLAN tables as well. It uses `community@<vlan>` indexing for v2c and the `vlan-<id>` context for v3, which is why the v3 group above includes the `vlan-` context. If the switch supports Q-BRIDGE-MIB, one walk is enough.
 
@@ -144,6 +212,8 @@ python packaging/build_exe.py      # build dist/GhostMap.exe locally (pip instal
 The switch collector, correlation, and diagnostics all run against an in-memory SNMP agent (`FakeSnmpClient`) built from the simulated machine in `ghostmap/sim/machine.py`, so features can be developed without hardware. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Status and roadmap
+
+The full plan (resident HMI service, IXON access, OEE and machine profiles) is in [ROADMAP.md](ROADMAP.md).
 
 v0.1 has been tested against the built-in simulators and a real SNMP agent (snmpsim) serving the simulated Stratix. **It has not yet been validated against physical Stratix or Logix hardware.** The first site test should start with `discover` and `switch` on one device.
 

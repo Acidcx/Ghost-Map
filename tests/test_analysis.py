@@ -1,3 +1,5 @@
+import pytest
+
 from ghostmap.analysis.diagnostics import run_diagnostics
 from ghostmap.analysis.diff import diff_scans
 from ghostmap.analysis.topology import build_inventory
@@ -85,3 +87,52 @@ def test_arp_parsers():
     assert parse_arp_a(mac) == {"192.168.1.11": "00:00:bc:aa:00:11"}
     assert normalize_mac("0000.bcaa.0010") == "00:00:bc:aa:00:10"
     assert normalize_mac(b"\x00\x00\xbc\xaa\x00\x10") == "00:00:bc:aa:00:10"
+
+
+# ---------------------------------------------------------------- multi-switch machines
+
+def _two_switches(neighbor_proto):
+    """SW CONVEYOR (laptop + device A on Gi1/0/1) --Gi1/0/10 ... Gi1/0/9-- SW PACKER (device B on Gi1/0/1).
+
+    Switch names deliberately contain none of the 'stratix/switch/cisco' hints.
+    """
+    from ghostmap.models import Neighbor, Port, SwitchInfo
+
+    a_dev, b_dev, laptop = "00:00:bc:00:00:0a", "00:00:bc:00:00:0b", "00:50:56:00:00:99"
+    a_mac, b_mac = "00:00:bc:aa:aa:01", "00:00:bc:bb:bb:01"  # switch interface MACs
+
+    def nbr(local, peer_name, peer_ip):
+        if neighbor_proto is None:
+            return []
+        return [Neighbor(neighbor_proto, local, remote_name=peer_name, remote_address=peer_ip)]
+
+    conveyor = SwitchInfo(ip="10.0.0.2", sys_name="CONVEYOR", ports=[
+        Port(if_index=1, name="Gi1/0/1", if_type=6, oper_status="up", mac=a_mac, macs=[a_dev, laptop]),
+        Port(if_index=10, name="Gi1/0/10", if_type=6, oper_status="up", mac=a_mac,
+             macs=[b_dev] + ([b_mac] if neighbor_proto is None else []),
+             neighbors=nbr("Gi1/0/10", "PACKER.plant.local", "10.0.0.3")),
+    ])
+    packer = SwitchInfo(ip="10.0.0.3", sys_name="PACKER", ports=[
+        Port(if_index=1, name="Gi1/0/1", if_type=6, oper_status="up", mac=b_mac, macs=[b_dev]),
+        Port(if_index=9, name="Gi1/0/9", if_type=6, oper_status="up", mac=b_mac,
+             macs=[a_dev, laptop] + ([a_mac] if neighbor_proto is None else []),
+             neighbors=nbr("Gi1/0/9", "CONVEYOR", "")),
+    ])
+    ids = [ident("10.0.0.10", 1), ident("10.0.0.11", 2)]
+    return ids, [conveyor, packer], {"10.0.0.10": a_dev, "10.0.0.11": b_dev}
+
+
+
+@pytest.mark.parametrize("proto", ["lldp", "cdp", None])
+def test_devices_located_across_multiple_switches(proto):
+    ids, switches, arp = _two_switches(proto)
+    devices = build_inventory(ids, switches, arp)
+    where = {d.ip or d.mac: (d.switch_name, d.switch_port) for d in devices}
+    assert where["10.0.0.10"] == ("CONVEYOR", "Gi1/0/1")
+    assert where["10.0.0.11"] == ("PACKER", "Gi1/0/1")
+    assert where["00:50:56:00:00:99"] == ("CONVEYOR", "Gi1/0/1")
+    assert all(p.is_uplink for sw in switches for p in sw.ports if p.if_index != 1)
+    assert not any(p.is_uplink for sw in switches for p in sw.ports if p.if_index == 1)
+    # the inter-switch link must not be reported as an edge port with many MACs
+    findings = run_diagnostics(ids, devices, switches)
+    assert {f.target for f in findings if f.code == "port.multi_mac"} == {"CONVEYOR Gi1/0/1"}

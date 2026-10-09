@@ -31,9 +31,38 @@ jobs:
             Start-Sleep -Seconds 1
             try { $r = Invoke-RestMethod http://127.0.0.1:8470/api/scans; if ($r.Count -ge 2) { $ok = $true; break } } catch {}
           }
+          $ua = $false
+          if ($ok) {
+            # The demo also starts a simulated OPC UA server; connecting proves asyncua was bundled.
+            try {
+              $h = @{ "X-Ghostmap" = "1" }
+              $info = Invoke-RestMethod http://127.0.0.1:8470/api/info
+              $body = @{ url = $info.demo_opcua } | ConvertTo-Json
+              $c = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8470/api/opcua/connect -Headers $h -ContentType "application/json" -Body $body
+              $ua = [bool]$c.sid
+            } catch { Write-Host $_ }
+          }
+          $sql = $false
+          if ($ok) {
+            # The SQL driver is bundled: a connection to a closed port fails with a network error, not a missing
+            # module. Saving a password proves DPAPI works in the exe. The build info names the commit.
+            try {
+              $h = @{ "X-Ghostmap" = "1" }
+              $cfg = @{ server = "127.0.0.1,9"; database = "TSC"; username = "ro"; password = "smoke-test" } | ConvertTo-Json
+              $t = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8470/api/tsc/test -Headers $h -ContentType "application/json" -Body $cfg
+              Write-Host "TSC test: $($t.error)"
+              $s = Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8470/api/tsc/config -Headers $h -ContentType "application/json" -Body $cfg
+              $saved = Get-Content "$env:GHOSTMAP_DATA\tsc.json" -Raw
+              $info = Invoke-RestMethod http://127.0.0.1:8470/api/info
+              Write-Host "build: $($info.build | ConvertTo-Json -Compress)"
+              $sql = (-not $t.ok) -and ($t.error -notmatch "ModuleNotFound|ImportError") -and $s.has_password -and ($saved -match '"dpapi:') -and ($saved -notmatch "smoke-test") -and [bool]$info.build.commit
+            } catch { Write-Host $_ }
+          }
           Stop-Process -Id $p.Id -Force
           if (-not $ok) { throw "web UI did not come up" }
-          Write-Host "web UI OK"
+          if (-not $ua) { throw "OPC UA tag browser did not connect to the demo server" }
+          if (-not $sql) { throw "TSC SQL link, DPAPI password or build info failed in the exe" }
+          Write-Host "web UI, OPC UA and TSC OK"
 
       - uses: actions/upload-artifact@v4
         with:

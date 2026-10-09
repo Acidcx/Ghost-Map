@@ -7,8 +7,23 @@ const SEV_RANK = { error: 0, warning: 1, info: 2 };
 
 const state = { scans: [], scan: null, findingsByTarget: {}, devSort: { key: "ip", dir: 1 }, selDevice: null, selPort: null };
 
+// Paths are relative (no leading "/") so the UI also works under the IXON HTTP proxy's path prefix.
+// X-Ghostmap marks requests as coming from this page; the server rejects state changes without it.
+// opts.timeout (ms, default 120 s): give up on a request that hangs, so pages show "no data" instead of
+// old values when the server or the network stops answering.
 async function api(path, opts = {}) {
-  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const { timeout = 120000, ...rest } = opts;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeout);
+  let res;
+  try {
+    res = await fetch(path, { headers: { "Content-Type": "application/json", "X-Ghostmap": "1" }, signal: ctl.signal, ...rest });
+  } catch (e) {
+    throw new Error(e.name === "AbortError" ? `no answer from Ghost Map after ${Math.round(timeout / 1000)} s` : `can't reach Ghost Map (${e.message})`);
+  } finally {
+    clearTimeout(timer);
+  }
+  if (res.status === 401) { location.href = "login"; throw new Error("login required"); }
   if (!res.ok) {
     let msg = res.statusText;
     try { msg = (await res.json()).detail || msg; } catch (_) { /* ignore */ }
@@ -16,6 +31,16 @@ async function api(path, opts = {}) {
   }
   return res.json();
 }
+
+// Uncaught errors on any page go to the server's debug log (Debug log button, or the debug bundle).
+function reportError(message, source, line, stack) {
+  const page = document.querySelector("#tabs button.active")?.dataset.tab || "";
+  fetch("api/clientlog", { method: "POST", headers: { "Content-Type": "application/json", "X-Ghostmap": "1" },
+    body: JSON.stringify({ message: String(message).slice(0, 2000), source: String(source || "").slice(0, 300),
+      line: Number(line) || 0, stack: String(stack || "").slice(0, 4000), page }) }).catch(() => { /* ignore */ });
+}
+window.addEventListener("error", (e) => reportError(e.message, e.filename, e.lineno, e.error?.stack));
+window.addEventListener("unhandledrejection", (e) => reportError(`unhandled promise rejection: ${e.reason?.message || e.reason}`, "", 0, e.reason?.stack));
 
 // ------------------------------------------------------------------ helpers
 const ipKey = (ip) => (ip ? ip.split(".").map((p) => p.padStart(3, "0")).join(".") : "~");
@@ -34,17 +59,44 @@ function findingHtml(f) {
 }
 
 // ------------------------------------------------------------------ tabs
+// Pages are grouped by data source (Machine: OPC UA, Production: SQL, Network: TCP/IP); the top row picks the
+// group, the second row the page within it. Each group remembers its last page.
 document.querySelectorAll("#tabs button").forEach((b) =>
   b.addEventListener("click", () => showTab(b.dataset.tab)));
+document.querySelectorAll("#groups button").forEach((b) =>
+  b.addEventListener("click", () => showGroup(b.dataset.group)));
+const SCANLESS_TABS = ["opcua", "machine", "production", "tscconn"];  // tabs that work without any scan loaded
+const isViewer = () => document.body.classList.contains("viewer");
+const tabGroup = (name) => document.querySelector(`#tabs button[data-tab="${name}"]`)?.closest(".tabgroup")?.dataset.group;
+function showGroup(group) {
+  let name = null;
+  try { name = localStorage.getItem(`gm.tab.${group}`); } catch (_) { /* ignore */ }
+  const usable = (b) => b && !(b.classList.contains("admin-only") && isViewer());
+  if (!usable(document.querySelector(`#tabs button[data-tab="${name}"]`)) || tabGroup(name) !== group) {
+    name = [...document.querySelectorAll(`#tabs .tabgroup[data-group="${group}"] button`)].find(usable)?.dataset.tab;
+  }
+  showTab(name || "machine");
+}
 function showTab(name) {
+  // A tab remembered from an admin login is hidden for a viewer: fall back to the first visible one.
+  const btn = document.querySelector(`#tabs button[data-tab="${name}"]`);
+  if (!btn || (btn.classList.contains("admin-only") && isViewer())) name = "machine";
+  const group = tabGroup(name);
+  const free = SCANLESS_TABS.includes(name);
+  document.querySelectorAll("#groups button").forEach((b) => b.classList.toggle("active", b.dataset.group === group));
+  document.querySelectorAll("#tabs .tabgroup").forEach((g) => g.classList.toggle("hidden", g.dataset.group !== group));
   document.querySelectorAll("#tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === name));
-  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("hidden", t.id !== `tab-${name}` || !state.scan));
-  try { localStorage.setItem("gm.tab", name); } catch (_) { /* ignore */ }
+  document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("hidden", t.id !== `tab-${name}` || (!state.scan && !free)));
+  $("#empty").classList.toggle("hidden", !!state.scan || free);
+  $("#scanpickScan")?.classList.toggle("hidden", group !== "network" || !state.scan);
+  $("#newScanBtn")?.classList.toggle("hidden", group !== "network");
+  try { localStorage.setItem("gm.tab", name); localStorage.setItem(`gm.tab.${group}`, name); } catch (_) { /* ignore */ }
+  document.dispatchEvent(new CustomEvent("gm:tab", { detail: name }));
 }
 
 // ------------------------------------------------------------------ scans
 async function refreshScans(selectId) {
-  state.scans = await api("/api/scans");
+  state.scans = await api("api/scans");
   const opts = state.scans.map((s) => {
     const label = s.label ? ` - ${s.label}` : "";
     return `<option value="${esc(s.id)}">${esc(s.id)}${esc(label)} (${s.devices} dev, ${s.errors}E/${s.warnings}W)</option>`;
@@ -54,19 +106,25 @@ async function refreshScans(selectId) {
   $("#cmpNew").innerHTML = opts;
   if (state.scans.length > 1) $("#cmpOld").value = state.scans[1].id;
   $("#empty").classList.toggle("hidden", state.scans.length > 0);
-  if (!state.scans.length) { state.scan = null; showTab("overview"); return; }
+  if (!state.scans.length) {
+    state.scan = null;
+    let tab = "overview";
+    try { tab = SCANLESS_TABS.includes(localStorage.getItem("gm.tab")) ? localStorage.getItem("gm.tab") : tab; } catch (_) { /* ignore */ }
+    showTab(tab);
+    return;
+  }
   const id = selectId || state.scans[0].id;
   $("#scanSelect").value = id;
   await loadScan(id);
 }
 
 async function loadScan(id) {
-  state.scan = await api(`/api/scans/${encodeURIComponent(id)}`);
+  state.scan = await api(`api/scans/${encodeURIComponent(id)}`);
   state.selDevice = null;
   state.selPort = null;
   state.findingsByTarget = {};
   for (const f of state.scan.findings) (state.findingsByTarget[f.target] ||= []).push(f);
-  $("#csvLink").href = `/api/scans/${encodeURIComponent(id)}/inventory.csv`;
+  $("#csvLink").href = `api/scans/${encodeURIComponent(id)}/inventory.csv`;
   renderOverview();
   renderDevices();
   renderSwitches();
@@ -94,7 +152,7 @@ function renderOverview() {
 
 // ------------------------------------------------------------------ devices
 const DEV_COLS = [
-  ["", null], ["IP", (d) => ipKey(d.ip)], ["MAC", (d) => d.mac || ""], ["Vendor", (d) => d.identity?.vendor_name || ""],
+  ["", null], ["IP", (d) => ipKey(d.ip)], ["MAC", (d) => d.mac || ""], ["Vendor", (d) => d.identity?.vendor_name || d.mac_vendor || ""],
   ["Product", (d) => d.identity?.product_name || ""], ["Type", (d) => d.identity?.device_type_name || ""],
   ["Firmware", (d) => d.identity?.revision || ""], ["Serial", (d) => d.identity?.serial_hex || ""],
   ["State", (d) => d.identity?.state_name || ""], ["Switch port", (d) => `${d.switch_name || d.switch_ip || ""} ${d.switch_port || ""}`],
@@ -122,7 +180,8 @@ function renderDevices() {
     return `<tr data-key="${esc(d.key)}" class="${state.selDevice === d.key ? "sel" : ""}">
       <td><span class="dot ${deviceHealth(d)}"></span></td>
       <td class="mono">${esc(d.ip || "-")}</td><td class="mono">${esc(d.mac || "")}</td>
-      <td>${esc(i?.vendor_name || "")}</td><td>${esc(i?.product_name || (d.ip ? "(non-CIP host)" : "(unknown MAC)"))}</td>
+      <td>${i ? esc(i.vendor_name) : d.mac_vendor ? `<span class="muted" title="From the MAC address - no EtherNet/IP reply">${esc(d.mac_vendor)}</span>` : ""}</td>
+      <td>${esc(i?.product_name || (d.ip ? "(no EtherNet/IP reply)" : "(unknown MAC)"))}${d.is_scanner ? ` <span class="chip" title="The computer running Ghost Map">this computer</span>` : ""}</td>
       <td>${esc(i?.device_type_name || "")}</td><td class="mono">${esc(i?.revision || "")}</td>
       <td class="mono">${esc(i?.serial_hex || "")}</td><td>${esc(i?.state_name || "")}</td>
       <td>${esc(d.switch_name || d.switch_ip || "")} <span class="mono">${esc(d.switch_port || "")}</span></td>
@@ -152,7 +211,7 @@ function renderDeviceDetail() {
   pane.parentElement.classList.toggle("open", !!d);
   if (!d) return;
   const i = d.identity;
-  const rows = [["IP", d.ip], ["MAC", d.mac], ["Switch", d.switch_name || d.switch_ip], ["Port", d.switch_port], ["VLAN", d.vlan],
+  const rows = [["IP", d.ip], ["MAC", d.mac], ["MAC vendor", d.mac_vendor || "-"], ["Switch", d.switch_name || d.switch_ip], ["Port", d.switch_port], ["VLAN", d.vlan],
     ["Seen via", d.sources.join(", ")]];
   if (i) rows.push(["Vendor", `${i.vendor_name} (${i.vendor_id})`], ["Device type", `${i.device_type_name} (0x${i.device_type.toString(16).toUpperCase().padStart(2, "0")})`],
     ["Product code", i.product_code], ["Firmware", i.revision], ["Serial", i.serial_hex], ["State", `${i.state_name} (${i.state})`],
@@ -162,7 +221,7 @@ function renderDeviceDetail() {
   pane.innerHTML = `<h3>${esc(i ? i.product_name : d.ip || d.mac)}</h3>
     <dl>${rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd class="mono">${esc(v ?? "-")}</dd>`).join("")}</dl>
     ${fs.length ? `<h3 style="margin-top:14px">Findings</h3>${fs.map(findingHtml).join("")}` : ""}
-    ${d.ip ? `<p><button class="btn" id="detailProbe">Probe now</button> ${i ? `<a class="btn ghost" href="http://${esc(d.ip)}/" target="_blank" rel="noopener">Web page</a>` : ""}</p>` : ""}`;
+    ${d.ip ? `<p><button class="btn admin-only" id="detailProbe">Probe now</button> ${i ? `<a class="btn ghost" href="http://${esc(d.ip)}/" target="_blank" rel="noopener">Web page</a>` : ""}</p>` : ""}`;
   const pb = $("#detailProbe");
   if (pb) pb.addEventListener("click", () => { $("#probeIp").value = d.ip; showTab("probe"); runProbe(); });
 }
@@ -241,7 +300,7 @@ function selectPort(si, ifIndex) {
 $("#cmpRun").addEventListener("click", async () => {
   const out = $("#cmpOut");
   try {
-    const d = await api(`/api/diff?old=${encodeURIComponent($("#cmpOld").value)}&new=${encodeURIComponent($("#cmpNew").value)}`);
+    const d = await api(`api/diff?old=${encodeURIComponent($("#cmpOld").value)}&new=${encodeURIComponent($("#cmpNew").value)}`);
     const brief = (x) => `${esc(x.label)}${x.mac && x.mac !== x.label ? ` <span class="mono muted">${esc(x.mac)}</span>` : ""}`;
     const sec = (title, items, fn) => `<div class="diffsec"><h3>${esc(title)} (${items.length})</h3>${items.length ? `<ul>${items.map((x) => `<li>${fn(x)}</li>`).join("")}</ul>` : `<p class="muted">none</p>`}</div>`;
     out.classList.remove("muted");
@@ -264,7 +323,7 @@ async function runProbe() {
   if (!ip) return;
   out.innerHTML = `<p class="muted">Probing ${esc(ip)}...</p>`;
   try {
-    const r = await api(`/api/probe/${encodeURIComponent(ip)}`);
+    const r = await api(`api/probe/${encodeURIComponent(ip)}`);
     const tcp = Object.entries(r.tcp).map(([p, ok]) => `<span class="chip" style="${ok ? "border-color:var(--ok)" : ""}">${esc(p)} ${ok ? "open" : "-"}</span>`).join("");
     const i = r.identity;
     out.innerHTML = `<p>TCP: ${tcp}</p>` + (i ? `<div class="detail"><dl>
@@ -308,10 +367,10 @@ form.addEventListener("submit", async (e) => {
   log.textContent = "Starting...";
   $("#scanGo").disabled = true;
   try {
-    const { job } = await api("/api/scans", { method: "POST", body: JSON.stringify(body) });
+    const { job } = await api("api/scans", { method: "POST", body: JSON.stringify(body) });
     for (;;) {
       await new Promise((r) => setTimeout(r, 700));
-      const j = await api(`/api/jobs/${job}`);
+      const j = await api(`api/jobs/${job}`);
       log.textContent = j.log.join("\n");
       log.scrollTop = log.scrollHeight;
       if (j.status === "done") { f.community.value = f.auth_key.value = f.priv_key.value = ""; await refreshScans(j.scan_id); dlg.close(); break; }
@@ -324,10 +383,74 @@ form.addEventListener("submit", async (e) => {
   }
 });
 
-$("#loadDemo").addEventListener("click", async () => { await api("/api/demo", { method: "POST" }); await refreshScans("demo-today"); });
+// ------------------------------------------------------------------ login setup & users
+const setupDlg = $("#setupDialog");
+$("#setupBtn").addEventListener("click", () => { $("#setupErr").textContent = ""; setupDlg.showModal(); });
+$("#setupCancel").addEventListener("click", () => setupDlg.close());
+$("#setupForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const f = ev.target;
+  if (f.password.value !== f.password2.value) { $("#setupErr").textContent = "Passwords don't match."; return; }
+  try {
+    await api("api/users/setup", { method: "POST", body: JSON.stringify({ name: f.name.value, password: f.password.value }) });
+    location.reload();
+  } catch (e) { $("#setupErr").textContent = e.message; }
+});
+
+const usersDlg = $("#usersDialog");
+async function renderUsers() {
+  const list = await api("api/users");
+  $("#usersTable").innerHTML = `<tr><th>User</th><th>Role</th><th></th></tr>` + list.map((u) =>
+    `<tr><td>${esc(u.name)}</td><td>${esc(u.role)}</td><td><button type="button" class="btn ghost small" data-rm="${esc(u.name)}">Remove</button></td></tr>`).join("");
+  $("#usersTable").querySelectorAll("[data-rm]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm(`Remove ${b.dataset.rm}?`)) return;
+    try { await api(`api/users/${encodeURIComponent(b.dataset.rm)}`, { method: "DELETE" }); await renderUsers(); } catch (e) { $("#usersErr").textContent = e.message; }
+  }));
+}
+$("#usersBtn").addEventListener("click", async () => { $("#usersErr").textContent = ""; await renderUsers(); usersDlg.showModal(); });
+$("#usersClose").addEventListener("click", () => usersDlg.close());
+async function showDebugLog() {
+  const box = $("#debugText");
+  box.textContent = "Loading...";
+  try {
+    const res = await fetch("api/debug/log?lines=500", { headers: { "X-Ghostmap": "1" } });
+    box.textContent = res.ok ? (await res.text()) || "The log is empty." : `Could not load the log (${res.status}).`;
+  } catch (e) { box.textContent = e.message; }
+  box.scrollTop = box.scrollHeight;
+}
+$("#debugBtn").addEventListener("click", () => { $("#debugDialog").showModal(); showDebugLog(); });
+$("#debugRefresh").addEventListener("click", showDebugLog);
+$("#debugClose").addEventListener("click", () => $("#debugDialog").close());
+$("#usersForm").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const f = ev.target;
+  try {
+    await api("api/users", { method: "POST", body: JSON.stringify({ name: f.name.value, role: f.role.value, password: f.password.value }) });
+    f.name.value = f.password.value = "";
+    $("#usersErr").textContent = "";
+    await renderUsers();
+  } catch (e) { $("#usersErr").textContent = e.message; }
+});
+
+$("#logoutBtn").addEventListener("click", async () => { await api("api/logout", { method: "POST" }); location.href = "login"; });
+$("#loadDemo").addEventListener("click", async () => { await api("api/demo", { method: "POST" }); await refreshScans("demo-today"); });
 
 // ------------------------------------------------------------------ boot
 (async () => {
-  try { $("#ver").textContent = "v" + (await api("/api/info")).version; } catch (_) { /* ignore */ }
+  try {
+    const info = await api("api/info");
+    const b = info.build || {};
+    $("#ver").textContent = "v" + info.version + (b.commit ? ` (${b.commit.slice(0, 7)})` : "");
+    $("#ver").title = b.commit ? `Build ${b.run ? "#" + b.run + " " : ""}${b.commit} ${b.branch || ""}, ${b.built || ""}` : "Run from source";
+    state.info = info;
+    document.body.classList.toggle("viewer", info.role !== "admin");
+    if (info.user) {
+      $("#whoName").textContent = `${info.user} (${info.role})`;
+      $("#who").classList.remove("hidden");
+    } else if (!info.auth) {
+      $("#unsecured").classList.remove("hidden");
+      $("#setupBtn").classList.toggle("hidden", !info.local);
+    }
+  } catch (_) { /* ignore */ }
   await refreshScans();
 })();

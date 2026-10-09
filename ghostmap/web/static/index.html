@@ -5,33 +5,142 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Ghost Map</title>
   <link rel="icon" href="data:,">
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="static/style.css">
 </head>
 <body>
   <header class="topbar">
     <div class="brand"><span class="logo">&#9672;</span> Ghost Map <span class="ver" id="ver"></span></div>
     <div class="scanpick">
-      <label for="scanSelect">Scan</label>
-      <select id="scanSelect"></select>
-      <a id="csvLink" class="btn ghost" href="#" download>Export CSV</a>
-      <button id="newScanBtn" class="btn primary">New scan</button>
+      <span id="scanpickScan" class="scanpick">
+        <label for="scanSelect">Scan</label>
+        <select id="scanSelect"></select>
+        <a id="csvLink" class="btn ghost" href="#" download>Export CSV</a>
+      </span>
+      <button id="debugBtn" class="btn ghost admin-only" title="Ghost Map's own log: errors, OPC UA drops and reconnects">Debug log</button>
+      <button id="newScanBtn" class="btn primary admin-only">New scan</button>
+      <span id="who" class="who hidden"><span id="whoName"></span>
+        <button id="usersBtn" class="btn ghost admin-only">Users</button>
+        <button id="logoutBtn" class="btn ghost">Log out</button></span>
+      <span id="unsecured" class="who hidden"><span class="chip warnchip" title="Anyone who can open this page can use it">&#128275; No login</span>
+        <button id="setupBtn" class="btn ghost hidden">Set up login</button></span>
     </div>
   </header>
 
+  <!-- Pages are grouped by where their data comes from: the PLCs over OPC UA, the TSC database over SQL,
+       and the network itself over TCP/IP. -->
+  <nav class="groups" id="groups">
+    <button data-group="machine">Machine <small>OPC UA</small></button>
+    <button data-group="production">Production <small>SQL</small></button>
+    <button data-group="network" class="active">Network <small>TCP/IP</small></button>
+  </nav>
   <nav class="tabs" id="tabs">
-    <button data-tab="overview" class="active">Overview</button>
-    <button data-tab="devices">Devices</button>
-    <button data-tab="switches">Switches</button>
-    <button data-tab="compare">Compare</button>
-    <button data-tab="probe">Probe</button>
+    <span class="tabgroup hidden" data-group="machine">
+      <button data-tab="machine">Dashboard</button>
+      <button data-tab="opcua" class="admin-only">Tags</button></span>
+    <span class="tabgroup hidden" data-group="production">
+      <button data-tab="production">Line</button>
+      <button data-tab="tscconn" class="admin-only">Connection</button></span>
+    <span class="tabgroup" data-group="network">
+      <button data-tab="overview" class="active">Overview</button>
+      <button data-tab="devices">Devices</button>
+      <button data-tab="switches">Switches</button>
+      <button data-tab="compare">Compare</button>
+      <button data-tab="probe" class="admin-only">Probe</button></span>
   </nav>
 
   <main>
     <section id="empty" class="panel hidden">
       <h2>No scans yet</h2>
       <p>Run a scan of the machine network, or load the simulated demo machine to look around.</p>
-      <p><button class="btn primary" id="emptyScan">New scan</button> <button class="btn" id="loadDemo">Load demo machine</button></p>
+      <p><button class="btn primary admin-only" id="emptyScan">New scan</button> <button class="btn admin-only" id="loadDemo">Load demo machine</button></p>
       <p class="muted">Ghost Map is read-only: EtherNet/IP ListIdentity and SNMP GET/WALK only. It never writes to devices.</p>
+    </section>
+
+    <section id="tab-machine" class="tab hidden">
+      <div class="panel">
+        <div class="toolbar">
+          <label>Dashboard <select id="mSelect"></select></label>
+          <span id="mLive" class="small muted"></span>
+          <span class="grow"></span>
+          <label class="admin-only small"><input type="checkbox" id="mEdit"> Edit</label>
+          <button class="btn ghost small admin-only" id="mImport" title="Build a dashboard from a tag export CSV">From CSV...</button>
+          <a class="btn ghost small admin-only hidden" id="mExport" href="#" download title="Save this dashboard (layout, flips, hidden tags and its tag list) to a file">Export</a>
+          <button class="btn ghost small admin-only" id="mImportFile" title="Add dashboards from a Ghost Map export file">Import...</button>
+          <button class="btn ghost small admin-only hidden" id="mDelete">Delete</button>
+        </div>
+        <div id="mNotes"></div>
+      </div>
+      <div id="mEmpty" class="panel hidden">
+        <h2>No machine dashboards yet</h2>
+        <p>Ghost Map lays out a dashboard from the PLC's tags: alarms grouped by area, timers, counters and run state.</p>
+        <p>In <b>Tags (OPC UA)</b>, connect to the gateway, select the controller or its fault folder, and press <b>Build dashboard</b>.
+          Or press <b>From CSV...</b> above and pick a tag export. Type <b>demo</b> as the endpoint to try it on a simulated leveler.</p>
+      </div>
+      <div class="tiles" id="mTiles"></div>
+      <nav class="mnav" id="mNav"></nav>
+      <div id="mAreas"></div>
+    </section>
+
+    <section id="tab-production" class="tab hidden">
+      <div class="panel">
+        <div class="toolbar">
+          <label>Line <select id="pLine"></select></label>
+          <span id="pLive" class="small muted"></span>
+          <span class="grow"></span>
+          <span id="pShift" class="small muted"></span>
+        </div>
+        <div id="pNote"></div>
+      </div>
+      <div id="pBody"></div>
+    </section>
+
+    <section id="tab-tscconn" class="tab hidden">
+      <div class="panel">
+        <h2>TSC database</h2>
+        <p class="small muted">Ghost Map reads the part schedule view with three fixed SELECT queries on a read-only connection. Use a SQL login that can only SELECT from the view's schema
+          (for example <span class="mono">GRANT SELECT ON SCHEMA::DataView TO ghostmap_ro</span>). Type <b>demo</b> as the server to try a simulated schedule.</p>
+        <form id="tForm" class="tform" autocomplete="off">
+          <div class="row">
+            <label>Server <input name="server" required maxlength="200" placeholder="SQLHOST, SQLHOST\INSTANCE or 10.0.0.5,1433"></label>
+            <label>Database <input name="database" maxlength="128" placeholder="TSC database name"></label>
+          </div>
+          <div class="row">
+            <label>SQL login <input name="username" maxlength="128" autocomplete="off"></label>
+            <label>Password <input name="password" type="password" maxlength="256" autocomplete="new-password" placeholder=""></label>
+          </div>
+          <div class="row">
+            <label class="inline"><input type="checkbox" name="encrypt"> Encrypt the connection</label>
+            <label class="inline"><input type="checkbox" name="trust_cert" checked> Trust the server's certificate</label>
+            <label class="tca">CA certificate file (PEM) <input name="cafile" maxlength="500" placeholder="C:\certs\sql-ca.pem"></label>
+          </div>
+          <details class="small"><summary>More settings</summary>
+            <div class="row">
+              <label>View <input name="view" maxlength="260" value="DataView.vPartScheduleCommon"></label>
+              <label>Length column unit <select name="length_unit"><option value="in">inches</option><option value="ft">feet</option><option value="mm">mm</option></select></label>
+            </div>
+            <div class="row">
+              <label>Shift start times <input name="shifts" maxlength="100" value="06:00,18:00"></label>
+              <label>Reuse a read for (s) <input name="cache_s" type="number" min="5" max="3600" value="30"></label>
+            </div>
+          </details>
+          <p class="err" id="tErr"></p>
+          <div class="actions left">
+            <button type="button" class="btn" id="tTest">Test connection</button>
+            <button type="submit" class="btn primary">Save</button>
+            <button type="button" class="btn ghost hidden" id="tClear">Remove</button>
+          </div>
+        </form>
+        <div id="tTestOut" class="small"></div>
+      </div>
+      <div class="panel">
+        <h2>Status</h2>
+        <div id="tStatus" class="small muted">Not set up yet.</div>
+      </div>
+      <div class="panel">
+        <h2>Move to another PC</h2>
+        <p class="small muted">One file with every machine dashboard (layout, flips, hidden tags and tag lists) and these TSC settings. Passwords and recorded history are not included.</p>
+        <p><a class="btn" href="api/export" download>Export everything</a> <button type="button" class="btn" id="tImport">Import...</button></p>
+      </div>
     </section>
 
     <section id="tab-overview" class="tab">
@@ -82,7 +191,155 @@
         <div id="probeOut"></div>
       </div>
     </section>
+    <section id="tab-opcua" class="tab hidden">
+      <div class="panel">
+        <form class="toolbar uaconn" id="uaForm" autocomplete="off">
+          <label class="grow">Endpoint <input name="url" list="uaRecent" placeholder="opc.tcp://127.0.0.1:4990, just an IP, or demo"></label>
+          <datalist id="uaRecent"></datalist>
+          <label>Security <select name="security">
+            <option>None</option><option>Basic256Sha256</option><option>Aes128Sha256RsaOaep</option><option>Aes256Sha256RsaPss</option></select></label>
+          <label class="uasec hidden">Mode <select name="mode"><option>SignAndEncrypt</option><option>Sign</option></select></label>
+          <label>User <input name="username" placeholder="anonymous" size="10"></label>
+          <label>Password <input name="password" type="password" size="10"></label>
+          <button type="button" class="btn" id="uaEndpoints">Endpoints</button>
+          <button type="submit" class="btn primary" id="uaConnect">Connect</button>
+          <button type="button" class="btn hidden" id="uaDisconnect">Disconnect</button>
+        </form>
+        <div id="uaStatus" class="small muted">Read-only: Ghost Map only browses and reads. FactoryTalk Linx Gateway listens on port 4990 by default. Type <b>demo</b> to try a simulated gateway.</div>
+        <div id="uaEpList" class="hidden"></div>
+      </div>
+      <div class="uagrid hidden" id="uaMain">
+        <div class="panel uatreebox">
+          <div class="uahead"><h3>Address space</h3>
+            <button class="btn ghost small" id="uaExport" disabled title="List every tag under the selected node with its current value">Export tags</button>
+            <button class="btn ghost small" id="uaDashboard" disabled title="Read every tag under the selected node and lay out a machine dashboard from it">Build dashboard</button></div>
+          <div id="uaTree" class="uatree"></div>
+        </div>
+        <div class="panel uawatchbox">
+          <div class="uahead"><h3>Data access</h3>
+            <span class="small muted">Refresh <select id="uaRate"><option value="1000">1 s</option><option value="2000" selected>2 s</option><option value="5000">5 s</option><option value="0">paused</option></select></span>
+            <button class="btn ghost small" id="uaWatchCsv">CSV</button></div>
+          <div class="tablewrap"><table id="uaWatch"><thead><tr><th>Tag</th><th>Value</th><th>Type</th><th>Status</th><th>Source time</th><th></th></tr></thead><tbody></tbody></table></div>
+          <p class="small muted" id="uaWatchHint">Double-click a tag in the tree (or use Add to watch) to monitor it here.</p>
+        </div>
+        <div class="panel uaattrbox">
+          <div class="uahead"><h3>Attributes</h3><button class="btn ghost small hidden" id="uaAddWatch">Add to watch</button></div>
+          <div id="uaAttrs" class="muted small">Select a node.</div>
+        </div>
+      </div>
+    </section>
   </main>
+
+  <dialog id="mItemDialog">
+    <form id="mItemForm" method="dialog">
+      <h2 id="mItemTitle">Item</h2>
+      <label>Label <input name="label" maxlength="200"></label>
+      <div id="mItemTags"></div>
+      <div class="row hidden" id="mItemAlarm">
+        <label>Severity <select name="severity"><option value="critical">critical (E-stop)</option><option value="fault">fault</option><option value="warning">warning</option></select></label>
+        <label>Category <select name="category"></select></label>
+      </div>
+      <p class="err" id="mItemErr"></p>
+      <div class="actions">
+        <button type="button" class="btn" id="mItemRemove">Remove from dashboard</button>
+        <span class="grow"></span>
+        <button type="button" class="btn" id="mItemCancel">Cancel</button>
+        <button type="submit" class="btn primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="mRunDialog">
+    <h2>Machine running</h2>
+    <p class="small muted">The Machine tile reads these tags. Pick the bit that is on while the machine runs (e.g. RunF, not a runout or command bit).</p>
+    <div id="mRunList"></div>
+    <p><button type="button" class="btn ghost small" id="mRunAdd">Add tag</button></p>
+    <label>Running when <select id="mRunMode"><option value="any">any of these is on</option><option value="all">all of these are on</option></select></label>
+    <p class="err" id="mRunErr"></p>
+    <div class="actions"><button type="button" class="btn" id="mRunCancel">Cancel</button><button type="button" class="btn primary" id="mRunSave">Save</button></div>
+  </dialog>
+
+  <dialog id="mPickDialog" class="wide">
+    <h2 id="mPickTitle">Pick a tag</h2>
+    <input id="mPickQ" type="search" placeholder="Search tag names, e.g. hpu temp" autocomplete="off">
+    <div class="tablewrap mpick"><table><tbody id="mPickList"></tbody></table></div>
+    <div class="actions"><button type="button" class="btn" id="mPickCancel">Cancel</button></div>
+  </dialog>
+
+  <dialog id="mImportDialog">
+    <form id="mImportForm" method="dialog">
+      <h2>Dashboard from a tag export</h2>
+      <p class="small muted">Use a CSV from <b>Export tags</b> in the Tags tab (columns path, node_id, type, value).</p>
+      <label>Machine name <input name="name" required maxlength="80"></label>
+      <label>OPC UA endpoint to read from <input name="endpoint" required placeholder="opc.tcp://127.0.0.1:4990, an IP, or demo"></label>
+      <label>Tag export CSV <input name="file" type="file" accept=".csv,text/csv" required></label>
+      <p class="err" id="mImportErr"></p>
+      <div class="actions">
+        <button type="button" class="btn" id="mImportCancel">Cancel</button>
+        <button type="submit" class="btn primary">Build dashboard</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="importDialog">
+    <form id="importForm" method="dialog">
+      <h2>Import from a Ghost Map export</h2>
+      <p class="small muted">Adds the dashboards in the file; nothing already here is changed. Passwords are never in an export: enter the SQL password again under Production &gt; Connection.</p>
+      <label>Export file <input name="file" type="file" accept=".json,application/json" required></label>
+      <label>OPC UA endpoint (optional) <input name="endpoint" placeholder="leave blank to keep the one in the file"></label>
+      <label class="inline"><input type="checkbox" name="settings" checked> Also use the TSC connection settings in the file</label>
+      <p class="err" id="importErr"></p>
+      <div class="actions">
+        <button type="button" class="btn" id="importCancel">Cancel</button>
+        <button type="submit" class="btn primary">Import</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="setupDialog">
+    <form id="setupForm" method="dialog">
+      <h2>Set up login</h2>
+      <p class="small muted">Creates the first admin. From then on every page needs a login. This only works on the machine itself.</p>
+      <label>User name <input name="name" required autocomplete="username"></label>
+      <label>Password (10+ characters) <input name="password" type="password" required minlength="10" autocomplete="new-password"></label>
+      <label>Repeat password <input name="password2" type="password" required minlength="10" autocomplete="new-password"></label>
+      <p class="err" id="setupErr"></p>
+      <div class="actions">
+        <button type="button" class="btn" id="setupCancel">Cancel</button>
+        <button type="submit" class="btn primary">Create admin</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="debugDialog" class="wide">
+    <h3>Debug log</h3>
+    <p class="small muted">Errors, OPC UA drops and reconnects, and errors from this page, newest at the bottom.
+      The bundle zips this log with version and comms details (no tag values; it does include gateway addresses and user names).</p>
+    <pre id="debugText" class="logbox"></pre>
+    <div class="actions">
+      <a class="btn" href="api/debug/bundle" download>Download debug bundle</a>
+      <button type="button" class="btn ghost" id="debugRefresh">Refresh</button>
+      <button type="button" class="btn" id="debugClose">Close</button>
+    </div>
+  </dialog>
+
+  <dialog id="usersDialog">
+    <form id="usersForm" method="dialog">
+      <h2>Users</h2>
+      <table id="usersTable"></table>
+      <h3>Add or change a user</h3>
+      <div class="row">
+        <label>Name <input name="name" required autocomplete="off"></label>
+        <label>Role <select name="role"><option value="viewer">viewer (look only)</option><option value="admin">admin (scan, probe, tags)</option></select></label>
+      </div>
+      <label>Password (10+ characters) <input name="password" type="password" required minlength="10" autocomplete="new-password"></label>
+      <p class="err" id="usersErr"></p>
+      <div class="actions">
+        <button type="button" class="btn" id="usersClose">Close</button>
+        <button type="submit" class="btn primary">Save user</button>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="scanDialog">
     <form id="scanForm" method="dialog">
@@ -122,6 +379,9 @@
     </form>
   </dialog>
 
-  <script src="/static/app.js"></script>
+  <script src="static/app.js"></script>
+  <script src="static/opcua.js"></script>
+  <script src="static/machine.js"></script>
+  <script src="static/production.js"></script>
 </body>
 </html>

@@ -77,7 +77,7 @@ def _parse_identity_item(item: bytes) -> CipIdentity:
         vendor_id=vendor,
         vendor_name=cip_tables.vendor_name(vendor),
         device_type=dtype,
-        device_type_name=cip_tables.device_type_name(dtype),
+        device_type_name=cip_tables.device_type_name(dtype, vendor),
         product_code=pcode,
         revision_major=rmaj,
         revision_minor=rmin,

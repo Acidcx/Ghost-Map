@@ -146,6 +146,26 @@ async def discover(
     return proto.results, proto.errors
 
 
+def local_ips_for(targets: Iterable[str], sample: int = 8) -> set[str]:
+    """IP address(es) this computer uses to reach the targets (no packets are sent)."""
+    found: set[str] = set()
+    seen_nets: set[str] = set()
+    for ip in targets:
+        net = ip.rsplit(".", 1)[0]
+        if net in seen_nets:
+            continue
+        seen_nets.add(net)
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect((ip, ENIP_PORT))  # UDP connect only selects a route
+                found.add(s.getsockname()[0])
+        except OSError:
+            pass
+        if len(seen_nets) >= sample:
+            break
+    return found
+
+
 async def probe(ip: str, *, port: int = ENIP_PORT, timeout: float = 1.5) -> Optional[DiscoveredIdentity]:
     """Single device ListIdentity (debug helper)."""
     results, _ = await discover([ip], port=port, timeout=timeout, rate=0)
