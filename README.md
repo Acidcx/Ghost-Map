@@ -193,6 +193,8 @@ snmp-server user ghostmap GHOSTMAP v3 auth sha <auth-key> priv aes 128 <priv-key
 
 IOS exposes the MAC address table per VLAN, so Ghost Map reads the per-VLAN tables as well. It uses `community@<vlan>` indexing for v2c and the `vlan-<id>` context for v3, which is why the v3 group above includes the `vlan-` context. If the switch supports Q-BRIDGE-MIB, one walk is enough.
 
+**Switch health.** Each scan also reads the switch's CPU load (5 s, 1 min and 5 min averages, CISCO-PROCESS-MIB), memory (CISCO-MEMORY-POOL-MIB, or CISCO-PROCESS-MIB on IOS-XE), temperatures, fans and power inputs (CISCO-ENVMON-MIB, or ENTITY-SENSOR-MIB), and spanning tree topology changes per VLAN (BRIDGE-MIB). They show as tiles above the faceplate on the Switches page. Ghost Map flags a 5-minute CPU average of 80% or more, memory 90% or more used, a sensor or power input that isn't normal, and a spanning tree change in the last hour, since every change can drop EtherNet/IP I/O connections. A switch that doesn't support one of these MIBs simply shows fewer tiles.
+
 ## Firmware baseline
 
 Pass `--baseline file.json` to flag devices whose firmware differs from the machine standard. See [docs/baseline.example.json](docs/baseline.example.json). Rules match on `product_name`, or on `vendor_id` + `product_code`.

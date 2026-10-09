@@ -18,6 +18,65 @@ class Thresholds:
     late_collisions: int = 1
     macs_on_access_port: int = 1  # more than this on a non-uplink port is worth noting
     recent_reboot_seconds: int = 3600
+    cpu_5min_percent: int = 80  # sustained switch CPU load
+    cpu_5sec_percent: int = 95  # momentary spike, only noted
+    memory_percent: float = 90.0
+    stp_change_seconds: int = 3600  # a spanning tree change this recent is worth a look
+
+
+_STATE_TEXT = {"notFunctioning": "not working", "notPresent": "not present"}
+_ENV_SEVERITY = {"warning": "warning", "critical": "error", "shutdown": "error", "notFunctioning": "warning"}
+
+
+def _switch_health(sw: SwitchInfo, name: str, t: Thresholds) -> list[Finding]:
+    h, out = sw.health, []
+    if h.cpu_5m is not None and h.cpu_5m >= t.cpu_5min_percent:
+        out.append(Finding("warning", "switch.cpu_high", name,
+                           f"Switch CPU at {h.cpu_5m}% averaged over 5 minutes (1 min {h.cpu_1m}%, 5 s {h.cpu_5s}%).",
+                           "A busy CPU answers SNMP, LLDP and spanning tree late. Usual causes: a broadcast or multicast "
+                           "storm (IGMP snooping off), a loop, or many SNMP pollers. Check 'show processes cpu sorted'."))
+    elif h.cpu_5s is not None and h.cpu_5s >= t.cpu_5sec_percent:
+        out.append(Finding("info", "switch.cpu_spike", name, f"Switch CPU at {h.cpu_5s}% over the last 5 seconds.",
+                           "Short spikes are normal during a scan or config save. Re-scan; if it stays high, see 'show processes cpu'."))
+    mem = h.memory_percent
+    if mem is not None and mem >= t.memory_percent:
+        out.append(Finding("warning", "switch.memory_high", name, f"Switch memory {mem:.0f}% used.",
+                           "Can lead to dropped management sessions or a crash. Check 'show memory statistics'; "
+                           "a slow climb across scans points to a leak fixed in newer firmware."))
+    for s in h.temperatures:
+        sev = _ENV_SEVERITY.get(s.state)
+        reading = f" ({s.celsius:.0f} °C)" if s.celsius is not None else ""
+        if sev:
+            out.append(Finding(sev, "switch.temperature", name, f"Temperature sensor '{s.name}' is {_STATE_TEXT.get(s.state, s.state)}{reading}.",
+                               "Check the enclosure: blocked vents, failed panel fan or A/C, or the switch mounted next to a drive."))
+        elif s.celsius is not None and s.threshold and s.celsius >= s.threshold:
+            out.append(Finding("warning", "switch.temperature", name,
+                               f"Temperature sensor '{s.name}' at {s.celsius:.0f} °C, at or above its {s.threshold:.0f} °C threshold.",
+                               "Check the enclosure: blocked vents, failed panel fan or A/C, or the switch mounted next to a drive."))
+    for kind, sensors, hint in (
+        ("power", h.power_supplies, "One of the switch's power inputs is out. Fine if that input is deliberately "
+                                    "unwired; otherwise check the 24 V supply, its breaker and the terminal block."),
+        ("fan", h.fans, "Replace the fan or check what is blocking it."),
+    ):
+        for s in sensors:
+            sev = _ENV_SEVERITY.get(s.state)
+            if sev:
+                out.append(Finding(sev, f"switch.{kind}", name, f"{kind.capitalize()} '{s.name}' is {_STATE_TEXT.get(s.state, s.state)}.", hint))
+    for st in h.stp:
+        if st.seconds_since_change is not None and st.seconds_since_change < t.stp_change_seconds and st.topology_changes:
+            where = f"VLAN {st.vlan}" if st.vlan is not None else "spanning tree"
+            rebooted = 0 < sw.uptime_seconds < t.recent_reboot_seconds  # the tree forms at boot; expected then
+            out.append(Finding("info" if rebooted else "warning", "switch.stp_change", name,
+                               f"{where}: topology changed {_ago(st.seconds_since_change)} ago "
+                               f"({st.topology_changes} changes since the switch started).",
+                               "Each change flushes MAC tables and can drop EtherNet/IP I/O connections. Look for a flapping link, "
+                               "a device port without PortFast, or someone plugging in a switch. "
+                               "'show spanning-tree detail' names the port that last changed."))
+    return out
+
+
+def _ago(seconds: int) -> str:
+    return f"{seconds} s" if seconds < 120 else f"{seconds // 60} min"
 
 
 def load_baseline(path: str | Path) -> dict[str, Any]:
@@ -118,6 +177,7 @@ def run_diagnostics(
         if sw.uptime_seconds and sw.uptime_seconds < t.recent_reboot_seconds:
             add(Finding("info", "switch.recent_reboot", name, f"Switch has been up only {sw.uptime_seconds // 60} min.",
                         "Error counters were reset; MAC table may still be populating."))
+        findings.extend(_switch_health(sw, name, t))
         for p in sw.ports:
             if not p.is_physical:
                 continue

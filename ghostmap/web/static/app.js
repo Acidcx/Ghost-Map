@@ -233,6 +233,46 @@ function portHealth(sw, p) {
   return p.oper_status === "up" ? "up" : "";
 }
 
+const ENV_STATE_TEXT = { notFunctioning: "not working", notPresent: "not present" };
+function fmtAgo(s) {
+  return s < 120 ? `${s} s` : s < 7200 ? `${Math.floor(s / 60)} min` : s < 172800 ? `${Math.floor(s / 3600)} h` : `${Math.floor(s / 86400)} d`;
+}
+
+// CPU, memory, temperature, power and spanning tree tiles, coloured by the switch's own findings.
+function switchHealthHtml(sw) {
+  const h = sw.health || {};
+  const fs = state.findingsByTarget[sw.sys_name || sw.ip] || [];
+  const cls = (...codes) => { const w = worst(fs.filter((f) => codes.includes(f.code))); return w ? sevClass(w) : "ok"; };
+  const tiles = [];
+  if (h.cpu_5m != null) tiles.push([cls("switch.cpu_high", "switch.cpu_spike"), `${h.cpu_5m}%`, "CPU 5 min avg",
+    `5 s ${h.cpu_5s ?? "-"}% &middot; 1 min ${h.cpu_1m ?? "-"}%`]);
+  if (h.memory_percent != null) tiles.push([cls("switch.memory_high"), `${Math.round(h.memory_percent)}%`, "Memory used",
+    `${Math.round(h.memory_used / 1048576)} of ${Math.round((h.memory_used + h.memory_free) / 1048576)} MB`]);
+  const temps = (h.temperatures || []).filter((t) => t.celsius != null);
+  if (temps.length) {
+    const hot = temps.reduce((a, b) => (b.celsius > a.celsius ? b : a));
+    tiles.push([cls("switch.temperature"), `${Math.round(hot.celsius)} &deg;C`, "Temperature",
+      hot.threshold ? `limit ${Math.round(hot.threshold)} &deg;C` : esc(hot.name)]);
+  }
+  const ps = h.power_supplies || [];
+  if (ps.length) {
+    const good = ps.filter((x) => x.state === "normal").length;
+    tiles.push([cls("switch.power"), `${good}/${ps.length}`, "Power inputs OK",
+      ps.filter((x) => x.state !== "normal").map((x) => esc(`${x.name}: ${ENV_STATE_TEXT[x.state] || x.state}`)).join("<br>") || "all normal"]);
+  }
+  const fans = h.fans || [];
+  if (fans.length) tiles.push([cls("switch.fan"), `${fans.filter((x) => x.state === "normal").length}/${fans.length}`, "Fans OK", ""]);
+  const stp = (h.stp || []).filter((x) => x.seconds_since_change != null);
+  if (stp.length) {
+    const last = stp.reduce((a, b) => (b.seconds_since_change < a.seconds_since_change ? b : a));
+    tiles.push([cls("switch.stp_change"), `${fmtAgo(last.seconds_since_change)} ago`, "Last spanning tree change",
+      `${last.vlan != null ? `VLAN ${esc(last.vlan)} &middot; ` : ""}${esc(last.topology_changes)} changes since boot`]);
+  }
+  if (!tiles.length) return `<p class="small muted">The switch did not report CPU, memory or environment readings.</p>`;
+  return `<div class="sw-health">${tiles.map(([c, v, l, sub]) => `<div class="sw-tile ${c}"><div class="v">${v}</div>
+    <div class="l">${l}</div>${sub ? `<div class="s">${sub}</div>` : ""}</div>`).join("")}</div>`;
+}
+
 function renderSwitches() {
   const s = state.scan;
   if (!s.switches.length) {
@@ -263,6 +303,7 @@ function renderSwitches() {
         <div class="switch-meta">${esc(sw.model)} &middot; IOS ${esc(sw.software_version)} &middot; HW ${esc(sw.hardware_revision || "-")}
         &middot; S/N ${esc(sw.serial || "-")} &middot; up ${fmtUptime(sw.uptime_seconds)} &middot; ${esc(sw.location)}</div></div></div>
       ${errs}
+      ${switchHealthHtml(sw)}
       <div class="faceplate">${plate}</div>
       <div id="portDetail-${si}"></div>
       <div class="tablewrap"><table><thead><tr><th></th><th>Port</th><th>Description</th><th>Link</th><th>Speed</th><th>Duplex</th>

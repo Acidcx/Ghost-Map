@@ -136,3 +136,36 @@ def test_devices_located_across_multiple_switches(proto):
     # the inter-switch link must not be reported as an edge port with many MACs
     findings = run_diagnostics(ids, devices, switches)
     assert {f.target for f in findings if f.code == "port.multi_mac"} == {"CONVEYOR Gi1/0/1"}
+
+
+def test_switch_health_findings():
+    from ghostmap.models import Sensor, StpInfo, SwitchHealth, SwitchInfo
+
+    def run(health, uptime=30 * 86400):
+        sw = SwitchInfo(ip="10.0.0.2", sys_name="SW1", uptime_seconds=uptime, health=health)
+        return {f.code: f for f in run_diagnostics([], [], [sw])}
+
+    f = run(SwitchHealth(cpu_5s=99, cpu_1m=90, cpu_5m=85, memory_used=95, memory_free=5,
+                         temperatures=[Sensor("Board", "critical", 71.0, 70.0)],
+                         power_supplies=[Sensor("PS A", "normal"), Sensor("PS B", "notFunctioning"), Sensor("PS C", "notPresent")],
+                         stp=[StpInfo(vlan=10, topology_changes=4, seconds_since_change=300)]))
+    assert f["switch.cpu_high"].severity == "warning" and "85%" in f["switch.cpu_high"].message
+    assert "switch.cpu_spike" not in f  # the sustained finding covers it
+    assert f["switch.memory_high"].severity == "warning"
+    assert f["switch.temperature"].severity == "error" and "71" in f["switch.temperature"].message
+    assert "PS B" in f["switch.power"].message and "not working" in f["switch.power"].message  # PS C not present: no finding
+    assert f["switch.stp_change"].severity == "warning" and "VLAN 10" in f["switch.stp_change"].message
+
+    quiet = run(SwitchHealth(cpu_5s=96, cpu_1m=20, cpu_5m=12, memory_used=50, memory_free=50,
+                             temperatures=[Sensor("Board", "unknown", 82.0, 80.0)],  # no state, but over its threshold
+                             stp=[StpInfo(vlan=1, topology_changes=2, seconds_since_change=7200)]))
+    assert set(quiet) == {"switch.cpu_spike", "switch.temperature"} and quiet["switch.cpu_spike"].severity == "info"
+
+    # Just rebooted: the tree forming at boot is expected, so only noted.
+    booted = run(SwitchHealth(stp=[StpInfo(vlan=1, topology_changes=1, seconds_since_change=600)]), uptime=700)
+    assert booted["switch.stp_change"].severity == "info"
+
+
+def test_demo_scan_switch_health_findings():
+    c = codes(build_demo_scan("today").findings)
+    assert {"switch.power", "switch.stp_change"} <= c and "switch.cpu_high" not in c

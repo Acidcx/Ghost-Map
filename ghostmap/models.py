@@ -104,6 +104,47 @@ class Port:
 
 
 @dataclass
+class Sensor:
+    """A temperature sensor, fan or power supply reported by the switch."""
+
+    name: str
+    state: str = "unknown"  # normal | warning | critical | shutdown | notPresent | notFunctioning | unknown
+    celsius: Optional[float] = None  # temperatures only
+    threshold: Optional[float] = None  # temperatures only, when the switch reports one
+
+
+@dataclass
+class StpInfo:
+    """Spanning tree as seen by one VLAN's bridge instance (IOS runs one per VLAN)."""
+
+    vlan: Optional[int]  # None = the switch's default context
+    topology_changes: int = 0  # since the switch started
+    seconds_since_change: Optional[int] = None
+    root: str = ""  # "priority/mac" of the root bridge
+
+
+@dataclass
+class SwitchHealth:
+    """Switch CPU, memory and environment. ``None`` / empty means the switch didn't report it."""
+
+    cpu_5s: Optional[int] = None  # percent busy, highest CPU when there are several
+    cpu_1m: Optional[int] = None
+    cpu_5m: Optional[int] = None
+    memory_used: Optional[int] = None  # bytes
+    memory_free: Optional[int] = None
+    temperatures: list[Sensor] = field(default_factory=list)
+    fans: list[Sensor] = field(default_factory=list)
+    power_supplies: list[Sensor] = field(default_factory=list)
+    stp: list[StpInfo] = field(default_factory=list)
+
+    @property
+    def memory_percent(self) -> Optional[float]:
+        if self.memory_used is None or self.memory_free is None or self.memory_used + self.memory_free <= 0:
+            return None
+        return round(100.0 * self.memory_used / (self.memory_used + self.memory_free), 1)
+
+
+@dataclass
 class SwitchInfo:
     ip: str
     sys_name: str = ""
@@ -118,6 +159,7 @@ class SwitchInfo:
     hardware_revision: str = ""
     ports: list[Port] = field(default_factory=list)
     arp: dict[str, str] = field(default_factory=dict)  # ip -> mac
+    health: SwitchHealth = field(default_factory=SwitchHealth)
     errors: list[str] = field(default_factory=list)
 
     def port_by_name(self, name: str) -> Optional[Port]:
@@ -197,6 +239,8 @@ def to_dict(obj: Any) -> Any:
             out["serial_hex"] = obj.serial_hex
         elif isinstance(obj, Device):
             out["key"] = obj.key
+        elif isinstance(obj, SwitchHealth):
+            out["memory_percent"] = obj.memory_percent
         return out
     if isinstance(obj, dict):
         return {k: to_dict(v) for k, v in obj.items()}

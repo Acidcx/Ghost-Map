@@ -1,6 +1,7 @@
 """Stratix (Cisco IOS based) switch collector over read-only SNMP.
 
-Collects: system info, chassis model/serial/IOS version, per-port status,
+Collects: system info, chassis model/serial/IOS version, CPU load, memory,
+temperatures, fans, power supplies, spanning tree changes, per-port status,
 speed, duplex, VLAN, error counters, MAC address table, ARP cache and
 LLDP/CDP neighbours. Every section is best-effort: a failure is recorded in
 ``SwitchInfo.errors`` and collection continues.
@@ -13,7 +14,7 @@ import re
 from typing import Any, Awaitable, Callable
 
 from ghostmap.collectors.arp import normalize_mac
-from ghostmap.models import Neighbor, Port, SwitchInfo
+from ghostmap.models import Neighbor, Port, Sensor, StpInfo, SwitchInfo
 from ghostmap.protocols import mibs
 from ghostmap.protocols.snmp import SnmpClient, column
 
@@ -56,6 +57,9 @@ async def collect_switch(ip: str, client: SnmpClient) -> SwitchInfo:
     if any(e.startswith("system:") for e in sw.errors):
         return sw  # unreachable or bad credentials; no point continuing
     await section("entity", lambda: _entity(sw, client))
+    await section("cpu", lambda: _cpu(sw, client))
+    await section("memory", lambda: _memory(sw, client))
+    await section("environment", lambda: _environment(sw, client))
     await section("interfaces", lambda: _interfaces(sw, client))
     ports = {p.if_index: p for p in sw.ports}
     await section("ethernet", lambda: _ethernet(ports, client))
@@ -64,6 +68,7 @@ async def collect_switch(ip: str, client: SnmpClient) -> SwitchInfo:
     await section("arp", lambda: _arp(sw, client))
     await section("lldp", lambda: _lldp(sw, ports, client))
     await section("cdp", lambda: _cdp(ports, client))
+    await section("spanning-tree", lambda: _stp(sw, client))
     _mark_uplinks(sw)
     return sw
 
@@ -98,6 +103,111 @@ async def _entity(sw: SwitchInfo, client: SnmpClient) -> None:
 
 async def _walk_col(client: SnmpClient, oid: str) -> dict[str, Any]:
     return column(await client.walk(oid), oid)
+
+
+async def _cpu(sw: SwitchInfo, client: SnmpClient) -> None:
+    """Percent busy over 5 s, 1 min and 5 min. With several CPUs the busiest one is kept."""
+    for oids in ((mibs.CPM_CPU_5SEC_REV, mibs.CPM_CPU_1MIN_REV, mibs.CPM_CPU_5MIN_REV),
+                 (mibs.CPM_CPU_5SEC, mibs.CPM_CPU_1MIN, mibs.CPM_CPU_5MIN)):
+        cols = [await _walk_col(client, oid) for oid in oids]
+        if any(cols):
+            h = sw.health
+            h.cpu_5s, h.cpu_1m, h.cpu_5m = (max((_int(v) for v in c.values()), default=None) for c in cols)
+            return
+
+
+async def _memory(sw: SwitchInfo, client: SnmpClient) -> None:
+    """Processor memory: CISCO-MEMORY-POOL-MIB on classic IOS, CISCO-PROCESS-MIB on IOS XE."""
+    names = await _walk_col(client, mibs.MEM_POOL_NAME)
+    proc = next((i for i, n in names.items() if _text(n).lower() == "processor"), None)
+    if proc is not None:
+        vals = await client.get([f"{mibs.MEM_POOL_USED}.{proc}", f"{mibs.MEM_POOL_FREE}.{proc}"])
+        used, free = vals.get(f"{mibs.MEM_POOL_USED}.{proc}"), vals.get(f"{mibs.MEM_POOL_FREE}.{proc}")
+        if used is not None and free is not None:
+            sw.health.memory_used, sw.health.memory_free = _int(used), _int(free)
+            return
+    used = await _walk_col(client, mibs.CPM_CPU_MEM_USED)
+    free = await _walk_col(client, mibs.CPM_CPU_MEM_FREE)
+    idx = next((i for i in used if i in free), None)
+    if idx is not None:
+        sw.health.memory_used, sw.health.memory_free = _int(used[idx]) * 1024, _int(free[idx]) * 1024
+
+
+def _env_state(value: Any) -> str:
+    return mibs.ENV_STATE.get(_int(value), "unknown")
+
+
+async def _environment(sw: SwitchInfo, client: SnmpClient) -> None:
+    h = sw.health
+    descr = await _walk_col(client, mibs.ENV_TEMP_DESCR)
+    if descr:
+        value = await _walk_col(client, mibs.ENV_TEMP_VALUE)
+        limit = await _walk_col(client, mibs.ENV_TEMP_THRESHOLD)
+        state = await _walk_col(client, mibs.ENV_TEMP_STATE)
+        for idx, d in descr.items():
+            h.temperatures.append(Sensor(
+                name=_text(d) or f"Sensor {idx}", state=_env_state(state.get(idx)),
+                celsius=float(_int(value[idx])) if idx in value else None,
+                threshold=float(_int(limit[idx])) if _int(limit.get(idx)) > 0 else None))
+    else:
+        await _entity_temperatures(sw, client)
+    for descr_oid, state_oid, out in ((mibs.ENV_FAN_DESCR, mibs.ENV_FAN_STATE, h.fans),
+                                      (mibs.ENV_SUPPLY_DESCR, mibs.ENV_SUPPLY_STATE, h.power_supplies)):
+        names = await _walk_col(client, descr_oid)
+        if names:
+            states = await _walk_col(client, state_oid)
+            out.extend(Sensor(name=_text(n) or f"#{i}", state=_env_state(states.get(i))) for i, n in names.items())
+
+
+async def _entity_temperatures(sw: SwitchInfo, client: SnmpClient) -> None:
+    """ENTITY-SENSOR-MIB fallback for switches without CISCO-ENVMON-MIB temperatures."""
+    types = await _walk_col(client, mibs.ENT_SENSOR_TYPE)
+    idxs = [i for i, t in types.items() if _int(t) == mibs.ENT_SENSOR_CELSIUS]
+    if not idxs:
+        return
+    scale = await _walk_col(client, mibs.ENT_SENSOR_SCALE)
+    prec = await _walk_col(client, mibs.ENT_SENSOR_PRECISION)
+    value = await _walk_col(client, mibs.ENT_SENSOR_VALUE)
+    status = await _walk_col(client, mibs.ENT_SENSOR_STATUS)
+    names = await client.get([f"{mibs.ENT_PHYSICAL_NAME}.{i}" for i in idxs])
+    for i in idxs:
+        celsius = None
+        if i in value and _int(status.get(i), 1) == 1:
+            celsius = round(_int(value[i]) * 1000.0 ** (_int(scale.get(i), 9) - 9) / 10.0 ** _int(prec.get(i)), 1)
+        sw.health.temperatures.append(Sensor(
+            name=_text(names.get(f"{mibs.ENT_PHYSICAL_NAME}.{i}")) or f"Sensor {i}",
+            state=mibs.ENT_SENSOR_STATUS_NAMES.get(_int(status.get(i), 1), "unknown"), celsius=celsius))
+
+
+def _bridge_id(value: Any) -> str:
+    if isinstance(value, (bytes, bytearray)) and len(value) == 8:
+        return f"{int.from_bytes(value[:2], 'big')}/{normalize_mac(value[2:])}"
+    return _text(value)
+
+
+async def _stp(sw: SwitchInfo, client: SnmpClient) -> None:
+    """Topology changes per VLAN. Every change can drop EtherNet/IP I/O connections while the tree settles."""
+    vlans: list = [None]
+    vtp = column(await client.walk(mibs.VTP_VLAN_STATE), mibs.VTP_VLAN_STATE)
+    vlans += sorted({_int(i.split(".")[-1]) for i, state in vtp.items() if _int(state) == 1} - _RESERVED_VLANS)
+    for vlan in vlans:
+        try:
+            rows = {oid: dict(await client.walk(oid, vlan=vlan)).get(f"{oid}.0")
+                    for oid in (mibs.STP_TOP_CHANGES, mibs.STP_TIME_SINCE_CHANGE, mibs.STP_DESIGNATED_ROOT)}
+        except Exception as exc:
+            log.debug("vlan %s stp walk failed: %s", vlan, exc)
+            continue
+        if rows[mibs.STP_TOP_CHANGES] is None and rows[mibs.STP_TIME_SINCE_CHANGE] is None:
+            continue
+        since = rows[mibs.STP_TIME_SINCE_CHANGE]
+        info = StpInfo(vlan=vlan, topology_changes=_int(rows[mibs.STP_TOP_CHANGES]),
+                       seconds_since_change=_int(since) // 100 if since is not None else None,
+                       root=_bridge_id(rows[mibs.STP_DESIGNATED_ROOT]))
+        default = sw.health.stp[0] if sw.health.stp and sw.health.stp[0].vlan is None else None
+        if vlan == 1 and default and (default.topology_changes, default.root) == (info.topology_changes, info.root):
+            default.vlan = 1  # on IOS the default context is VLAN 1's instance
+            continue
+        sw.health.stp.append(info)
 
 
 async def _interfaces(sw: SwitchInfo, client: SnmpClient) -> None:

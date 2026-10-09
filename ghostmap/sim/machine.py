@@ -112,8 +112,10 @@ def _ip_bytes(ip: str) -> bytes:
     return bytes(int(p) for p in ip.split("."))
 
 
-def switch_oids(devices: list[SimDevice], ports: list[SimPort]) -> tuple[dict[str, Any], dict[int, dict[str, Any]]]:
+def switch_oids(devices: list[SimDevice], ports: list[SimPort],
+                variant: str = "today") -> tuple[dict[str, Any], dict[int, dict[str, Any]]]:
     """OID map for a simulated Stratix 5700 (IOS style, per-VLAN BRIDGE-MIB)."""
+    today = variant == "today"
     d: dict[str, Any] = {
         mibs.SYS_DESCR: b"Cisco IOS Software, IE2000 Software (IE2000-UNIVERSALK9-M), Version 15.2(8)E4, "
                         b"RELEASE SOFTWARE (fc2) Stratix 5700",
@@ -133,6 +135,17 @@ def switch_oids(devices: list[SimDevice], ports: list[SimPort]) -> tuple[dict[st
         f"{mibs.VTP_VLAN_STATE}.1.10": 1,
         f"{mibs.VTP_VLAN_STATE}.1.1002": 1,
     }
+    # CPU, memory and environment (classic IOS: CISCO-PROCESS-MIB, CISCO-MEMORY-POOL-MIB, CISCO-ENVMON-MIB).
+    d.update({
+        f"{mibs.CPM_CPU_5SEC_REV}.1": 34 if today else 9, f"{mibs.CPM_CPU_1MIN_REV}.1": 21 if today else 8,
+        f"{mibs.CPM_CPU_5MIN_REV}.1": 17 if today else 8,
+        f"{mibs.MEM_POOL_NAME}.1": b"Processor", f"{mibs.MEM_POOL_USED}.1": 58_000_000, f"{mibs.MEM_POOL_FREE}.1": 96_000_000,
+        f"{mibs.MEM_POOL_NAME}.2": b"I/O", f"{mibs.MEM_POOL_USED}.2": 9_000_000, f"{mibs.MEM_POOL_FREE}.2": 7_000_000,
+        f"{mibs.ENV_TEMP_DESCR}.1006": b"SW#1, Sensor#1, GREEN", f"{mibs.ENV_TEMP_VALUE}.1006": 51 if today else 44,
+        f"{mibs.ENV_TEMP_THRESHOLD}.1006": 80, f"{mibs.ENV_TEMP_STATE}.1006": 1,
+        f"{mibs.ENV_SUPPLY_DESCR}.1003": b"Power Supply A (DC 24V)", f"{mibs.ENV_SUPPLY_STATE}.1003": 1,
+        f"{mibs.ENV_SUPPLY_DESCR}.1004": b"Power Supply B (DC 24V)", f"{mibs.ENV_SUPPLY_STATE}.1004": 6 if today else 1,
+    })
     all_ifs = [(p.if_index, p.name, p.alias, 6, p.speed_mbps, p.oper_up) for p in ports]
     all_ifs.append((MGMT_VLAN_IFINDEX, "Vl10", "MGMT", 53, 1000, True))
     for idx, name, alias, if_type, speed, up in all_ifs:
@@ -162,6 +175,13 @@ def switch_oids(devices: list[SimDevice], ports: list[SimPort]) -> tuple[dict[st
         for mac in p.extra_macs:
             vlan_data[p.vlan][f"{mibs.DOT1D_TP_FDB_PORT}.{_mac_index(mac)}"] = p.if_index
             vlan_data[p.vlan][f"{mibs.DOT1D_TP_FDB_STATUS}.{_mac_index(mac)}"] = 3
+    # Spanning tree: the default context is VLAN 1's instance; VLAN 10 (the machine) changed recently today.
+    root = bytes.fromhex("8001") + bytes.fromhex("00005e0a0001")
+    for ctx, vlan in ((d, 1), (vlan_data[1], 1), (vlan_data[10], 10)):
+        changes, since = (3, 12 * 86400) if vlan == 1 or not today else (9, 7 * 60)
+        ctx[f"{mibs.STP_TOP_CHANGES}.0"] = changes
+        ctx[f"{mibs.STP_TIME_SINCE_CHANGE}.0"] = since * 100
+        ctx[f"{mibs.STP_DESIGNATED_ROOT}.0"] = root
     by_name = {p.name: p for p in ports}
     for dev in devices:
         port = by_name.get(dev.port)
@@ -193,7 +213,7 @@ def identity_reply(dev: SimDevice, context: bytes = b"\0" * 8) -> bytes:
 def build_demo_scan(variant: str = "today", scan_id: Optional[str] = None) -> ScanResult:
     """Run the real collector/correlation/diagnostics pipeline against the simulated cell."""
     devices, ports = demo_machine(variant)
-    data, vlan_data = switch_oids(devices, ports)
+    data, vlan_data = switch_oids(devices, ports, variant)
     switch = asyncio.run(collect_switch(SWITCH_IP, FakeSnmpClient(data, vlan_data)))
 
     identities = [

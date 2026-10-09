@@ -74,3 +74,40 @@ def test_section_failure_is_recorded_not_fatal():
     sw = asyncio.run(collect_switch(SWITCH_IP, Flaky(data, vlan_data)))
     assert sw.errors == ["lldp: timeout"]
     assert sw.port_by_name("Fa1/2").macs  # rest still collected
+
+
+def test_demo_switch_health():
+    devices, ports = demo_machine("today")
+    h = _collect(*switch_oids(devices, ports)).health
+    assert (h.cpu_5s, h.cpu_1m, h.cpu_5m) == (34, 21, 17)
+    assert h.memory_used == 58_000_000 and h.memory_percent == round(100 * 58 / 154, 1)  # Processor pool, not I/O
+    (t,) = h.temperatures
+    assert t.celsius == 51 and t.threshold == 80 and t.state == "normal"
+    assert [p.state for p in h.power_supplies] == ["normal", "notFunctioning"]
+    # Default context and VLAN 1 are the same instance on IOS: listed once, as VLAN 1.
+    assert [(s.vlan, s.topology_changes, s.seconds_since_change) for s in h.stp] == [(1, 3, 12 * 86400), (10, 9, 420)]
+    assert h.stp[0].root == "32769/00:00:5e:0a:00:01"
+
+
+def test_health_from_ios_xe_and_entity_sensor_mibs():
+    """No old-style CPU columns, no memory pools, no ENVMON: CPU Rev columns, cpmCPUMemory, ENTITY-SENSOR-MIB."""
+    data = {
+        mibs.SYS_NAME: b"sw5200",
+        f"{mibs.CPM_CPU_5SEC_REV}.7": 91, f"{mibs.CPM_CPU_1MIN_REV}.7": 85, f"{mibs.CPM_CPU_5MIN_REV}.7": 82,
+        f"{mibs.CPM_CPU_MEM_USED}.7": 900_000, f"{mibs.CPM_CPU_MEM_FREE}.7": 100_000,  # KB
+        f"{mibs.ENT_SENSOR_TYPE}.1010": 8, f"{mibs.ENT_SENSOR_SCALE}.1010": 9, f"{mibs.ENT_SENSOR_PRECISION}.1010": 1,
+        f"{mibs.ENT_SENSOR_VALUE}.1010": 456, f"{mibs.ENT_SENSOR_STATUS}.1010": 1,
+        f"{mibs.ENT_PHYSICAL_NAME}.1010": b"Inlet temp",
+        f"{mibs.ENT_SENSOR_TYPE}.1011": 4,  # volts: not a temperature
+    }
+    sw = _collect(data)
+    h = sw.health
+    assert sw.errors == []
+    assert (h.cpu_5s, h.cpu_1m, h.cpu_5m) == (91, 85, 82)
+    assert h.memory_used == 900_000 * 1024 and h.memory_percent == 90.0
+    assert [(t.name, t.celsius) for t in h.temperatures] == [("Inlet temp", 45.6)]
+
+
+def test_switch_without_health_mibs_reports_nothing():
+    h = _collect({mibs.SYS_NAME: b"plain"}).health
+    assert h.cpu_5m is None and h.memory_percent is None and not (h.temperatures or h.power_supplies or h.stp)

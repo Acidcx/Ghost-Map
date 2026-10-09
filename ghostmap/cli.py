@@ -34,6 +34,18 @@ def print_scan(scan: ScanResult) -> None:
     for sw in scan.switches:
         print(f"\n== Switch {sw.sys_name or sw.ip} ({sw.ip})  {sw.model}  IOS {sw.software_version}  "
               f"S/N {sw.serial}  up {sw.uptime_seconds // 86400}d")
+        h = sw.health
+        parts = []
+        if h.cpu_5m is not None:
+            parts.append(f"CPU {h.cpu_5s}% / {h.cpu_1m}% / {h.cpu_5m}% (5s/1m/5m)")
+        if h.memory_percent is not None:
+            parts.append(f"memory {h.memory_percent:.0f}%")
+        parts += [f"{t.name} {t.celsius:.0f}C" for t in h.temperatures if t.celsius is not None]
+        parts += [f"{s.name} {s.state}" for s in h.power_supplies + h.fans if s.state != "normal"]
+        parts += [f"STP{f' VLAN {st.vlan}' if st.vlan is not None else ''} changed {st.seconds_since_change // 60} min ago"
+                  for st in h.stp if st.seconds_since_change is not None and st.seconds_since_change < 86400]
+        if parts:
+            print("   " + "  |  ".join(parts))
         for err in sw.errors:
             print(f"   ! could not read {err}")
         rows = [(p.name, p.alias, p.oper_status, f"{p.speed_mbps}M" if p.speed_mbps else "", p.duplex, p.vlan,
