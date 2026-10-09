@@ -6,16 +6,19 @@ All names, serials and revisions here are made up for demonstration.
 from __future__ import annotations
 
 import asyncio
+import math
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from ghostmap.analysis.diagnostics import run_diagnostics
 from ghostmap.analysis.topology import build_inventory
+from ghostmap.collectors.portstats import sample_traffic
 from ghostmap.collectors.stratix import collect_switch
 from ghostmap.models import DiscoveredIdentity, ScanResult
 from ghostmap.protocols import mibs
 from ghostmap.protocols.enip import build_list_identity_response, parse_list_identity
-from ghostmap.protocols.snmp import FakeSnmpClient
+from ghostmap.protocols.snmp import FakeSnmpClient, oid_suffix
 
 SWITCH_IP = "192.168.1.2"
 SWITCH_MAC = "00:00:bc:10:00:02"
@@ -48,6 +51,33 @@ class SimPort:
     late_collisions: int = 0
     vlan: int = 10
     extra_macs: list[str] = field(default_factory=list)  # e.g. uplink MACs
+
+    traffic: dict[str, "Flow"] = field(default_factory=dict)  # counter name (portstats.COUNTERS) -> rate per second
+
+
+@dataclass
+class Flow:
+    """A counter's rate per second: ``base``, plus a slow swing of up to ``swing`` either way over ``period``
+    seconds (highest at t = 0), plus ``burst`` extra for ``burst_for`` seconds out of every ``burst_every``
+    (a broadcast storm in the demo)."""
+
+    base: float
+    swing: float = 0.0
+    period: float = 600.0
+    burst: float = 0.0
+    burst_every: float = 1800.0
+    burst_for: float = 60.0
+
+    def total(self, t: float) -> float:
+        """Counter value after ``t`` seconds (the integral of the rate), so readings always count up."""
+        v = self.base * t
+        if self.swing:
+            w = 2 * math.pi / self.period
+            v += self.swing * math.sin(w * t) / w
+        if self.burst:
+            cycles, rest = divmod(t, self.burst_every)
+            v += self.burst * (cycles * self.burst_for + min(rest, self.burst_for))
+        return v
 
 
 def _cip(product_name, vendor_id=1, device_type=0x0C, product_code=1, revision=(1, 1), status=0x0064,
@@ -101,7 +131,39 @@ def demo_machine(variant: str = "today") -> tuple[list[SimDevice], list[SimPort]
         SimPort(10, "Gi1/2", "UPLINK-PLANT", speed_mbps=1000, vlan=1,
                 extra_macs=[f"00:50:56:00:00:{i:02x}" for i in range(1, 25)]),
     ]
+    for p in ports:
+        p.traffic = _port_traffic(p, today)
     return devices, ports
+
+
+def _mbit(mbps: float) -> float:
+    return mbps * 1e6 / 8  # octets per second
+
+
+def _port_traffic(p: SimPort, today: bool) -> dict[str, Flow]:
+    """Ordinary machine traffic per port, plus today's problems: the laptop's unmanaged switch at the HMI
+    is looped (broadcast storm), the camera streams at most of its 100 Mbps, and the main VFD's cable is
+    still taking errors."""
+    if not p.oper_up:
+        return {}
+    mbps_in, mbps_out, mcast_in, mcast_out = {
+        "CONTROLLER": (4.2, 3.1, 1800, 350), "CHASSIS-EN2T": (2.5, 2.0, 900, 0), "RIO-ZONE1": (1.1, 0.8, 500, 0),
+        "HMI": (0.9, 1.6, 0, 0), "CAMERA": (60.0 if today else 6.0, 0.4, 0, 0), "UPLINK-PLANT": (12.0, 8.0, 150, 40),
+    }.get(p.alias, (0.4, 0.3, 0, 0))
+    bcast_in = 25.0 if p.alias.startswith("UPLINK") else 0.4
+    f = {"in_octets": Flow(_mbit(mbps_in), swing=_mbit(mbps_in) * 0.15), "out_octets": Flow(_mbit(mbps_out)),
+         "in_mcast": Flow(mcast_in), "out_mcast": Flow(mcast_out), "in_bcast": Flow(bcast_in), "out_bcast": Flow(26.0),
+         "in_errors": Flow(0), "in_discards": Flow(0), "out_discards": Flow(0)}
+    if today and p.alias == "HMI":
+        f["in_bcast"] = Flow(bcast_in, burst=4200)
+        f["in_octets"] = Flow(_mbit(mbps_in), burst=4200 * 64)
+    if today:
+        f["out_bcast"] = Flow(26.0, burst=4200)  # the storm floods every port on the VLAN
+    if today and p.alias == "CAMERA":  # 85 Mbps at the start, down to 35 half an hour later
+        f["in_octets"] = Flow(_mbit(60.0), swing=_mbit(25.0), period=3600.0)
+    if today and p.alias == "VFD-MAIN-CONV":
+        f["in_errors"] = Flow(2.0)
+    return f
 
 
 def _mac_index(mac: str) -> str:
@@ -205,6 +267,46 @@ def switch_oids(devices: list[SimDevice], ports: list[SimPort],
     return d, vlan_data
 
 
+class SimSwitchClient(FakeSnmpClient):
+    """The simulated switch with live traffic counters: each read returns the counters as they stand at
+    ``clock()`` seconds, so two reads apart give rates (bandwidth, broadcast storms...)."""
+
+    def __init__(self, data, vlan_data, ports: list[SimPort], clock=None):
+        super().__init__(data, vlan_data)
+        from ghostmap.collectors.portstats import COUNTERS
+
+        self._ports = ports
+        self._cols = {name: oids[0] for name, oids in COUNTERS.items()}
+        start = time.monotonic()
+        self.clock = clock or (lambda: time.monotonic() - start + 3600.0)
+
+    def _now(self) -> dict:
+        t = self.clock()
+        d = dict(self._data)
+        d[mibs.SYS_UPTIME] = int((12 * 86400 + t) * 100)
+        for p in self._ports:
+            for name, oid in self._cols.items():
+                flow, key = p.traffic.get(name), f"{oid}.{p.if_index}"
+                d[key] = int(self._data.get(key) or 0) + (int(flow.total(t)) if flow else 0)
+        return d
+
+    async def get(self, oids):
+        d = self._now()
+        return {oid: d.get(oid) for oid in oids}
+
+    async def walk(self, oid, vlan=None):
+        if vlan is not None:
+            return await super().walk(oid, vlan)
+        d = self._now()
+        return sorted(((k, v) for k, v in d.items() if oid_suffix(k, oid) is not None), key=lambda kv: self._key(kv[0]))
+
+
+def demo_switch_client(variant: str = "today", clock=None) -> SimSwitchClient:
+    devices, ports = demo_machine(variant)
+    data, vlan_data = switch_oids(devices, ports, variant)
+    return SimSwitchClient(data, vlan_data, ports, clock)
+
+
 def identity_reply(dev: SimDevice, context: bytes = b"\0" * 8) -> bytes:
     assert dev.cip and dev.ip
     return build_list_identity_response(ip=dev.ip, context=context, **dev.cip)
@@ -214,7 +316,14 @@ def build_demo_scan(variant: str = "today", scan_id: Optional[str] = None) -> Sc
     """Run the real collector/correlation/diagnostics pipeline against the simulated cell."""
     devices, ports = demo_machine(variant)
     data, vlan_data = switch_oids(devices, ports, variant)
-    switch = asyncio.run(collect_switch(SWITCH_IP, FakeSnmpClient(data, vlan_data)))
+    t = [10.0]  # simulated seconds; the 10 s traffic window passes instantly
+
+    async def advance(seconds: float) -> None:
+        t[0] += seconds
+
+    client = SimSwitchClient(data, vlan_data, ports, clock=lambda: t[0])
+    switch = asyncio.run(sample_traffic(SWITCH_IP, client, lambda: collect_switch(SWITCH_IP, client), 10.0,
+                                        sleep=advance, clock=lambda: t[0]))
 
     identities = [
         DiscoveredIdentity(source_ip=dev.ip, identity=ident)

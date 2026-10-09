@@ -300,3 +300,25 @@ tr.maxisdetail td { background: var(--panel-2); }
 .pchart text { fill: var(--muted); font-size: 11px; }
 .pchart .pval { fill: var(--text); font-size: 10px; }
 .ptable tbody tr:hover { cursor: default; }
+
+/* Network > Traffic */
+:root { --series-a: #4fb3d9; --series-b: #c792ea; }
+@media (prefers-color-scheme: light) { :root { --series-a: #0b7fab; --series-b: #8a4fbf; } }
+.warntext { color: var(--warn); }
+th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.wrap { white-space: normal; min-width: 260px; }
+.ubar { display: inline-block; width: 70px; height: 8px; border-radius: 4px; background: var(--panel-2); margin-right: 6px;
+  vertical-align: middle; overflow: hidden; }
+.ubar span { display: block; height: 100%; background: var(--ok); }
+.ubar.warn span { background: var(--warn); }
+.ncharts { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px 20px; }
+.nchart { width: 100%; height: auto; display: block; }
+.nchart text { fill: var(--muted); font-size: 10px; }
+.nchart .grid { stroke: var(--line); stroke-width: 1; }
+.nchart .limit { stroke: var(--warn); stroke-width: 1; stroke-dasharray: 4 3; }
+.nchart path { fill: none; stroke-width: 1.6; stroke-linejoin: round; }
+.nchart path.a { stroke: var(--series-a); } .nchart path.b { stroke: var(--series-b); }
+.nchart circle.a { fill: var(--series-a); } .nchart circle.b { fill: var(--series-b); }
+.lg { display: inline-block; margin-left: 8px; } .lg::before { content: ""; display: inline-block; width: 14px; height: 3px;
+  border-radius: 2px; vertical-align: middle; margin-right: 4px; }
+.lg.a::before { background: var(--series-a); } .lg.b::before { background: var(--series-b); }

@@ -25,6 +25,20 @@ IF_NAME = "1.3.6.1.2.1.31.1.1.1.1"
 IF_HIGH_SPEED = "1.3.6.1.2.1.31.1.1.1.15"
 IF_ALIAS = "1.3.6.1.2.1.31.1.1.1.18"
 
+# Traffic counters (index: ifIndex). ifXTable 64-bit counters first; the 32-bit ones are the fallback.
+IF_IN_OCTETS = "1.3.6.1.2.1.2.2.1.10"
+IF_OUT_OCTETS = "1.3.6.1.2.1.2.2.1.16"
+IF_IN_MCAST = "1.3.6.1.2.1.31.1.1.1.2"
+IF_IN_BCAST = "1.3.6.1.2.1.31.1.1.1.3"
+IF_OUT_MCAST = "1.3.6.1.2.1.31.1.1.1.4"
+IF_OUT_BCAST = "1.3.6.1.2.1.31.1.1.1.5"
+IF_HC_IN_OCTETS = "1.3.6.1.2.1.31.1.1.1.6"
+IF_HC_IN_MCAST = "1.3.6.1.2.1.31.1.1.1.8"
+IF_HC_IN_BCAST = "1.3.6.1.2.1.31.1.1.1.9"
+IF_HC_OUT_OCTETS = "1.3.6.1.2.1.31.1.1.1.10"
+IF_HC_OUT_MCAST = "1.3.6.1.2.1.31.1.1.1.12"
+IF_HC_OUT_BCAST = "1.3.6.1.2.1.31.1.1.1.13"
+
 # EtherLike-MIB dot3StatsTable (index: ifIndex)
 DOT3_ALIGNMENT_ERRORS = "1.3.6.1.2.1.10.7.2.1.2"
 DOT3_FCS_ERRORS = "1.3.6.1.2.1.10.7.2.1.3"

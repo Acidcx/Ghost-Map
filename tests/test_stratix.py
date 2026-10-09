@@ -111,3 +111,38 @@ def test_health_from_ios_xe_and_entity_sensor_mibs():
 def test_switch_without_health_mibs_reports_nothing():
     h = _collect({mibs.SYS_NAME: b"plain"}).health
     assert h.cpu_5m is None and h.memory_percent is None and not (h.temperatures or h.power_supplies or h.stp)
+
+
+def test_traffic_between_wraps_and_resets():
+    from ghostmap.analysis.traffic import CounterSample, traffic_between
+
+    a = CounterSample(at=0, ports={1: {"in_octets": 2**32 - 1000, "in_bcast": 10}, 2: {"in_octets": 5}},
+                      bits={"in_octets": 32, "in_bcast": 64}, speed_mbps={1: 100}, sys_uptime=100)
+    b = CounterSample(at=10, ports={1: {"in_octets": 124_000, "in_bcast": 5}, 2: {"in_octets": 6}},
+                      bits={"in_octets": 32, "in_bcast": 64}, speed_mbps={1: 100}, sys_uptime=1100)
+    r = traffic_between(a, b)
+    assert r[1].in_bps == (125_000 * 8) / 10 and r[1].in_util == 0.1  # one 32-bit wrap
+    assert r[1].in_bcast_pps is None  # a 64-bit counter going backwards was cleared: no rate
+    assert r[2].in_util is None  # unknown link speed
+    b.sys_uptime = 50  # the switch restarted between the readings
+    assert traffic_between(a, b) == {}
+
+
+def test_scan_traffic_failure_is_recorded_not_fatal():
+    from ghostmap.collectors.portstats import sample_traffic
+    from ghostmap.collectors.stratix import collect_switch
+    from ghostmap.protocols.snmp import FakeSnmpClient
+
+    devices, ports = demo_machine("today")
+    data, vlan_data = switch_oids(devices, ports)
+
+    class NoCounters(FakeSnmpClient):
+        async def walk(self, oid, vlan=None):
+            if oid == mibs.IF_HC_IN_OCTETS:
+                raise RuntimeError("timeout")
+            return await super().walk(oid, vlan)
+
+    client = NoCounters(data, vlan_data)
+    sw = asyncio.run(sample_traffic(SWITCH_IP, client, lambda: collect_switch(SWITCH_IP, client), 10))
+    assert sw.errors == ["traffic: timeout"] and sw.port_by_name("Fa1/2").macs
+    assert all(p.traffic is None for p in sw.ports)

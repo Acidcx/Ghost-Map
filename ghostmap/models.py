@@ -73,6 +73,25 @@ class Neighbor:
 
 
 @dataclass
+class PortTraffic:
+    """Rates on one port, from two counter readings ``seconds`` apart. "in" is what the port received from
+    the device plugged into it; "out" is what the switch sent to that device. ``None`` = not reported."""
+
+    seconds: float
+    in_bps: Optional[float] = None
+    out_bps: Optional[float] = None
+    in_util: Optional[float] = None  # percent of link speed
+    out_util: Optional[float] = None
+    in_bcast_pps: Optional[float] = None
+    out_bcast_pps: Optional[float] = None
+    in_mcast_pps: Optional[float] = None
+    out_mcast_pps: Optional[float] = None
+    in_errors_ps: Optional[float] = None
+    in_discards_ps: Optional[float] = None
+    out_discards_ps: Optional[float] = None
+
+
+@dataclass
 class Port:
     if_index: int
     name: str = ""
@@ -96,6 +115,7 @@ class Port:
     macs: list[str] = field(default_factory=list)
     neighbors: list[Neighbor] = field(default_factory=list)
     is_uplink: bool = False
+    traffic: Optional[PortTraffic] = None
 
     @property
     def is_physical(self) -> bool:

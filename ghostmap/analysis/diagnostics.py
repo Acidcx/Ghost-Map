@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
-from ghostmap.models import Device, DiscoveredIdentity, Finding, SwitchInfo
+from ghostmap.models import Device, DiscoveredIdentity, Finding, Port, SwitchInfo
 from ghostmap.protocols import cip_tables
 
 
@@ -22,6 +22,14 @@ class Thresholds:
     cpu_5sec_percent: int = 95  # momentary spike, only noted
     memory_percent: float = 90.0
     stp_change_seconds: int = 3600  # a spanning tree change this recent is worth a look
+    # Traffic (from two counter readings): link use, broadcast / multicast packets per second, drops
+    util_percent: float = 70.0
+    bcast_pps: float = 500.0  # received from one device: a storm or a loop starting
+    bcast_storm_pps: float = 5000.0
+    mcast_pps: float = 5000.0  # received from one device (EtherNet/IP multicast I/O is legitimately busy)
+    mcast_flood_pps: float = 2000.0  # sent to an edge device: IGMP snooping off or no querier
+    errors_per_s: float = 0.1  # input errors still climbing now
+    drops_per_s: float = 1.0  # output drops: the port is congested
 
 
 _STATE_TEXT = {"notFunctioning": "not working", "notPresent": "not present"}
@@ -72,6 +80,66 @@ def _switch_health(sw: SwitchInfo, name: str, t: Thresholds) -> list[Finding]:
                                "Each change flushes MAC tables and can drop EtherNet/IP I/O connections. Look for a flapping link, "
                                "a device port without PortFast, or someone plugging in a switch. "
                                "'show spanning-tree detail' names the port that last changed."))
+    return out
+
+
+def _rate(v: float) -> str:
+    return f"{v:,.0f}" if v >= 10 else f"{v:.1f}"
+
+
+def _mbps(bps: float) -> str:
+    return f"{bps / 1e6:.1f} Mbps" if bps < 1e8 else f"{bps / 1e6:,.0f} Mbps"
+
+
+def traffic_findings(where: str, port: Port, t: Optional[Thresholds] = None) -> list[Finding]:
+    """Findings from one port's rates (``port.traffic``). Also used by the background monitor."""
+    t = t or Thresholds()
+    tr, out = port.traffic, []
+    if tr is None:
+        return out
+    window = f"over {tr.seconds:.0f} s"
+    for direction, util, bps in (("in", tr.in_util, tr.in_bps), ("out", tr.out_util, tr.out_bps)):
+        if util is not None and util >= t.util_percent:
+            what = "receiving from the device" if direction == "in" else "sending to the device"
+            if port.is_uplink:
+                what = "arriving on this uplink" if direction == "in" else "leaving on this uplink"
+            out.append(Finding("warning", "port.utilization", where,
+                               f"Link {util:.0f}% busy {what} ({_mbps(bps)} of {port.speed_mbps} Mbps, {window}).",
+                               "A port this busy adds delay and drops packets in bursts, which shows up as I/O "
+                               "connection timeouts. Look for a camera or PC streaming on the machine network, "
+                               "a 10/100 link that should be gigabit, or a loop."))
+    b = tr.in_bcast_pps
+    if b is not None and b >= t.bcast_pps:
+        storm = b >= t.bcast_storm_pps
+        out.append(Finding("error" if storm else "warning", "port.broadcast_storm", where,
+                           f"{_rate(b)} broadcast packets/s {'arriving on this uplink' if port.is_uplink else 'coming from this port'} ({window}).",
+                           "Healthy devices send a few broadcasts a second (ARP, DHCP). This many usually means a loop "
+                           "(an unmanaged switch or a ring cabled twice), a faulty NIC, or a PC flooding discovery. "
+                           "Unplug what is on this port to confirm; storm-control on the port limits the damage."))
+    m = tr.in_mcast_pps
+    if m is not None and m >= t.mcast_pps:
+        out.append(Finding("info", "port.multicast_high", where,
+                           f"{_rate(m)} multicast packets/s {'arriving on this uplink' if port.is_uplink else 'coming from this port'} ({window}).",
+                           "EtherNet/IP multicast I/O at a fast RPI can be this busy. If this device isn't producing "
+                           "multicast I/O, look for a camera or PC streaming, or switch its connections to unicast."))
+    m = tr.out_mcast_pps
+    if m is not None and m >= t.mcast_flood_pps and not port.is_uplink:
+        out.append(Finding("info", "port.multicast_flood", where,
+                           f"The switch sends {_rate(m)} multicast packets/s to this device ({window}).",
+                           "Fine if the device consumes that multicast I/O. Otherwise IGMP snooping is off or no IGMP "
+                           "querier is running on this VLAN, so every device gets every multicast packet."))
+    e = tr.in_errors_ps
+    if e is not None and e >= t.errors_per_s:
+        out.append(Finding("warning", "port.errors_rising", where,
+                           f"Input errors are climbing now: {_rate(e)} per second ({window}).",
+                           "The cable, connector or device NIC is failing right now, or a duplex mismatch. Re-terminate "
+                           "or swap the patch cable, and keep it away from VFD output and motor leads."))
+    d = tr.out_discards_ps
+    if d is not None and d >= t.drops_per_s:
+        out.append(Finding("warning", "port.drops", where,
+                           f"The switch is dropping {_rate(d)} packets/s it should send on this port ({window}).",
+                           "Output drops mean more traffic is headed to this port than the link can take. Check the "
+                           "link speed, a storm elsewhere on the VLAN, or a busy device sharing this port."))
     return out
 
 
@@ -200,6 +268,7 @@ def run_diagnostics(
             if p.admin_status == "up" and p.oper_status == "down" and p.alias:
                 add(Finding("info", "port.down", where, f"Port '{p.alias}' is down.",
                             "Device off, unplugged, or port err-disabled (check 'show interfaces status err-disabled')."))
+            findings.extend(traffic_findings(where, p, t))
             if not p.is_uplink and len(p.macs) > t.macs_on_access_port:
                 add(Finding("info", "port.multi_mac", where, f"{len(p.macs)} MAC addresses learned on this edge port.",
                             "Daisy-chained devices (embedded switch / DLR) or an unmanaged switch downstream."))

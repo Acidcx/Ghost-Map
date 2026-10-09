@@ -169,3 +169,32 @@ def test_switch_health_findings():
 def test_demo_scan_switch_health_findings():
     c = codes(build_demo_scan("today").findings)
     assert {"switch.power", "switch.stp_change"} <= c and "switch.cpu_high" not in c
+
+
+def test_demo_scan_traffic_findings():
+    scan = build_demo_scan("today")
+    by = {(f.code, f.target): f for f in scan.findings}
+    assert by[("port.broadcast_storm", "CELL1-SW01 Fa1/6")].severity == "warning"
+    assert "85% busy" in by[("port.utilization", "CELL1-SW01 Fa1/7")].message
+    assert ("port.errors_rising", "CELL1-SW01 Fa1/2") in by
+    sw = scan.switches[0]
+    assert sw.port_by_name("Fa1/7").traffic.in_util > 80
+    # survives a save and load
+    again = from_dict(ScanResult, to_dict(scan))
+    assert again.switches[0].port_by_name("Fa1/6").traffic.in_bcast_pps == sw.port_by_name("Fa1/6").traffic.in_bcast_pps
+
+
+def test_traffic_thresholds():
+    from ghostmap.analysis.diagnostics import traffic_findings
+    from ghostmap.models import Port, PortTraffic
+
+    def codes_for(**kw):
+        p = Port(if_index=1, name="Fa1/1", speed_mbps=100, is_uplink=kw.pop("uplink", False),
+                 traffic=PortTraffic(seconds=30, **kw))
+        return {f.code: f.severity for f in traffic_findings("SW Fa1/1", p)}
+
+    assert codes_for(in_bcast_pps=6000) == {"port.broadcast_storm": "error"}
+    assert codes_for(in_bcast_pps=20, in_util=40, out_util=69) == {}
+    assert codes_for(out_mcast_pps=3000) == {"port.multicast_flood": "info"}
+    assert codes_for(out_mcast_pps=3000, uplink=True) == {}  # an uplink carries the VLAN's multicast
+    assert codes_for(out_discards_ps=4, in_errors_ps=0.5) == {"port.drops": "warning", "port.errors_rising": "warning"}

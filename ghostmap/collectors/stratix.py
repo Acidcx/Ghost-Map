@@ -73,6 +73,26 @@ async def collect_switch(ip: str, client: SnmpClient) -> SwitchInfo:
     return sw
 
 
+async def collect_layout(ip: str, client: SnmpClient) -> SwitchInfo:
+    """The light part of ``collect_switch`` for the background traffic monitor: name, ports and which ports
+    link to other switches (LLDP/CDP). No MAC or ARP tables."""
+    sw = SwitchInfo(ip=ip)
+    await _system(sw, client)
+    await _interfaces(sw, client)
+    ports = {p.if_index: p for p in sw.ports}
+    for name, fn in (("lldp", lambda: _lldp(sw, ports, client)), ("cdp", lambda: _cdp(ports, client))):
+        try:
+            await fn()
+        except Exception as exc:
+            sw.errors.append(f"{name}: {exc}")
+    _mark_uplinks(sw)
+    return sw
+
+
+async def read_cpu(sw: SwitchInfo, client: SnmpClient) -> None:
+    await _cpu(sw, client)
+
+
 async def _system(sw: SwitchInfo, client: SnmpClient) -> None:
     vals = await client.get(list(mibs.SYSTEM_SCALARS))
     if all(v is None for v in vals.values()):

@@ -37,6 +37,7 @@ from ghostmap.web.auth import AuditLog, Lockout, Sessions, UserStore, client_all
 from ghostmap.history import RETENTION_DAYS, History
 from ghostmap.web.collector import Collector
 from ghostmap.web.dashboards import DashboardStore, LiveValues, visible_node_ids
+from ghostmap.netmon import NetMonitor
 from ghostmap.web.tsc import TscService, error_text as tsc_error
 
 UA_IDLE_S = 600        # close OPC UA sessions nobody has used for 10 minutes (re-opened on next use)
@@ -134,6 +135,20 @@ class TscConfigIn(BaseModel):
     cache_s: int = Field(30, ge=5, le=3600)
 
 
+class NetmonIn(BaseModel):
+    switches: list[str] = Field(..., max_length=32)
+    interval_s: int = Field(30, ge=10, le=3600)
+    version: str = Field("2c", pattern="^(2c|3)$")
+    community: str = Field("", max_length=128)  # blank: keep the saved one (same for the keys)
+    username: str = Field("", max_length=128)
+    auth_protocol: str = Field("sha", pattern="^(none|md5|sha|sha256)$")
+    auth_key: str = Field("", max_length=256)
+    priv_protocol: str = Field("aes", pattern="^(none|des|aes|aes256)$")
+    priv_key: str = Field("", max_length=256)
+    port: int = Field(161, ge=1, le=65535)
+    timeout: float = Field(2.0, ge=0.5, le=10)
+
+
 class ImportIn(BaseModel):
     data: dict
     endpoint: str = Field("", max_length=300)  # use this gateway instead of the one in the file
@@ -163,6 +178,7 @@ class ScanIn(BaseModel):
     auto_switches: bool = True
     timeout: float = Field(2.0, ge=0.2, le=30)
     rate: float = Field(200.0, ge=1, le=2000)
+    traffic_window: float = Field(10.0, ge=0, le=60)
 
 
 @dataclass
@@ -229,10 +245,14 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     async def lifespan(_app):
         if demo_opcua:
             await start_demo_ua()
+        if collect and demo and netmon.cfg and netmon.cfg.switches == ["demo"]:
+            await netmon.seed_demo()
         if collect:
             collector.start()
+            netmon.start()
         yield
         await collector.stop()
+        await netmon.stop()
         for b, *_ in list(ua_sessions.values()):
             if b is not None:
                 await b.disconnect()
@@ -257,9 +277,10 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     history = History(store.root)
     collector = Collector(dashboards, live, history)
     tsc = TscService(store.root, demo=demo)
+    netmon = NetMonitor(store.root, demo=demo, snmp_factory=snmp_factory)
     tasks: set[asyncio.Task] = set()
     app.state.demo_ua, app.state.live, app.state.ua_sessions = demo_ua, live, ua_sessions  # for tests
-    app.state.history, app.state.collector, app.state.tsc = history, collector, tsc
+    app.state.history, app.state.collector, app.state.tsc, app.state.netmon = history, collector, tsc, netmon
 
     def client_of(request: Request) -> str:
         return request.client.host if request.client else ""
@@ -920,6 +941,84 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         except Exception as exc:
             return {"ok": False, "configured": True, "error": tsc_error(exc)}
 
+    # ------------------------------------------------------------- traffic monitor (switch counters over SNMP)
+    @app.get("/api/netmon/config")
+    def netmon_config(request: Request):
+        require_admin(request)
+        return netmon.public()
+
+    @app.post("/api/netmon/config")
+    def netmon_set_config(body: NetmonIn, request: Request):
+        try:
+            cfg = netmon.merged(body.model_dump())
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        netmon.save(cfg)
+        audit.write(client_of(request), who(request), "netmon.config", f"{','.join(cfg.switches)} every {cfg.interval_s}s")
+        return netmon.public()
+
+    @app.delete("/api/netmon/config")
+    def netmon_clear(request: Request):
+        netmon.clear()
+        audit.write(client_of(request), who(request), "netmon.clear")
+        return {"ok": True}
+
+    @app.post("/api/netmon/test")
+    async def netmon_test(body: NetmonIn, request: Request):
+        """Read each switch in the form once (not saved yet): name, model, ports."""
+        from ghostmap.collectors.stratix import collect_layout
+
+        try:
+            cfg = netmon.merged(body.model_dump())
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc), "switches": []}
+        audit.write(client_of(request), who(request), "netmon.test", ",".join(cfg.switches))
+
+        async def one(ip: str) -> dict:
+            client = netmon.client_for(ip, cfg)
+            try:
+                sw = await asyncio.wait_for(collect_layout(ip, client), 30)
+                return {"switch": ip, "ok": True, "name": sw.sys_name, "model": sw.model or sw.sys_descr[:60],
+                        "ports": sum(1 for p in sw.ports if p.is_physical)}
+            except Exception as exc:
+                return {"switch": ip, "ok": False, "error": tsc_error(exc)}
+            finally:
+                await client.close()
+
+        results = await asyncio.gather(*(one(ip) for ip in cfg.switches))
+        return {"ok": all(r["ok"] for r in results), "switches": results}
+
+    @app.get("/api/netmon/status")
+    def netmon_status():
+        return netmon.status()
+
+    @app.get("/api/netmon/now")
+    def netmon_now(switch: str, hours: float = 24):
+        return netmon.now(switch, min(max(hours, 0.1), 24 * 7))
+
+    @app.get("/api/netmon/series")
+    def netmon_series(switch: str, port: str, hours: float = 6):
+        hours = min(max(hours, 0.1), 24 * 7)
+        until = time.time()
+        return {"since": until - hours * 3600, "until": until, "interval_s": netmon.cfg.interval_s if netmon.cfg else None,
+                "rates": netmon.store.series(switch, port, until - hours * 3600, until)}
+
+    @app.get("/api/netmon/cpu")
+    def netmon_cpu(switch: str, hours: float = 6):
+        hours = min(max(hours, 0.1), 24 * 7)
+        until = time.time()
+        return {"since": until - hours * 3600, "until": until, "cpu": netmon.store.cpu_series(switch, until - hours * 3600, until)}
+
+    @app.get("/api/netmon/events")
+    def netmon_events(hours: float = 24, switch: Optional[str] = None):
+        return {"events": netmon.store.events(time.time() - min(max(hours, 0.1), 24 * 90) * 3600, switch)}
+
+    @app.get("/api/netmon/events.csv")
+    def netmon_events_csv(hours: float = 24 * 7):
+        name = f"ghostmap-network-events-{time.strftime('%Y%m%d-%H%M')}.csv"
+        return PlainTextResponse(netmon.store.events_csv(time.time() - min(max(hours, 0.1), 24 * 90) * 3600),
+                                 media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
     # ------------------------------------------------------------- debug log
     client_log_seen: dict[str, list[float]] = {}
 
@@ -941,6 +1040,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
                 "uptime_s": int(time.time() - started),
                 "collector": {d["id"]: collector.status(d["id"]) for d in dashboards.list()},
                 "history": history.counts(), "tsc": tsc.status(),
+                "netmon": {**netmon.status(), "db": netmon.store.counts()},
                 "dashboards": [{k: d[k] for k in ("id", "name", "endpoint", "summary")} for d in dashboards.list()],
                 "comms": live.snapshot(), "gateway_sessions": live.sessions(),
                 "opcua_sessions": [{"url": e[3]["url"], "open": e[0] is not None, "idle_s": int(time.time() - e[1]),
@@ -1013,7 +1113,8 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         if body.snmp and (body.snmp.community or body.snmp.username):
             snmp = SnmpCredentials(**body.snmp.model_dump())
         req = ScanRequest(targets=body.targets, broadcast=body.broadcast, switches=body.switches, snmp=snmp,
-                          auto_switches=body.auto_switches, timeout=body.timeout, rate=body.rate, label=body.label)
+                          auto_switches=body.auto_switches, timeout=body.timeout, rate=body.rate, label=body.label,
+                          traffic_window=body.traffic_window)
         job = Job(id=uuid.uuid4().hex[:12])
         jobs[job.id] = job
         audit.write(client_of(request), who(request), "scan.start",

@@ -7,7 +7,7 @@ Ghost Map runs on live control networks, so it is deliberately conservative.
 | Traffic | Purpose | Notes |
 |---|---|---|
 | EtherNet/IP `ListIdentity` (UDP 44818) | Discovery, identity, firmware, status | Unconnected and session-less. It is the same request RSLinx / FactoryTalk Linx browsing sends, and it opens no I/O or explicit connection. |
-| SNMP GET / GETBULK (UDP 161) | Switch inventory, CPU, memory, temperature, power, spanning tree, ports, MAC/ARP tables, neighbours | Read-only. The code has no `set` method. |
+| SNMP GET / GETBULK (UDP 161) | Switch inventory, CPU, memory, temperature, power, spanning tree, ports, traffic counters, MAC/ARP tables, neighbours | Read-only. The code has no `set` method. |
 | TCP connect (probe only) | Port reachability check | Connects and closes immediately; no payload is sent. Runs only when you probe a single device. |
 | OPC UA Browse / Read / GetEndpoints (TCP, default 4990 for FT Linx Gateway) | Tags (OPC UA) tab: browse the address space, read attributes and values, export tag lists | Only when an admin connects in the Tags tab. Watched tags are read every 1-5 s (or paused) and polling stops while the tab is hidden. The client code has no write, method-call or node-management calls, and a test checks that. Sessions close after 10 minutes idle. Server certificates are shown (SHA-1) but not yet checked against a trust list. A session idle for 10 minutes is closed, and it is re-opened with the same settings on next use or after a drop (one retry). |
 | OPC UA Read (same server) | Machine dashboards: live values and alarm history | The server reads each saved dashboard's tags about once a second in the background (for the alarm history), whether or not anyone is watching; viewers share those reads. All dashboards on one gateway share one anonymous session. A dropped session is re-opened once, straight away; after a failed connect, reads wait 5 s before trying again. `ghostmap web --no-collect` turns background reading off, so a dashboard is read only while someone has it open. **Check all alarms** (Health page) reads the dashboard's alarm, running and heartbeat tags once, on request. The history is written to Ghost Map's own `history.db`; nothing is ever written to a PLC or gateway. |
@@ -22,6 +22,8 @@ It never sends CIP writes, OPC UA writes or method calls, SQL INSERT / UPDATE / 
 - Each target gets exactly one request; there are no retries.
 - Ranges larger than 4096 hosts are refused unless the code limit is raised.
 - SNMP walks are sequential per switch, use GETBULK with 25 repetitions, have a 2 s timeout, and retry once.
+- A scan reads each switch's port counters twice, 10 s apart by default, for bandwidth and broadcast rates (about a dozen small walks each time; `--traffic-window 0` skips it).
+- The traffic monitor (Network > Traffic), once an admin sets it up, reads the same counters plus CPU every poll interval (30 s by default, 10 s minimum) and every 10 minutes the port list and LLDP/CDP neighbours. Nothing else, and only from the switches listed.
 
 ## Recommendations
 
