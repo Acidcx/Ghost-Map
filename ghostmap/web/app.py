@@ -1221,22 +1221,6 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
             raise HTTPException(404, "job not found")
         return job.__dict__
 
-    @app.get("/api/probe/{ip}")
-    async def probe(ip: str, request: Request):
-        try:
-            discovery.expand_targets([ip], max_hosts=1)
-        except ValueError:
-            raise HTTPException(400, "bad ip")
-        audit.write(client_of(request), who(request), "probe", ip)
-        ident = await discovery.probe(ip)
-        port_list = (44818, 80, 443, 502, 102, 22, 23)
-        open_ = await asyncio.gather(*(discovery.tcp_port_open(ip, p) for p in port_list))
-        return {
-            "ip": ip,
-            "identity": to_dict(ident.identity) if ident else None,
-            "tcp": dict(zip(map(str, port_list), open_)),
-        }
-
     # ------------------------------------------------------------- device inspector (the Probe page)
     from ghostmap.analysis.inspect import context as inspect_context, verdict as inspect_verdict
     from ghostmap.collectors import inspect as inspector

@@ -33,7 +33,6 @@ STATIONS = [  # StationID, LineID, Name, Description
 ]
 DEPENDENCY_TYPES = {1: "Requires"}
 DEPENDENCIES = [(5, 3, 1), (5, 4, 1)]  # dependent station, independent station, type
-LINE_STATIONS = {1: [1, 2], 2: [3, 4, 5]}
 DAY_NAMES = {1: "Sunday", 2: "Monday", 3: "Tuesday", 4: "Wednesday", 5: "Thursday", 6: "Friday", 7: "Saturday"}
 SHIFTS = [("1st", 1, (6, 0), (14, 0)), ("2nd", 2, (14, 0), (22, 0)), ("3rd", 3, (22, 0), (6, 0))]
 STOP_CODES = {1: "Coil change", 2: "Material jam", 3: "Tooling change", 4: "Break", 5: "Maintenance", 6: "Waiting on material"}
@@ -178,11 +177,6 @@ def world(now: datetime | None = None, seed: int = 7) -> dict:
                 r[f"Station{n}ActualQuantity"] = sp["QuantityCompleted"]
     return {"rows": rows, "station_parts": station_parts, "part_patterns": part_patterns, "holes": holes,
             "downtime": downtime, "start": (now - timedelta(hours=HISTORY_H)).replace(minute=0, second=0)}
-
-
-def schedule(now: datetime | None = None, seed: int = 7) -> list[dict]:
-    """The rows of the simulated ``vPartScheduleCommon``."""
-    return world(now, seed)["rows"]
 
 
 def pattern_hits(pp: dict, length: float) -> int:

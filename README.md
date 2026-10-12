@@ -210,6 +210,15 @@ snmp-server user ghostmap GHOSTMAP v3 auth sha <auth-key> priv aes 128 <priv-key
 
 **Several switches on one machine** (e.g. a line of Stratix 5200s, which run IOS-XE): list them all under *Switch IPs*, or just give SNMP credentials and let discovery add every Stratix it finds. All switches are read with the same credentials and at the same time. Ghost Map works out which ports link switches together (from LLDP/CDP, or from the switches' own MAC addresses when both are off), so each device is placed on the switch port it is actually plugged into.
 
+**Optional, for Network > Live**: let the switch tell the HMI when something happens, by sending syslog and traps to it (192.168.1.250 here is the HMI). This is a change you make on the switch; Ghost Map never changes switch settings.
+
+```
+logging host 192.168.1.250
+logging trap warnings
+snmp-server host 192.168.1.250 version 2c <trap-string>
+snmp-server enable traps snmp linkdown linkup coldstart warmstart authentication
+```
+
 IOS exposes the MAC address table per VLAN, so Ghost Map reads the per-VLAN tables as well. It uses `community@<vlan>` indexing for v2c and the `vlan-<id>` context for v3, which is why the v3 group above includes the `vlan-` context. If the switch supports Q-BRIDGE-MIB, one walk is enough.
 
 ## Firmware baseline
