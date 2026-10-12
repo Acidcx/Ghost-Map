@@ -95,7 +95,8 @@ function prodRender() {
   tiles.push(["Scrap / remakes", `${pNum(T.scrap_pieces)} / ${pNum(T.remakes)}`, T.scrap_pieces ? "warn" : "", "Scrap pieces / remade part lines"],
     ["In queue", `${pNum(Q.orders)} orders`, "", `${pNum(Q.bundles)} bundles, ${pNum(Q.parts)} part lines, ${pNum(Q.pieces)} pieces, ${pNum(Q.feet)} ft`],
     ["On hold", `${pNum(d.held.length)} ${d.held.length === 1 ? "part" : "parts"}`, d.held.length ? "warn" : ""]);
-  const tilesHtml = `<div class="tiles">${tiles.map(([l, n, c, t]) => `<div class="tile ${c || ""}" ${t ? `title="${esc(t)}"` : ""}><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div>${t ? `<div class="s">${esc(t)}</div>` : ""}</div>`).join("")}</div>`;
+  const tilesHtml = `<div class="tiles">${tiles.map(([l, n, c, t]) => l === "Uptime" ? `<div class="tile ringtile ${c}" title="${esc(t)}">${ring(D.uptime * 100, esc(n), c, 58, 6)}
+    <div><div class="l">${esc(l)}</div><div class="s">${esc(t)}</div></div></div>` : `<div class="tile ${c || ""}" ${t ? `title="${esc(t)}"` : ""}><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div>${t ? `<div class="s">${esc(t)}</div>` : ""}</div>`).join("")}</div>`;
   $("#pBody").innerHTML = tilesHtml + stationsHtml(d) + runningHtml(d) + heldHtml(d)
     + `<div class="pgrid"><div class="panel"><h3>Feet per hour</h3>${hourlySvg(d.hourly)}</div>${downtimeHtml(d)}</div>`
     + ordersHtml(d) + queueHtml(d) + recentHtml(d);
@@ -170,6 +171,8 @@ function hourlySvg(hours) {
       <text class="plab" x="${x + w / 2}" y="${H - 6}" text-anchor="middle">${esc(label)}</text></g>`;
   }).join("");
   return `<svg class="pchart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Feet produced per hour">
+    <defs><linearGradient id="gmBarGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--accent)"></stop>
+      <stop offset="1" style="stop-color:var(--accent-2);stop-opacity:.55"></stop></linearGradient></defs>
     <line class="paxis" x1="0" x2="${W}" y1="${H - bottom}" y2="${H - bottom}"></line>${bars}</svg>
     <p class="small muted">Last 12 hours by clock hour; the last bar is the hour in progress.</p>`;
 }
@@ -275,10 +278,23 @@ async function tscStatus() {
       <div><div class="k">Last good read</div><div class="v ${ok ? "oktext" : ""}">${s.last_ok ? esc(fmtHm(s.last_ok)) : "none yet"}</div></div>
       <div><div class="k">Query time</div><div class="v">${s.last_ms != null ? `${s.last_ms} ms` : "-"}</div></div>
       <div><div class="k">Reads since start</div><div class="v">${pNum(s.queries)}</div></div></div>
-      ${s.last_error ? `<p class="${ok ? "muted" : "errtext"} small">Last error (${esc(fmtHm(s.last_error_at))}): ${esc(s.last_error)}</p>` : ""}`;
+      ${s.last_error ? `<p class="${ok ? "muted" : "errtext"} small">Last error (${esc(fmtHm(s.last_error_at))}): ${esc(s.last_error)}</p>` : ""}
+      ${slowestHtml(s.query_times || {})}`;
     tscFeatures(s);
   } catch (e) { $("#tStatus").textContent = e.message; }
 }
+// How long each table or view took on its last read, slowest first: shows which one holds up a slow page.
+function slowestHtml(qt) {
+  const rows = Object.entries(qt);
+  if (!rows.length) return "";
+  const max = Math.max(1, ...rows.map(([, v]) => v.s));
+  return `<h4 class="small">Slowest tables (last read)</h4><div class="tablewrap"><table class="ptable qtimes"><tbody>${rows.map(([n, v]) => `<tr><td class="mono">${esc(n)}</td>
+    <td class="${v.s >= 5 ? "errtext" : v.s >= 1 ? "warntext" : ""}">${v.s < 1 ? `${Math.round(v.s * 1000)} ms` : `${v.s.toFixed(1)} s`}</td>
+    <td><div class="pbarwrap sm"><span class="${v.s >= 5 ? "overdue" : v.s >= 1 ? "soon" : ""}" style="width:${Math.max(2, Math.round((v.s / max) * 100))}%"></span></div></td>
+    <td class="small muted">${esc(fmtHm(v.at))}</td></tr>`).join("")}</tbody></table></div>
+    <p class="small muted">Anything over 5 s is also written to the debug log. A slow table usually needs an index on its date column; ask the TSC administrator.</p>`;
+}
+
 // The optional reads (stations, shifts, stops, strokes) and the GRANT each one needs, from what the last reads found.
 function tscFeatures(s) {
   const f = Object.entries(s.features || {});

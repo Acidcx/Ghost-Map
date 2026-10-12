@@ -41,3 +41,7 @@ The TSC schedule (`sim/tsc.py`) stands in for the SQL view in the demo and tests
 ## Upgrades
 
 Everything a user sets up lives in the data folder and survives an upgrade. `history.db` carries a schema number (`PRAGMA user_version`); a change to its tables bumps it and migrates the existing rows in `History.__init__`. `tsc.json` and export files carry a format number, and an import refuses a file from a newer format.
+
+## Device inspector (Probe)
+
+`collectors/inspect.py` does the network part of Probe for one IP (TCP connects to a fixed port list, timed connects, ListIdentity, ListServices from `protocols/enip.py`, optional SNMP system scalars) and has a `simulated()` twin for the demo machine. `analysis/inspect.py` is pure: `context()` finds the device in the saved scans (switch port, findings, what each scan saw at that address) and `verdict()` turns an inspection plus its context into `inspect.*` checks, each with a hint. `POST /api/inspect` joins them; `GET /api/probe/{ip}/ping` is the live trace's single timed connect.

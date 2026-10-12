@@ -15,6 +15,7 @@ the same name; otherwise give the CA file that signed it.
 
 from __future__ import annotations
 
+import contextlib
 import re
 import time
 from dataclasses import dataclass, field
@@ -112,18 +113,38 @@ class SqlTsc:
     """The real source: python-tds, a short-lived connection per query batch."""
 
     name = "sql"
+    HEAVY_TIMEOUT_S = 120  # sums over every completed part (maintenance counters) can take a while on a big database
 
     def __init__(self, cfg: TscConfig):
         cfg.check()
         self.cfg = cfg
         self.view, self.queue_view, self.done_view = cfg.view.strip(), cfg.queue_view.strip(), cfg.done_view.strip()
+        self._conn = None
+        self.timings: list[tuple[str, float]] = []  # (query name, seconds) for the last session
 
-    def _connect(self):
+    @contextlib.contextmanager
+    def session(self, heavy: bool = False):
+        """One connection for a batch of queries (a login per query is slow, more so with encryption)."""
+        if self._conn is not None:
+            yield self
+            return
+        self._conn = self._connect(self.HEAVY_TIMEOUT_S if heavy else 30)
+        self.timings = []
+        try:
+            yield self
+        finally:
+            conn, self._conn = self._conn, None
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _connect(self, timeout: int = 30):
         import pytds
 
         host, port = _split_server(self.cfg.server)
         kw = dict(dsn=host, database=self.cfg.database, user=self.cfg.username, password=self.cfg.password,
-                  login_timeout=10, timeout=30, autocommit=True, readonly=True, appname="Ghost Map (read-only)")
+                  login_timeout=10, timeout=timeout, autocommit=True, readonly=True, appname="Ghost Map (read-only)")
         if port:
             kw["port"] = port
         if self.cfg.encrypt:
@@ -132,13 +153,26 @@ class SqlTsc:
             kw["validate_host"] = not self.cfg.trust_cert
         return pytds.connect(**kw)
 
-    def _query(self, sql: str, args: tuple = ()) -> list[dict]:
+    def _query(self, sql: str, args: tuple = (), name: str = "") -> list[dict]:
         assert sql.lstrip().upper().startswith("SELECT"), "Ghost Map only reads"
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, args)
-                names = [d[0] for d in cur.description]
-                return [dict(zip(names, row)) for row in cur.fetchall()]
+        t0 = time.perf_counter()
+        if self._conn is not None:
+            rows = self._run(self._conn, sql, args)
+        else:
+            with self._connect() as conn:
+                rows = self._run(conn, sql, args)
+        if not name:  # the first table or view it reads says which one was slow
+            m = re.search(r"\bFROM\s+([\w.\[\]]+)", sql)
+            name = m.group(1) if m else "query"
+        self.timings.append((name, time.perf_counter() - t0))
+        return rows
+
+    @staticmethod
+    def _run(conn, sql: str, args: tuple) -> list[dict]:
+        with conn.cursor() as cur:
+            cur.execute(sql, args)
+            names = [d[0] for d in cur.description]
+            return [dict(zip(names, row)) for row in cur.fetchall()]
 
     # ------------------------------------------------------------- the part schedule (DataView)
     def lines(self) -> list[dict]:
@@ -177,6 +211,27 @@ class SqlTsc:
             f"MIN(EndTime) AS FirstEnd FROM {self.done_view} WHERE LineID = %s AND EndTime >= %s", (int(line_id), since))
         return rows[0] if rows else {}
 
+    def totals_windows(self, line_id: int, sinces: dict) -> dict:
+        """``totals`` for several start times in one pass over the completed parts: {name: row}."""
+        names = list(sinces)
+        parts = []
+        args: list = []
+        for i, n in enumerate(names):
+            w = "EndTime >= %s"
+            parts.append(f"SUM(CASE WHEN {w} THEN 1 ELSE 0 END) AS Parts_{i}, "
+                         f"SUM(CASE WHEN {w} THEN CAST(ActualQuantity AS bigint) ELSE 0 END) AS Pieces_{i}, "
+                         f"SUM(CASE WHEN {w} THEN CAST(Length AS float) * ActualQuantity ELSE 0 END) AS LengthTotal_{i}, "
+                         f"SUM(CASE WHEN {w} AND IsScrap = 1 THEN CAST(ActualQuantity AS bigint) ELSE 0 END) AS ScrapPieces_{i}, "
+                         f"SUM(CASE WHEN {w} AND StartTime > '19010101' AND EndTime > StartTime "
+                         f"THEN CAST(DATEDIFF(second, StartTime, EndTime) AS bigint) ELSE 0 END) AS RunSeconds_{i}, "
+                         f"MIN(CASE WHEN {w} THEN EndTime END) AS FirstEnd_{i}")
+            args += [sinces[n]] * 6
+        rows = self._query(f"SELECT {', '.join(parts)} FROM {self.done_view} WHERE LineID = %s AND EndTime >= %s",
+                           (*args, int(line_id), min(sinces.values())), "totals")
+        r = rows[0] if rows else {}
+        return {n: {k: r.get(f"{k}_{i}") for k in ("Parts", "Pieces", "LengthTotal", "ScrapPieces", "RunSeconds", "FirstEnd")}
+                for i, n in enumerate(names)}
+
     # ------------------------------------------------------------- optional lookups (dbo / Machine)
     def station_parts(self, part_ids: list[str]) -> list[dict]:
         out = []
@@ -210,17 +265,27 @@ class SqlTsc:
     def strokes(self, line_id: int, since: datetime) -> list[dict]:
         """Punch strokes per station and tool type for parts finished since a time: pattern holes (repeats
         counted along the part), one-off holes and notches, times the pieces made."""
-        q = int(line_id)
+        return [{**r, "Strokes": r["S_0"]} for r in self._strokes(line_id, [since])]
+
+    def strokes_windows(self, line_id: int, sinces: dict) -> list[dict]:
+        """``strokes`` for several start times in one pass: rows of StationID, ToolType and one column per name."""
+        names = list(sinces)
+        return [{"StationID": r["StationID"], "ToolType": r["ToolType"], **{n: r[f"S_{i}"] for i, n in enumerate(names)}}
+                for r in self._strokes(line_id, [sinces[n] for n in names])]
+
+    def _strokes(self, line_id: int, sinces: list) -> list[dict]:
+        q, first = int(line_id), min(sinces)
+        cols = ", ".join(f"SUM(CASE WHEN EndTime >= %s THEN Strokes ELSE 0 END) AS S_{i}" for i in range(len(sinces)))
         return self._query(
-            f"SELECT StationID, ToolType, SUM(Strokes) AS Strokes FROM ("
-            f"SELECT ph.StationID, ph.ToolType, CAST(p.ActualQuantity AS bigint) * {_HITS} AS Strokes "
+            f"SELECT StationID, ToolType, {cols} FROM ("
+            f"SELECT ph.StationID, ph.ToolType, p.EndTime, CAST(p.ActualQuantity AS bigint) * {_HITS} AS Strokes "
             f"FROM {self.done_view} p JOIN dbo.PartPattern pp ON pp.PartID = p.PartID "
             "JOIN dbo.PatternHole ph ON ph.PatternName = pp.PatternName WHERE p.LineID = %s AND p.EndTime >= %s "
-            "UNION ALL SELECT h.StationID, h.ToolType, CAST(p.ActualQuantity AS bigint) "
+            "UNION ALL SELECT h.StationID, h.ToolType, p.EndTime, CAST(p.ActualQuantity AS bigint) "
             f"FROM {self.done_view} p JOIN dbo.Hole h ON h.PartID = p.PartID WHERE p.LineID = %s AND p.EndTime >= %s "
-            "UNION ALL SELECT n.StationID, n.ToolType, CAST(p.ActualQuantity AS bigint) "
+            "UNION ALL SELECT n.StationID, n.ToolType, p.EndTime, CAST(p.ActualQuantity AS bigint) "
             f"FROM {self.done_view} p JOIN dbo.PartNotch n ON n.PartID = p.PartID WHERE p.LineID = %s AND p.EndTime >= %s"
-            ") x GROUP BY StationID, ToolType", (q, since, q, since, q, since))
+            ") x GROUP BY StationID, ToolType", (*sinces, q, first, q, first, q, first), "strokes")
 
 
 def source_for(cfg: TscConfig):

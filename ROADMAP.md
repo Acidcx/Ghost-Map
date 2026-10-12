@@ -30,6 +30,7 @@ It can't see traffic between other devices (e.g. PLC ↔ drive I/O). Per-port er
 
 - [x] EtherNet/IP discovery, Stratix / IOS-XE switch reading, port mapping, diagnostics, scan diff
 - [x] Multiple switches per machine; non-EtherNet/IP hosts listed with MAC vendor; RSLinx PCs labelled
+- [x] Device inspector (Probe): open ports, connect-time latency and jitter with a live trace, ListServices, switch port path, history across scans, verdict with hints
 - [ ] SNMP identification of non-CIP hosts (sysDescr: model / firmware of Moxa, Netgear, IT switches)
 - [ ] Device-side Ethernet diagnostics (CIP Ethernet Link object: speed, duplex, error counters)
 - [ ] Fill in the scanner PC's own MAC address

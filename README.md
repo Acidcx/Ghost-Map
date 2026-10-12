@@ -112,13 +112,13 @@ ghostmap discover 127.0.10.0/24
   - **Connection**: the TSC database settings, what the SQL login can read, and moving dashboards and settings to another PC.
 - **Maintenance** (counters from TSC and the PLCs)
   - **Service**: service items with an interval (strokes, pieces, feet, hours or days), due-soon warnings and a log of the work done.
-  - **Counters**: feet, pieces, production hours and punch strokes per tool from TSC, and run hours per machine from the PLC.
+  - **Counters**: all-time totals as odometers, then feet, pieces, production hours and punch strokes per tool from TSC, and run hours per machine from the PLC. A big TSC database can take a while the first time; after that the last answer is shown at once and refreshed in the background, and the Connection page lists the slowest tables.
 - **Network** (TCP/IP: EtherNet/IP and SNMP scans)
   - **Overview**: counts and all findings, with a hint for each.
   - **Devices**: a sortable, filterable inventory. Click a device for its full CIP identity, decoded status word, related findings, and a one-click probe.
   - **Switches**: a port faceplate coloured by health, a port table, and per-port detail (counters, neighbours, MACs mapped to devices).
   - **Compare**: the diff of any two scans.
-  - **Probe**: a single-device check.
+  - **Probe**: a close look at one device. A health score and a plain-language verdict with hints; response time from ten timed TCP connects (min, average, max, jitter, lost) and a **Live trace** of one connect a second; which of 15 industrial and IT ports are open (Modbus, Telnet, VNC and plain HTTP are flagged); CIP identity and the transports from ListServices; where it is plugged in (switch, port, speed, duplex, errors, with a button to inspect the switch); and what earlier scans saw at that address (a replaced module, a firmware change, a moved cable). Optional SNMP system info with a community you type in, which is not saved. In the demo, the simulated machine answers without sending anything: try 192.168.1.20 (a drive on a half-duplex port with errors) or 192.168.1.40 (an HMI with VNC open).
 
 **Export CSV** downloads the device inventory.
 

@@ -118,3 +118,49 @@ def build_list_identity_response(
     )
     payload = struct.pack("<HHH", 1, ITEM_CIP_IDENTITY, len(item)) + item
     return _HEADER.pack(CMD_LIST_IDENTITY, len(payload), 0, 0, context[:8].ljust(8, b"\0"), 0) + payload
+
+
+# ListServices (command 0x0004): which encapsulation services the device offers. Read-only, like ListIdentity.
+CMD_LIST_SERVICES = 0x0004
+ITEM_COMMUNICATIONS = 0x0100
+_SERVICE_FIXED = struct.Struct("<HH")  # version, capability flags
+SERVICE_FLAGS = {0x0020: "CIP over TCP (explicit messaging)", 0x0100: "CIP class 0/1 over UDP (I/O connections)"}
+
+
+def build_list_services(context: bytes = b"ghostmap") -> bytes:
+    return _HEADER.pack(CMD_LIST_SERVICES, 0, 0, 0, context[:8].ljust(8, b"\0"), 0)
+
+
+def parse_list_services(data: bytes) -> list[dict]:
+    """Parse a ListServices reply: [{"name", "version", "flags": int, "capabilities": [text]}]."""
+    if len(data) < _HEADER.size:
+        raise EnipError("short encapsulation header")
+    command, length, _session, status, _ctx, _opts = _HEADER.unpack_from(data)
+    if command != CMD_LIST_SERVICES:
+        raise EnipError(f"unexpected command 0x{command:04X}")
+    if status != 0:
+        raise EnipError(f"encapsulation status 0x{status:08X}")
+    payload = data[_HEADER.size:_HEADER.size + length]
+    if len(payload) < 2:
+        return []
+    (count,) = struct.unpack_from("<H", payload)
+    offset, out = 2, []
+    for _ in range(count):
+        if offset + 4 > len(payload):
+            raise EnipError("truncated item header")
+        item_type, item_len = struct.unpack_from("<HH", payload, offset)
+        item = payload[offset + 4:offset + 4 + item_len]
+        offset += 4 + item_len
+        if item_type == ITEM_COMMUNICATIONS and len(item) >= _SERVICE_FIXED.size:
+            version, flags = _SERVICE_FIXED.unpack_from(item)
+            name = item[_SERVICE_FIXED.size:_SERVICE_FIXED.size + 16].split(b"\0", 1)[0].decode("latin-1")
+            out.append({"name": name, "version": version, "flags": flags,
+                        "capabilities": [t for bit, t in SERVICE_FLAGS.items() if flags & bit]})
+    return out
+
+
+def build_list_services_response(name: str = "Communications", flags: int = 0x0120, version: int = 1,
+                                 context: bytes = b"\0" * 8) -> bytes:
+    item = _SERVICE_FIXED.pack(version, flags) + name.encode("latin-1")[:15].ljust(16, b"\0")
+    payload = struct.pack("<H", 1) + struct.pack("<HH", ITEM_COMMUNICATIONS, len(item)) + item
+    return _HEADER.pack(CMD_LIST_SERVICES, len(payload), 0, 0, context, 0) + payload

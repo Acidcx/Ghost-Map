@@ -15,6 +15,7 @@ and the next one starts) without storing anything. Status codes follow the TSC v
 
 from __future__ import annotations
 
+import contextlib
 import random
 import time
 import uuid
@@ -196,6 +197,18 @@ class SimTsc:
     """Answers the same questions as the SQL source (``collectors/tsc.py``), from ``world()``."""
 
     name = "demo"
+    timings: list = []
+
+    def session(self, heavy: bool = False):
+        self.timings = []  # (query name, seconds), like the SQL source's, so the Connection page has something to show
+        return contextlib.nullcontext(self)
+
+    def _timed(self, name: str, fn):
+        t0 = time.perf_counter()
+        try:
+            return fn()
+        finally:
+            self.timings = [*self.timings, (name, time.perf_counter() - t0)]
 
     def _w(self) -> dict:
         return world()
@@ -204,10 +217,16 @@ class SimTsc:
         return [{"LineID": i, "LineName": n} for i, n in LINES]
 
     def open_parts(self, line_id: int, limit: int = 300) -> list[dict]:
+        return self._timed("queue view", lambda: self._open_parts(line_id, limit))
+
+    def _open_parts(self, line_id: int, limit: int) -> list[dict]:
         rows = [r for r in self._w()["rows"] if r["LineID"] == line_id and r["Status"] in (2, 3, 4)]
         return sorted(rows, key=lambda r: r["QueueIndex"])[:limit]
 
     def done_parts(self, line_id: int, since: datetime, limit: int = 3000) -> list[dict]:
+        return self._timed("done parts", lambda: self._done_parts(line_id, since, limit))
+
+    def _done_parts(self, line_id: int, since: datetime, limit: int) -> list[dict]:
         rows = [r for r in self._w()["rows"] if r["LineID"] == line_id and r["Status"] == 5 and r["EndTime"] >= since]
         return sorted(rows, key=lambda r: r["EndTime"], reverse=True)[:limit]
 
@@ -267,6 +286,20 @@ class SimTsc:
                 "ScrapPieces": round(sum(r["ActualQuantity"] for r in done if r["IsScrap"]) * k),
                 "RunSeconds": sum((r["EndTime"] - r["StartTime"]).total_seconds() for r in done) * k,
                 "FirstEnd": min((r["EndTime"] for r in done), default=None)}
+
+    def totals_windows(self, line_id: int, sinces: dict) -> dict:
+        return self._timed("totals", lambda: {n: self.totals(line_id, since) for n, since in sinces.items()})
+
+    def strokes_windows(self, line_id: int, sinces: dict) -> list[dict]:
+        return self._timed("strokes", lambda: self._strokes_windows(line_id, sinces))
+
+    def _strokes_windows(self, line_id: int, sinces: dict) -> list[dict]:
+        out: dict = {}
+        for n, since in sinces.items():
+            for r in self.strokes(line_id, since):
+                out.setdefault((r["StationID"], r["ToolType"]), {"StationID": r["StationID"], "ToolType": r["ToolType"],
+                                                                 **{k: 0 for k in sinces}})[n] = r["Strokes"]
+        return list(out.values())
 
     def strokes(self, line_id: int, since: datetime) -> list[dict]:
         w = self._w()

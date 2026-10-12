@@ -11,6 +11,23 @@ const state = { scans: [], scan: null, findingsByTarget: {}, devSort: { key: "ip
 // X-Ghostmap marks requests as coming from this page; the server rejects state changes without it.
 // opts.timeout (ms, default 120 s): give up on a request that hangs, so pages show "no data" instead of
 // old values when the server or the network stops answering.
+// The dot next to the name: green while the Ghost Map service answers, red when a request couldn't reach it.
+function setLive(ok) {
+  document.body.classList.toggle("offline", !ok);
+  const d = document.getElementById("liveDot");
+  if (d) d.title = ok ? "Connected to the Ghost Map service" : "Can't reach the Ghost Map service";
+}
+
+// A ring gauge: pct 0-100 (clipped), the text in the middle, and a state class (ok, warn, err, soon, overdue).
+function ring(pct, label, cls = "", size = 44, stroke = 5, sub = "") {
+  const r = (size - stroke) / 2, c = 2 * Math.PI * r, p = Math.max(0, Math.min(100, Number(pct) || 0));
+  return `<span class="ring ${cls}" style="width:${size}px;height:${size}px"><svg width="${size}" height="${size}" aria-hidden="true">
+    <circle class="track" cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke-width="${stroke}"></circle>
+    <circle class="val" cx="${size / 2}" cy="${size / 2}" r="${r}" fill="none" stroke-width="${stroke}" stroke-linecap="round"
+      stroke-dasharray="${c}" stroke-dashoffset="${c * (1 - p / 100)}"></circle></svg>
+    <span class="lbl"><span>${label}${sub ? `<small>${sub}</small>` : ""}</span></span></span>`;
+}
+
 async function api(path, opts = {}) {
   const { timeout = 120000, ...rest } = opts;
   const ctl = new AbortController();
@@ -19,10 +36,12 @@ async function api(path, opts = {}) {
   try {
     res = await fetch(path, { headers: { "Content-Type": "application/json", "X-Ghostmap": "1" }, signal: ctl.signal, ...rest });
   } catch (e) {
+    setLive(false);
     throw new Error(e.name === "AbortError" ? `no answer from Ghost Map after ${Math.round(timeout / 1000)} s` : `can't reach Ghost Map (${e.message})`);
   } finally {
     clearTimeout(timer);
   }
+  setLive(true);
   if (res.status === 401) { location.href = "login"; throw new Error("login required"); }
   if (!res.ok) {
     let msg = res.statusText;
@@ -65,7 +84,7 @@ document.querySelectorAll("#tabs button").forEach((b) =>
   b.addEventListener("click", () => showTab(b.dataset.tab)));
 document.querySelectorAll("#groups button").forEach((b) =>
   b.addEventListener("click", () => showGroup(b.dataset.group)));
-const SCANLESS_TABS = ["opcua", "machine", "production", "tscconn", "service", "counters"];  // tabs that work without any scan loaded
+const SCANLESS_TABS = ["opcua", "machine", "production", "tscconn", "service", "counters", "probe"];  // tabs that work without any scan loaded
 const isViewer = () => document.body.classList.contains("viewer");
 const tabGroup = (name) => document.querySelector(`#tabs button[data-tab="${name}"]`)?.closest(".tabgroup")?.dataset.group;
 function showGroup(group) {
@@ -223,7 +242,7 @@ function renderDeviceDetail() {
     ${fs.length ? `<h3 style="margin-top:14px">Findings</h3>${fs.map(findingHtml).join("")}` : ""}
     ${d.ip ? `<p><button class="btn admin-only" id="detailProbe">Probe now</button> ${i ? `<a class="btn ghost" href="http://${esc(d.ip)}/" target="_blank" rel="noopener">Web page</a>` : ""}</p>` : ""}`;
   const pb = $("#detailProbe");
-  if (pb) pb.addEventListener("click", () => { $("#probeIp").value = d.ip; showTab("probe"); runProbe(); });
+  if (pb) pb.addEventListener("click", () => { $("#probeIp").value = d.ip; showTab("probe"); runProbe(); });  // probe.js
 }
 
 // ------------------------------------------------------------------ switches
@@ -315,30 +334,6 @@ $("#cmpRun").addEventListener("click", async () => {
     out.textContent = `Error: ${e.message}`;
   }
 });
-
-// ------------------------------------------------------------------ probe
-async function runProbe() {
-  const ip = $("#probeIp").value.trim();
-  const out = $("#probeOut");
-  if (!ip) return;
-  out.innerHTML = `<p class="muted">Probing ${esc(ip)}...</p>`;
-  try {
-    const r = await api(`api/probe/${encodeURIComponent(ip)}`);
-    const tcp = Object.entries(r.tcp).map(([p, ok]) => `<span class="chip" style="${ok ? "border-color:var(--ok)" : ""}">${esc(p)} ${ok ? "open" : "-"}</span>`).join("");
-    const i = r.identity;
-    out.innerHTML = `<p>TCP: ${tcp}</p>` + (i ? `<div class="detail"><dl>
-      <dt>Vendor</dt><dd>${esc(i.vendor_name)} (${i.vendor_id})</dd><dt>Type</dt><dd>${esc(i.device_type_name)}</dd>
-      <dt>Product</dt><dd>${esc(i.product_name)} (code ${i.product_code})</dd><dt>Firmware</dt><dd class="mono">${esc(i.revision)}</dd>
-      <dt>Serial</dt><dd class="mono">${esc(i.serial_hex)}</dd><dt>State</dt><dd>${esc(i.state_name)}</dd>
-      <dt>Status</dt><dd>${esc(i.extended_status)} &middot; ${esc(i.status_flags.join(", ") || "no flags")}</dd>
-      <dt>Reported IP</dt><dd class="mono">${esc(i.socket_ip)}</dd></dl></div>`
-      : `<p class="muted">No EtherNet/IP ListIdentity reply - not a CIP device, filtered by a firewall, or wrong subnet.</p>`);
-  } catch (e) {
-    out.textContent = `Error: ${e.message}`;
-  }
-}
-$("#probeBtn").addEventListener("click", runProbe);
-$("#probeIp").addEventListener("keydown", (e) => { if (e.key === "Enter") runProbe(); });
 
 // ------------------------------------------------------------------ new scan
 const dlg = $("#scanDialog");

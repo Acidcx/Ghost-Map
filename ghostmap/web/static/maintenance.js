@@ -4,7 +4,9 @@
 // Uses $, esc and api from app.js, and pNum, fmtHm and prodLoadLines' line list from production.js.
 
 const MAINT_POLL_MS = 60000;
-const maint = { data: null, error: null, timer: null, lines: null, dashboards: null, counters: {}, ctLine: null, editing: null, open: new Set() };
+const maint = { data: null, error: null, timer: null, lines: null, dashboards: null, counters: {}, ctLine: null, editing: null, open: new Set(),
+  ctTimer: null, ctTries: 0 };
+const CT_RETRY_MS = [5000, 10000, 20000, 40000, 60000];
 const fmtDate = (t) => (t ? new Date(t * 1000).toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" }) : "-");
 const STATE_WORD = { overdue: ["errchip", "overdue"], soon: ["warnchip", "due soon"], ok: ["okchip", "ok"] };
 const STATE_ORDER = { overdue: 0, soon: 1, ok: 2 };
@@ -65,10 +67,11 @@ function svRender() {
       : "Ask an admin to add the jobs that have a service interval."}</p></div>`;
     return;
   }
-  const tiles = `<div class="tiles">
-    <div class="tile ${count("overdue") ? "err" : ""}"><div class="n">${count("overdue")}</div><div class="l">Overdue</div></div>
-    <div class="tile ${count("soon") ? "warn" : ""}"><div class="n">${count("soon")}</div><div class="l">Due soon</div></div>
-    <div class="tile ok"><div class="n">${count("ok")}</div><div class="l">OK</div></div></div>`;
+  const n = maint.data.items.length, healthy = Math.round((count("ok") / n) * 100);
+  const tile = (st, cls, label) => `<div class="tile ringtile ${count(st) ? cls : ""}">${ring((count(st) / n) * 100, count(st), count(st) ? cls : "", 54, 6)}
+    <div><div class="l">${label}</div><div class="small muted">of ${n} items</div></div></div>`;
+  const tiles = `<div class="tiles">${tile("overdue", "err", "Overdue")}${tile("soon", "warn", "Due soon")}
+    <div class="tile ringtile ok">${ring(healthy, `${healthy}%`, "ok", 54, 6)}<div><div class="l">On schedule</div><div class="small muted">${count("ok")} of ${n} items</div></div></div></div>`;
   const rows = items.map((it) => {
     const [chip, word] = STATE_WORD[it.state] || ["", "can't read"];
     const pct = Math.min(it.pct ?? 0, 100);
@@ -83,7 +86,7 @@ function svRender() {
       `<tr><td>${esc(fmtDate(l.at))} ${esc(fmtHm(l.at))}</td><td>${esc(l.by || "-")}</td><td>${l.reading != null ? `${pNum(l.reading)}${esc(unit)}` : "-"}</td><td>${esc(l.note || "")}</td></tr>`).join("")}</tbody></table>`
       : `<p class="small muted">Not marked done in Ghost Map yet.</p>`}${it.notes ? `<p class="small">${esc(it.notes)}</p>` : ""}</div>` : "";
     return `<div class="svitem ${esc(it.state || "unknown")}">
-      <div class="svhead"><div><b>${esc(it.name)}</b> <span class="chip ${chip}">${esc(word)}</span>
+      <div class="svhead">${ring(it.pct ?? 0, it.pct == null ? "?" : `${Math.round(it.pct)}%`, it.state || "", 46, 5)}<div><b>${esc(it.name)}</b> <span class="chip ${chip}">${esc(word)}</span>
         <div class="small muted">${esc(it.kind_label)}${svWhere(it) ? ` &middot; ${esc(svWhere(it))}` : ""} &middot; every ${pNum(it.interval)}${esc(unit)}</div></div>
         <span class="grow"></span>
         <button class="btn ghost small" data-svlog="${esc(it.id)}">${open ? "Hide" : "History"}</button>
@@ -227,29 +230,59 @@ async function ctFetch(line) {
 }
 
 async function ctPoll() {
+  clearTimeout(maint.ctTimer);
   if ($("#tab-counters").classList.contains("hidden")) return;
   const lines = await maintLines();
   $("#ctLine").innerHTML = lines.map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join("");
   if (!lines.some((l) => l.id === maint.ctLine)) maint.ctLine = lines[0]?.id ?? null;
   if (maint.ctLine != null) $("#ctLine").value = maint.ctLine;
   $("#ctLine").closest("label").classList.toggle("hidden", !lines.length);
-  $("#ctBody").innerHTML = `<div class="panel"><p class="muted small">Adding up the counters...</p></div>`;
+  // A first read of a big TSC database can take a while: count the seconds so it doesn't look stuck.
+  const t0 = Date.now();
+  const tick = () => {
+    const el = $("#ctWait");
+    if (!el) return;
+    el.textContent = `${Math.round((Date.now() - t0) / 1000)} s`;
+    maint.ctTimer = setTimeout(tick, 1000);
+  };
+  if (!$("#ctBody").querySelector(".odos")) {
+    $("#ctBody").innerHTML = `<div class="panel probescan"><div class="scanline"></div><p class="muted small">Adding up the counters... <span id="ctWait" class="mono"></span></p>
+      <p class="small muted">The first read of a big TSC database can take a minute; after that the page shows the last answer at once and refreshes it in the background.</p></div>`;
+    tick();
+  }
   try {
-    ctRender(await ctFetch(maint.ctLine));
-  } catch (e) { $("#ctBody").innerHTML = `<div class="panel"><p class="errtext small">${esc(e.message)}</p></div>`; }
+    const c = await ctFetch(maint.ctLine);
+    clearTimeout(maint.ctTimer);
+    maint.ctTries = 0;
+    ctRender(c);
+    // A stale answer is being refreshed on the server: look again shortly for the new one.
+    if (c.tsc && c.tsc.stale) { delete maint.counters[maint.ctLine == null ? "-" : String(maint.ctLine)]; maint.ctTimer = setTimeout(ctPoll, 15000); }
+  } catch (e) {
+    clearTimeout(maint.ctTimer);
+    const wait = CT_RETRY_MS[Math.min(maint.ctTries++, CT_RETRY_MS.length - 1)];
+    $("#ctBody").innerHTML = `<div class="panel"><p class="errtext small">${esc(e.message)}</p>
+      <p class="small muted">Trying again in ${Math.round(wait / 1000)} s. <button class="btn ghost small" id="ctRetry" type="button">Try now</button></p></div>`;
+    $("#ctRetry").addEventListener("click", ctPoll);
+    maint.ctTimer = setTimeout(ctPoll, wait);
+  }
 }
-document.addEventListener("gm:tab", (e) => { if (e.detail === "counters") ctPoll(); });
-$("#ctLine").addEventListener("change", (e) => { maint.ctLine = Number(e.target.value); ctPoll(); });
+document.addEventListener("gm:tab", (e) => { if (e.detail === "counters") ctPoll(); else clearTimeout(maint.ctTimer); });
+$("#ctLine").addEventListener("change", (e) => { maint.ctLine = Number(e.target.value); $("#ctBody").innerHTML = ""; ctPoll(); });
 
 function ctRender(c) {
   const t = c.tsc;
   let html = "";
   $("#ctNote").innerHTML = t && t.ok && t.source === "demo"
     ? `<p class="small muted">Simulated TSC line (server set to <b>demo</b>): longer periods are extrapolated from the last 14 hours.</p>` : "";
-  $("#ctLive").textContent = t && t.ok ? `Added up ${fmtHm(t.at)}` : "";
+  $("#ctLive").innerHTML = t && t.ok ? `Added up ${esc(fmtHm(t.at))}${t.stale ? ` <span class="chip pulse">refreshing</span>` : ""}` : "";
   if (!t) html += `<div class="panel"><h3>Production counters</h3><p class="small muted">No TSC connection: set one up under Production &gt; Connection for feet, pieces and punch strokes.</p></div>`;
   else if (!t.ok) html += `<div class="panel"><h3>Production counters</h3><p class="errtext small">Can't read the TSC database: ${esc(t.error)}</p></div>`;
   else {
+    const strokesAll = (t.strokes || []).reduce((a, s) => a + (s.all || 0), 0);
+    const runAll = c.machines.reduce((a, m) => a + (m.run_h || 0), 0);
+    html += `<div class="odos">${odo("Feet made, all time", t.periods.all.feet)}${odo("Pieces (shear cuts)", t.periods.all.pieces)}
+      ${t.strokes_ok ? odo("Punch strokes", strokesAll) : ""}${odo("Production hours", t.periods.all.prod_hours, 1)}
+      ${c.machines.length ? odo("PLC run hours", runAll, 1) : ""}</div>`;
     const P = t.periods, cols = [["24h", "Last 24 h"], ["7d", "Last 7 days"], ["30d", "Last 30 days"], ["all", "All time"]];
     const row = (label, k, dp = 0) => `<tr><td>${esc(label)}</td>${cols.map(([c2]) => `<td>${pNum(P[c2][k], dp)}</td>`).join("")}</tr>`;
     html += `<div class="panel"><h3>Production counters (from TSC)</h3><div class="tablewrap"><table class="ptable ctable"><thead><tr><th></th>
@@ -280,4 +313,11 @@ function ctRender(c) {
       so these trail the machine's own hour meter.</p>`
     : `<p class="small muted">No machine dashboards yet. Build one under Machine &gt; Tags and Ghost Map starts counting its run hours.</p>`}</div>`;
   $("#ctBody").innerHTML = html;
+}
+
+// A mechanical-counter look for the all-time totals: one box per digit.
+function odo(label, v, dp = 0) {
+  const txt = Number(v || 0).toLocaleString(undefined, { minimumFractionDigits: dp, maximumFractionDigits: dp });
+  return `<div class="odo"><div class="l">${esc(label)}</div><div class="digits${txt.length > 9 ? " long" : ""}" aria-label="${esc(txt)}">${[...txt].map((ch) =>
+    /\d/.test(ch) ? `<span>${ch}</span>` : `<span class="sep">${esc(ch)}</span>`).join("")}</div></div>`;
 }

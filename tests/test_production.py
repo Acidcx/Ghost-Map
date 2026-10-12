@@ -408,6 +408,13 @@ def test_real_sql_server_read_only_login(tmp_path):
                 k = (h["StationID"], h["ToolType"])
                 sim_strokes[k] = sim_strokes.get(k, 0) + done_ids[h["PartID"]]["ActualQuantity"]
         assert {(x["StationID"], x["ToolType"]): x["Strokes"] for x in src.strokes(1, since)} == sim_strokes
+        # One pass for several windows gives the same sums as one query per window, on one connection.
+        with src.session(heavy=True):
+            wins = src.totals_windows(1, {"12h": since, "all": datetime(1901, 1, 2)})
+            sw = src.strokes_windows(1, {"12h": since, "all": datetime(1901, 1, 2)})
+        assert wins["12h"]["Pieces"] == t["Pieces"] and wins["all"]["Parts"] == sum(r["Status"] == 5 and r["LineID"] == 1 for r in rows)
+        assert {(x["StationID"], x["ToolType"]): x["12h"] for x in sw} == sim_strokes
+        assert {name for name, _ in src.timings} >= {"totals", "strokes"}
         svc = TscService(tmp_path)
         svc.cfg = cfg
         asyncio.run(svc.production(2))

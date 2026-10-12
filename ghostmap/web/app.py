@@ -137,6 +137,11 @@ class TscConfigIn(BaseModel):
     cache_s: int = Field(30, ge=5, le=3600)
 
 
+class InspectIn(BaseModel):
+    ip: str = Field(..., max_length=64)
+    community: str = Field("", max_length=128)  # optional SNMP v2c community; used once, never stored or logged
+
+
 class MaintItemIn(BaseModel):
     name: str = Field(..., max_length=120)
     kind: str = Field(..., max_length=20)
@@ -1194,6 +1199,64 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
             "identity": to_dict(ident.identity) if ident else None,
             "tcp": dict(zip(map(str, port_list), open_)),
         }
+
+    # ------------------------------------------------------------- device inspector (the Probe page)
+    from ghostmap.analysis.inspect import context as inspect_context, verdict as inspect_verdict
+    from ghostmap.collectors import inspect as inspector
+
+    def check_ip(ip: str) -> str:
+        try:
+            discovery.expand_targets([ip], max_hosts=1)
+        except ValueError:
+            raise HTTPException(400, "bad ip")
+        return ip.strip()
+
+    def recent_scans(n: int = 20) -> list:
+        out = []
+        for meta in store.list()[:n]:
+            try:
+                out.append(store.load(meta["id"]))
+            except (KeyError, OSError, ValueError):
+                continue
+        return out
+
+    def simulated_target(ctx: dict) -> bool:
+        """In the demo, addresses of the simulated machine answer from the simulator (nothing is sent)."""
+        return demo and ctx.get("scan") is not None and str(ctx["scan"]["id"]).startswith("demo")
+
+    @app.post("/api/inspect")
+    async def inspect_device(body: InspectIn, request: Request):
+        """A close look at one device: ports, latency, CIP identity and services, where it is plugged in, what
+        changed since earlier scans, and a verdict. Read-only (see collectors/inspect.py)."""
+        ip = check_ip(body.ip)
+        audit.write(client_of(request), who(request), "inspect", ip)
+        ctx = await asyncio.to_thread(inspect_context, ip, recent_scans())
+        if simulated_target(ctx):
+            r = inspector.simulated(ip, ctx["device"], ctx["port"])
+        else:
+            creds = SnmpCredentials(community=body.community) if body.community else None
+            kwargs = {"snmp_factory": snmp_factory} if snmp_factory else {}
+            r = await inspector.inspect(ip, creds, **kwargs)
+        return {**r, "context": ctx, "checks": inspect_verdict(r, ctx)}
+
+    ping_last: dict[str, float] = {}
+
+    @app.get("/api/probe/{ip}/ping")
+    async def probe_ping(ip: str, request: Request, port: int = 44818):
+        """One TCP connect, timed (the live latency trace on the Probe page). At most four a second per browser."""
+        ip = check_ip(ip)
+        if not 1 <= port <= 65535:
+            raise HTTPException(400, "bad port")
+        key = client_of(request)
+        now = time.monotonic()
+        if now - ping_last.get(key, 0) < 0.25:
+            raise HTTPException(429, "too fast")
+        ping_last[key] = now
+        if demo:
+            ctx = inspect_context(ip, recent_scans(2))
+            if simulated_target(ctx):
+                return {"ip": ip, "port": port, "ms": inspector.simulated_rtt(ip, ctx["port"]), "at": time.time()}
+        return {"ip": ip, "port": port, "ms": await inspector.tcp_rtt(ip, port), "at": time.time()}
 
     return app
 

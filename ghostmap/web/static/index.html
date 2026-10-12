@@ -9,7 +9,8 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><span class="logo">&#9672;</span> Ghost Map <span class="ver" id="ver"></span></div>
+    <div class="brand"><span class="logo">&#9672;</span> <span class="name">Ghost Map</span> <span class="ver" id="ver"></span>
+      <span class="livedot" id="liveDot" title="Connected to the Ghost Map service"></span></div>
     <div class="scanpick">
       <span id="scanpickScan" class="scanpick">
         <label for="scanSelect">Scan</label>
@@ -221,13 +222,18 @@
 
     <section id="tab-probe" class="tab hidden">
       <div class="panel">
-        <div class="toolbar">
-          <input id="probeIp" placeholder="Device IP, e.g. 192.168.1.10">
-          <button class="btn primary" id="probeBtn">Probe</button>
-        </div>
-        <p class="muted">Sends a single ListIdentity and checks common TCP ports (44818 EtherNet/IP, 80/443 web, 502 Modbus, 102 S7, 22/23).</p>
-        <div id="probeOut"></div>
+        <form class="toolbar" id="probeForm" autocomplete="off">
+          <input id="probeIp" list="probeIps" placeholder="Device IP, e.g. 192.168.1.10" required>
+          <datalist id="probeIps"></datalist>
+          <input id="probeCommunity" type="password" placeholder="SNMP community (optional)" autocomplete="off" title="Used once for this inspection; never saved">
+          <button class="btn primary" id="probeBtn" type="submit">Inspect</button>
+          <button class="btn" id="probeLive" type="button" title="Time one TCP connect a second and draw it live">Live trace</button>
+        </form>
+        <p class="small muted">Read-only: TCP connects (opened and closed, nothing sent) to common industrial and IT ports, ten timed connects for latency,
+          one EtherNet/IP ListIdentity and ListServices, and SNMP system info if you give a community. Where it is plugged in and what changed
+          come from the saved scans.</p>
       </div>
+      <div id="probeOut"></div>
     </section>
     <section id="tab-opcua" class="tab hidden">
       <div class="panel">
@@ -466,5 +472,6 @@
   <script src="static/machine.js"></script>
   <script src="static/production.js"></script>
   <script src="static/maintenance.js"></script>
+  <script src="static/probe.js"></script>
 </body>
 </html>
