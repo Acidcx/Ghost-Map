@@ -46,6 +46,7 @@
       <button data-tab="service">Service</button>
       <button data-tab="counters">Counters</button></span>
     <span class="tabgroup" data-group="network">
+      <button data-tab="live">Live <span class="livedot sm" aria-hidden="true"></span></button>
       <button data-tab="overview" class="active">Overview</button>
       <button data-tab="devices">Devices</button>
       <button data-tab="switches">Switches</button>
@@ -183,6 +184,7 @@
     </section>
 
     <section id="tab-overview" class="tab">
+      <div id="liveStrip"></div>
       <div class="tiles" id="tiles"></div>
       <div class="panel">
         <h2>Findings</h2>
@@ -217,6 +219,23 @@
           <button class="btn primary" id="cmpRun">Compare</button>
         </div>
         <div id="cmpOut" class="muted">Pick two scans, e.g. the as-commissioned scan and today's.</div>
+      </div>
+    </section>
+
+    <section id="tab-live" class="tab hidden">
+      <div class="panel livehead">
+        <div class="uahead"><h2>Live network <span class="livedot" id="liveBeat"></span></h2><span class="small muted" id="liveMeta"></span></div>
+        <p class="small muted">Listening only: nothing is sent. Ghost Map reads this PC's ARP table and listens for BOOTP/DHCP requests,
+          switch syslog and SNMP traps. Switches send syslog and traps only when they are set to log to this PC. Scans stay on the other tabs.</p>
+        <div class="listeners" id="liveListeners"></div>
+      </div>
+      <div class="tiles" id="liveTiles"></div>
+      <div class="livegrid">
+        <div class="panel"><div class="uahead"><h3>Events</h3>
+          <label class="small"><input type="checkbox" id="liveProblems"> problems only</label></div><div id="liveFeed" class="feed"></div></div>
+        <div class="panel"><div class="uahead"><h3>Devices heard</h3><span class="small muted" id="liveDevCount"></span></div>
+          <div class="tablewrap"><table class="ptable livedev"><thead><tr><th></th><th>IP</th><th>Device</th><th>Heard by</th><th>Last</th></tr></thead>
+          <tbody id="liveDevices"></tbody></table></div></div>
       </div>
     </section>
 
@@ -473,5 +492,6 @@
   <script src="static/production.js"></script>
   <script src="static/maintenance.js"></script>
   <script src="static/probe.js"></script>
+  <script src="static/live.js"></script>
 </body>
 </html>

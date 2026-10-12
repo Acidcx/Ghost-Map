@@ -45,3 +45,7 @@ Everything a user sets up lives in the data folder and survives an upgrade. `his
 ## Device inspector (Probe)
 
 `collectors/inspect.py` does the network part of Probe for one IP (TCP connects to a fixed port list, timed connects, ListIdentity, ListServices from `protocols/enip.py`, optional SNMP system scalars) and has a `simulated()` twin for the demo machine. `analysis/inspect.py` is pure: `context()` finds the device in the saved scans (switch port, findings, what each scan saw at that address) and `verdict()` turns an inspection plus its context into `inspect.*` checks, each with a hint. `POST /api/inspect` joins them; `GET /api/probe/{ip}/ping` is the live trace's single timed connect.
+
+## Passive listeners (Network > Live)
+
+`protocols/passive.py` decodes BOOTP/DHCP, syslog and SNMP v1/v2c traps (and encodes them for the simulator and tests). `analysis/passive.py` turns what was heard into `passive.*` events with hints. `collectors/passive.py` (`PassiveMonitor`) runs the UDP listeners and the ARP table poll in the web server, keeps the devices heard and the last 500 events in memory, and limits each sender to 60 events a minute. `sim/passive.py` feeds it made-up packets in the demo. `GET /api/live?since=` returns what is new; `POST /api/live/listeners/{name}` switches one on or off (saved in `live.json`).

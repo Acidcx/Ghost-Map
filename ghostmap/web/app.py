@@ -35,6 +35,8 @@ from ghostmap.scanner import ScanRequest, run_scan
 from ghostmap.store import ScanStore, inventory_csv
 from ghostmap.web.auth import AuditLog, Lockout, Sessions, UserStore, client_allowed
 from ghostmap.history import RETENTION_DAYS, History
+from ghostmap.collectors.passive import PassiveMonitor
+from ghostmap.protocols.oui import mac_vendor
 from ghostmap.web.collector import Collector
 from ghostmap.web.dashboards import DashboardStore, LiveValues, visible_node_ids
 from ghostmap.web.maintenance import KINDS as MAINT_KINDS, METER_OF, MaintenanceStore, view as maint_view
@@ -137,6 +139,10 @@ class TscConfigIn(BaseModel):
     cache_s: int = Field(30, ge=5, le=3600)
 
 
+class LiveListenerIn(BaseModel):
+    enabled: bool
+
+
 class InspectIn(BaseModel):
     ip: str = Field(..., max_length=64)
     community: str = Field("", max_length=128)  # optional SNMP v2c community; used once, never stored or logged
@@ -222,8 +228,11 @@ def _needs_admin(request: Request) -> bool:
 
 def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=None,
                allow: Optional[list] = None, demo_opcua: Optional[bool] = None,
-               demo_opcua_port: int = DEMO_UA_PORT, collect: bool = True) -> FastAPI:
+               demo_opcua_port: int = DEMO_UA_PORT, collect: bool = True, listen: bool = False) -> FastAPI:
     """``allow``: client networks besides loopback that may connect. ``None`` disables the check (tests).
+
+    ``listen``: run the passive listeners (``collectors/passive.py``) for Network > Live. In the demo they are
+    simulated and open no socket.
 
     ``collect``: read every dashboard in the background and record alarm history (``ghostmap/history.py``).
 
@@ -265,7 +274,10 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
             await start_demo_ua()
         if collect:
             collector.start()
+        if listen:
+            await passive.start()
         yield
+        await passive.stop()
         await collector.stop()
         for b, *_ in list(ua_sessions.values()):
             if b is not None:
@@ -292,9 +304,34 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     collector = Collector(dashboards, live, history)
     tsc = TscService(store.root, demo=demo)
     maint = MaintenanceStore(store.root)
+    known_cache: dict = {}
+
+    def known_devices() -> tuple[dict, dict, dict]:
+        """MAC -> label, MAC -> IP and IP -> name from the newest scan, for the passive listeners' events."""
+        metas = store.list()
+        sid = metas[0]["id"] if metas else None
+        if known_cache.get("id") != sid:
+            labels, ips, names = {}, {}, {}
+            try:
+                scan = store.load(sid) if sid else None
+            except (KeyError, OSError, ValueError):
+                scan = None
+            for d in scan.devices if scan else []:
+                if d.mac:
+                    name = d.identity.product_name if d.identity else mac_vendor(d.mac) or "Device"
+                    labels[d.mac] = name + (f" ({d.ip})" if d.ip else "")
+                    ips[d.mac] = d.ip or ""
+                if d.ip:
+                    names[d.ip] = d.identity.product_name if d.identity else d.ip
+            for sw in scan.switches if scan else []:
+                names[sw.ip] = sw.sys_name or sw.ip
+            known_cache.update(id=sid, labels=labels, ips=ips, names=names)
+        return known_cache["labels"], known_cache["ips"], known_cache["names"]
+
+    passive = PassiveMonitor(store.root, known_devices, simulate=demo)
     tasks: set[asyncio.Task] = set()
     app.state.demo_ua, app.state.live, app.state.ua_sessions = demo_ua, live, ua_sessions  # for tests
-    app.state.history, app.state.collector, app.state.tsc = history, collector, tsc
+    app.state.history, app.state.collector, app.state.tsc, app.state.passive = history, collector, tsc, passive
 
     def client_of(request: Request) -> str:
         return request.client.host if request.client else ""
@@ -1238,6 +1275,21 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
             kwargs = {"snmp_factory": snmp_factory} if snmp_factory else {}
             r = await inspector.inspect(ip, creds, **kwargs)
         return {**r, "context": ctx, "checks": inspect_verdict(r, ctx)}
+
+    # ------------------------------------------------------------- passive listeners (Network > Live)
+    @app.get("/api/live")
+    async def live_view(since: int = 0):
+        """What the passive listeners have heard: their state, the devices heard, and events newer than ``since``."""
+        return {**passive.snapshot(since), "listen": listen}
+
+    @app.post("/api/live/listeners/{name}")
+    async def live_listener(name: str, body: LiveListenerIn, request: Request):
+        try:
+            await passive.set_enabled(name, body.enabled)
+        except KeyError:
+            raise HTTPException(404, "no such listener")
+        audit.write(client_of(request), who(request), "listener", f"{name} {'on' if body.enabled else 'off'}")
+        return passive.snapshot(passive.seq)
 
     ping_last: dict[str, float] = {}
 

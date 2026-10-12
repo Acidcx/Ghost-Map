@@ -114,7 +114,8 @@ ghostmap discover 127.0.10.0/24
   - **Service**: service items with an interval (strokes, pieces, feet, hours or days), due-soon warnings and a log of the work done.
   - **Counters**: all-time totals as odometers, then feet, pieces, production hours and punch strokes per tool from TSC, and run hours per machine from the PLC. A big TSC database can take a while the first time; after that the last answer is shown at once and refreshed in the background, and the Connection page lists the slowest tables.
 - **Network** (TCP/IP: EtherNet/IP and SNMP scans)
-  - **Overview**: counts and all findings, with a hint for each.
+  - **Live**: what Ghost Map hears without sending anything, refreshed every 2 s. This PC's ARP table (new devices, devices not in the last scan, an IP that suddenly answers from another MAC), modules asking for an IP over BOOTP/DHCP (a reset or replaced module, never answered), and the syslog and SNMP traps switches send when they are set to log to this PC (ports down/up, err-disabled ports, loops, duplex mismatches, restarts). Each event has a hint, each listener shows whether it is listening, and an admin can switch each one off. `ghostmap web --no-listen` turns them all off. In the demo the traffic is simulated.
+  - **Overview**: counts and all findings, with a hint for each, and a one-line summary of what Live heard in the last hour.
   - **Devices**: a sortable, filterable inventory. Click a device for its full CIP identity, decoded status word, related findings, and a one-click probe.
   - **Switches**: a port faceplate coloured by health, a port table, and per-port detail (counters, neighbours, MACs mapped to devices).
   - **Compare**: the diff of any two scans.

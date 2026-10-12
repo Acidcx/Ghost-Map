@@ -57,6 +57,7 @@ Then the service:
 
 ## Phase 3: passive detection
 
+- [x] Listen-only start without packet capture (Network > Live): this PC's ARP table (new devices, an IP that changes MAC), BOOTP/DHCP requests (UDP 67, never answered), switch syslog (UDP 514) and SNMP traps (UDP 162)
 - [ ] Capture with pktmon (built into Windows), with filters for ARP, LLDP/CDP, DHCP/BOOTP, ListIdentity and name broadcasts
 - [ ] Live device list from passive traffic: new, missing and changed devices without sending anything
 - [ ] IP conflict and duplicate-MAC detection from ARP
