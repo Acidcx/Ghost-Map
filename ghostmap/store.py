@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,17 @@ _ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def default_data_dir() -> Path:
-    return Path(os.environ.get("GHOSTMAP_DATA", Path.home() / ".ghostmap"))
+    """$GHOSTMAP_DATA; else, on a PC where Ghost Map is installed as a service, its folder in ProgramData (for
+    the administrators who can open it); else ~/.ghostmap."""
+    if os.environ.get("GHOSTMAP_DATA"):
+        return Path(os.environ["GHOSTMAP_DATA"])
+    if sys.platform == "win32":
+        from ghostmap.winservice import installed_data_dir
+
+        shared = installed_data_dir()
+        if shared is not None:
+            return shared
+    return Path.home() / ".ghostmap"
 
 
 class ScanStore:

@@ -12,6 +12,7 @@ ghostmap/
   history.py   alarm history with first-out (SQLite), fed by web/collector.py
   secret.py    saved passwords sealed with Windows DPAPI (a local key file elsewhere)
   ua_trust.py  OPC UA server certificates pinned per gateway address (opcua-trust.json)
+  winservice.py  Windows service: install/upgrade with sc.exe, data in ProgramData, the service process (ctypes)
   web/         FastAPI app + static single-page UI (no external assets); tsc.py = TSC settings and cache;
                maintenance.py = service items
   sim/         simulated machine cell, ListIdentity responder, OPC UA gateway, TSC schedule, demo data

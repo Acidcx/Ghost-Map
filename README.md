@@ -23,6 +23,16 @@ There are three ways to run Ghost Map. Each one opens the web UI in your browser
    - If Windows Firewall asks, allow it on **Private** networks.
 3. A console window opens and your browser shows Ghost Map. **Closing the console window stops Ghost Map.**
 
+### On the machine's HMI: as a Windows service
+
+So Ghost Map runs from boot, records history whether or not anyone is logged on, and comes back by itself after a crash, install it as a service. From a Command Prompt opened with **Run as administrator**, in the folder with the downloaded exe:
+
+```bat
+GhostMap.exe service install
+```
+
+This copies the exe to `C:\Program Files\GhostMap`, copies your existing `~/.ghostmap` (dashboards, history, settings, logins) to `C:\ProgramData\GhostMap` the first time, and limits that folder to SYSTEM and Administrators. It registers the service **Ghost Map** (LocalSystem, starts with Windows after a short delay, restarted 10 s, 30 s and 60 s after a failure) and starts it. Open `http://127.0.0.1:8470` as before; double-clicking `GhostMap.exe` just opens the browser while the service runs. To upgrade, run `service install` again from the new exe. `service status`, `service stop`, `service start` and `service uninstall` (keeps the data) do what they say. For IXON access add the same options as `web`, for example `GhostMap.exe service install --host 0.0.0.0 --allow 192.168.1.1` (create a login first: `GhostMap.exe --data-dir C:\ProgramData\GhostMap user add maint --role admin`). Once installed, command-line tools run as an administrator use `C:\ProgramData\GhostMap` too.
+
 ### Option 2: Start-GhostMap.bat (Windows, from the source code)
 
 Needs [Python 3.10+](https://www.python.org/downloads/). When installing Python, tick **Add python.exe to PATH**.
@@ -178,7 +188,7 @@ An item turns "due soon" at 90% of its interval (change it per item) and "overdu
 
 **Export everything** (Production > Connection) saves every machine dashboard (layout, flipped areas, hidden tags and the tag list behind it) and the TSC settings in one JSON file; **Export** on the Machine toolbar saves just the one dashboard. **Import...** adds the dashboards from such a file, optionally pointed at another gateway, and never overwrites one that's already there. Passwords and recorded history are never exported: enter the SQL password again after an import.
 
-Upgrading GhostMap.exe keeps everything in `~/.ghostmap` (dashboards, history, TSC settings, users). The version and build (commit) show next to the name in the top bar and in the debug bundle.
+Upgrading GhostMap.exe keeps everything in `~/.ghostmap`, or `C:\ProgramData\GhostMap` when it runs as a service (dashboards, history, TSC settings, users). The version and build (commit) show next to the name in the top bar and in the debug bundle.
 
 ### Logins and remote access (IXON)
 

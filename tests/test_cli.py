@@ -44,7 +44,7 @@ def test_web_refuses_network_exposure_without_allow_list_and_logins(tmp_path, mo
     from ghostmap.web import auth
 
     monkeypatch.setattr(auth, "PBKDF2_ITERATIONS", 1000)
-    monkeypatch.setattr(uvicorn, "run", lambda *a, **k: None)
+    monkeypatch.setattr(uvicorn.Server, "run", lambda *a, **k: None)
     d = str(tmp_path)
     base = ["--data-dir", d, "web", "--host", "0.0.0.0", "--port", "18471"]
     assert cli.main(base) == 2
