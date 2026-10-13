@@ -4,17 +4,18 @@
 ghostmap/
   protocols/   wire formats: EtherNet/IP ListIdentity, CIP tables, SNMP client + OIDs
   collectors/  talk to the network: discovery sweep, ARP cache, Stratix/IOS switch collector, OPC UA
-               client, TSC part schedule (SQL Server, read-only SELECTs)
+               client, TSC part schedule (SQL Server, read-only SELECTs); host.py = this PC's own health
   analysis/    pure functions: topology correlation, diagnostics rules, scan diff, dashboards, alarms,
-               production summary
+               production summary, alerts.py = the rules behind the alert list
   scanner.py   orchestrates a scan -> ScanResult
   store.py     JSON scan history + CSV export
   history.py   alarm history with first-out (SQLite), fed by web/collector.py
   secret.py    saved passwords sealed with Windows DPAPI (a local key file elsewhere)
   ua_trust.py  OPC UA server certificates pinned per gateway address (opcua-trust.json)
   winservice.py  Windows service: install/upgrade with sc.exe, data in ProgramData, the service process (ctypes)
+  winevent.py  alerts in the Windows Application event log (source GhostMap, ctypes ReportEventW)
   web/         FastAPI app + static single-page UI (no external assets); tsc.py = TSC settings and cache;
-               maintenance.py = service items
+               maintenance.py = service items; alerts.py = the alert list (AlertCenter)
   sim/         simulated machine cell, ListIdentity responder, OPC UA gateway, TSC schedule, demo data
   cli.py       argparse CLI
   models.py    dataclasses shared by everything (+ JSON (de)serialisation)
@@ -51,3 +52,8 @@ Everything a user sets up lives in the data folder and survives an upgrade. `his
 ## Passive listeners (Network > Live)
 
 `protocols/passive.py` decodes BOOTP/DHCP, syslog and SNMP v1/v2c traps (and encodes them for the simulator and tests). `analysis/passive.py` turns what was heard into `passive.*` events with hints. `collectors/passive.py` (`PassiveMonitor`) runs the UDP listeners and the ARP table poll in the web server, keeps the devices heard and the last 500 events in memory, and limits each sender to 60 events a minute. `sim/passive.py` feeds it made-up packets in the demo. `GET /api/live?since=` returns what is new; `POST /api/live/listeners/{name}` switches one on or off (saved in `live.json`).
+
+## Alerts and this PC's health
+
+`collectors/host.py` (`HostMonitor`) samples this PC's disk, memory, CPU and uptime every minute and, on Windows, its FactoryTalk and Rockwell services and event-log errors every 5 minutes (one PowerShell call of `Get-` commands; the demo has made-up ones). `analysis/alerts.py` holds the rules: pure functions that turn what each part of Ghost Map already knows (host snapshot, dashboard comms health and collector status, the open stop, the traffic monitor's open events and switch status, the passive listeners' events, service items, the TSC link) into alerts with a stable `key`, a dotted `code`, a `hint` and a `link` to the page with more. `web/alerts.py` (`AlertCenter`) runs them every 30 s, keeps each alert's start time while it lasts, and reports new, worse and cleared alerts to the log and through `winevent.py` to the Windows event log. A source that fails keeps its last alerts instead of clearing them. `GET /api/alerts` is the list; `GET /api/host` is Maintenance > This PC. To add an alert, add a rule to `analysis/alerts.py` and a source to the `AlertCenter` in `web/app.py`.
+

@@ -15,6 +15,7 @@ import asyncio
 import contextlib
 import logging
 import re
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -37,6 +38,9 @@ from ghostmap.ua_trust import CertificateChanged, CertTrust
 from ghostmap.web.auth import AuditLog, Lockout, Sessions, UserStore, client_allowed
 from ghostmap.history import RETENTION_DAYS, History
 from ghostmap.collectors.passive import PassiveMonitor
+from ghostmap.collectors.host import HostMonitor
+from ghostmap.analysis import alerts as alert_rules
+from ghostmap.web.alerts import AlertCenter
 from ghostmap.protocols.oui import mac_vendor
 from ghostmap.web.collector import Collector
 from ghostmap.web.dashboards import DashboardStore, LiveValues, visible_node_ids
@@ -298,10 +302,14 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         if collect:
             collector.start()
             netmon.start()
+            hostmon.start()
+            alerts.start()
         if listen:
             await passive.start()
         yield
         await passive.stop()
+        await alerts.stop()
+        await hostmon.stop()
         await collector.stop()
         await netmon.stop()
         for b, *_ in list(ua_sessions.values()):
@@ -366,10 +374,42 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         return known_cache["labels"], known_cache["ips"], known_cache["names"]
 
     passive = PassiveMonitor(store.root, known_devices, simulate=demo)
+    hostmon = HostMonitor(store.root, demo=demo)
+
+    # ------------------------------------------------------------- the alert list (rules: analysis/alerts.py)
+    def dashboard_alerts(now: float) -> list[dict]:
+        out = []
+        for meta in dashboards.list():
+            try:
+                dash = dashboards.load(meta["id"])
+            except (KeyError, OSError, ValueError):
+                continue
+            out += alert_rules.comms_alerts(dash, live.health(dash), collector.status(dash["id"]), now)
+            last = history.stops(dash["id"], now - 7 * 86400, limit=1)
+            out += alert_rules.stop_alerts(dash, last[0] if last else None, now)
+        return out
+
+    def switch_alerts(now: float) -> list[dict]:
+        if netmon.cfg is None:
+            return []
+        open_events = [e for e in netmon.events(now - 7 * 86400) if e.get("end") is None]
+        return alert_rules.switch_alerts(open_events, netmon.status(), now)
+
+    async def maintenance_alerts(now: float) -> list[dict]:
+        return alert_rules.maintenance_alerts((await maint_list())["items"])
+
+    alerts = AlertCenter({
+        "hmi": lambda now: alert_rules.host_alerts(hostmon.snapshot()),
+        "dashboards": dashboard_alerts,
+        "switches": switch_alerts,
+        "network": lambda now: alert_rules.network_alerts(list(passive.events), now),
+        "maintenance": maintenance_alerts,
+        "production": lambda now: alert_rules.tsc_alerts(tsc.status(), now),
+    })
     tasks: set[asyncio.Task] = set()
     app.state.demo_ua, app.state.live, app.state.ua_sessions = demo_ua, live, ua_sessions  # for tests
     app.state.history, app.state.collector, app.state.tsc, app.state.passive = history, collector, tsc, passive
-    app.state.netmon = netmon
+    app.state.netmon, app.state.hostmon, app.state.alerts = netmon, hostmon, alerts
 
     def client_of(request: Request) -> str:
         return request.client.host if request.client else ""
@@ -1263,8 +1303,22 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
                 "netmon": {**netmon.status(), "db": netmon.store.counts()},
                 "dashboards": [{k: d[k] for k in ("id", "name", "endpoint", "summary")} for d in dashboards.list()],
                 "comms": live.snapshot(), "gateway_sessions": live.sessions(),
+                "host": hostmon.snapshot(), "alerts": alerts.list(),
                 "opcua_sessions": [{"url": e[3]["url"], "open": e[0] is not None, "idle_s": int(time.time() - e[1]),
                                     "security": e[3]["security"]} for e in ua_sessions.values()]}
+
+    @app.get("/api/alerts")
+    async def alert_list():
+        """Everything that needs attention now, worst first (see analysis/alerts.py)."""
+        return await alerts.current()
+
+    @app.get("/api/host")
+    async def host_health():
+        """This PC's health: disk, memory, CPU, uptime, FactoryTalk services and event-log errors."""
+        if hostmon.slow.get("at") is None and (demo or sys.platform == "win32"):
+            await hostmon.read_windows()
+        snap = hostmon.snapshot()
+        return {**snap, "alerts": alert_rules.host_alerts(snap)}
 
     @app.get("/api/debug/log")
     def debug_log(request: Request, lines: int = 300):

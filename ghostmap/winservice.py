@@ -219,6 +219,9 @@ def install(host: str, port: int, allow: Sequence[str], no_listen: bool, check_e
     for cmd in sc_commands(binpath, exists=current is not None):
         _sc(*cmd)
     _sc(*acl_command(data))
+    from ghostmap import winevent
+
+    winevent.register()  # alerts in the Application event log under "GhostMap"
     write_marker(data, {"installed_at": time.strftime("%Y-%m-%d %H:%M:%S"), "program": prog, "bin_path": binpath,
                         "host": host, "port": port, "allow": list(allow), "copied_from_home": copied})
     _sc("sc.exe", "start", SERVICE_NAME)

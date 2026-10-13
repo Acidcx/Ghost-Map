@@ -53,7 +53,9 @@ Then the service:
   - [x] Background reading of every machine dashboard (resident collector), one OPC UA session per gateway, alarm history in SQLite (90 days)
 - [ ] Change timeline: device added or removed, firmware changed, port down, new MAC on a port
 - [ ] Alerts: thresholds and rate of change (e.g. CRC errors climbing); notifications through the IXON-approved path
-- [ ] HMI self-health: disk, uptime, Windows event-log errors, FactoryTalk Linx / View services running
+  - [x] One alert list from every page (top-bar count, errors as a line under the tabs), each with a hint and a link; written to the Windows Application event log (source GhostMap)
+  - [ ] Notifications off the HMI (email or IXON push), once the IXON-approved path is decided
+- [x] HMI self-health: disk, memory, CPU, uptime, Windows event-log errors, FactoryTalk Linx / View services running (Maintenance > This PC)
 
 ## Phase 3: passive detection
 
