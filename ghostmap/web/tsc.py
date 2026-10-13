@@ -216,7 +216,7 @@ class TscService:
         return {"line": line_id, "source": src.name, **out}
 
     async def counters(self, line_id: int) -> dict:
-        """Production counters for maintenance: feet, pieces, production hours and punch strokes over the last
+        """Production counters for maintenance: feet, pieces, production hours and hole hits over the last
         day, week, month and all time (everything in the completed parts view)."""
         cfg = self._need()
         src = source_for(cfg)

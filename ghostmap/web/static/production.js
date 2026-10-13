@@ -87,23 +87,28 @@ function prodRender() {
   const T = d.totals, Q = d.queue_total, D = d.downtime;
   const tiles = [
     ["Orders worked", pNum(T.orders), "", "Orders with a part finished or running this shift"],
-    ["Pieces made", pNum(T.pieces), "", `${pNum(T.parts)} part lines finished, ${pNum(T.pieces_per_hour, 1)} pieces an hour`],
-    ["Feet made", pNum(T.feet)], ["Feet / hour", pNum(T.feet_per_hour)],
+    ["Pieces made", pNum(T.pieces), "", `${pNum(T.good_pieces)} good, ${pNum(T.scrap_pieces)} scrap; ${pNum(T.parts)} ${T.parts === 1 ? "part" : "parts"} finished`],
+    ["Feet made", pNum(T.feet)],
+    ["Feet / hour", pNum(T.feet_per_hour), "", `Shift average, stops included; ${pNum(T.pieces_per_hour, 1)} pieces an hour`],
   ];
-  if (D) tiles.push(["Uptime", `${Math.round(D.uptime * 100)}%`, D.ongoing ? "err" : D.uptime < 0.8 ? "warn" : "ok",
-    `${D.count} stop(s), ${fmtMins(D.seconds)} down this shift (TSC stop reasons)`]);
-  tiles.push(["Scrap / remakes", `${pNum(T.scrap_pieces)} / ${pNum(T.remakes)}`, T.scrap_pieces ? "warn" : "", "Scrap pieces / remade part lines"],
-    ["In queue", `${pNum(Q.orders)} orders`, "", `${pNum(Q.bundles)} bundles, ${pNum(Q.parts)} part lines, ${pNum(Q.pieces)} pieces, ${pNum(Q.feet)} ft`],
+  // Not availability: TSC's stops include planned ones (breaks, meetings), so this is only "not stopped".
+  if (D) tiles.push(["Running time", `${Math.round(D.running_share * 100)}%`, D.ongoing ? "err" : D.running_share < 0.8 ? "warn" : "ok",
+    `Share of the shift so far with no TSC stop open. ${D.count} stop(s), ${fmtMins(D.seconds)} stopped, planned stops included.`]);
+  tiles.push(["Scrap / remakes", `${pNum(T.scrap_pieces)} / ${pNum(T.remakes)}`, T.scrap_pieces ? "warn" : "", "Scrap pieces / remade parts"],
+    ["In queue", `${pNum(Q.orders)} orders`, "", `${pNum(Q.bundles)} bundles, ${pNum(Q.parts)} parts, ${pNum(Q.pieces)} pieces, ${pNum(Q.feet)} ft`],
     ["On hold", `${pNum(d.held.length)} ${d.held.length === 1 ? "part" : "parts"}`, d.held.length ? "warn" : ""]);
-  const tilesHtml = `<div class="tiles">${tiles.map(([l, n, c, t]) => l === "Uptime" ? `<div class="tile ringtile ${c}" title="${esc(t)}">${ring(D.uptime * 100, esc(n), c, 58, 6)}
+  const tilesHtml = `<div class="tiles">${tiles.map(([l, n, c, t]) => l === "Running time" ? `<div class="tile ringtile ${c}" title="${esc(t)}">${ring(D.running_share * 100, esc(n), c, 58, 6)}
     <div><div class="l">${esc(l)}</div><div class="s">${esc(t)}</div></div></div>` : `<div class="tile ${c || ""}" ${t ? `title="${esc(t)}"` : ""}><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div>${t ? `<div class="s">${esc(t)}</div>` : ""}</div>`).join("")}</div>`;
   $("#pBody").innerHTML = tilesHtml + stationsHtml(d) + runningHtml(d) + heldHtml(d)
     + `<div class="pgrid"><div class="panel"><h3>Feet per hour</h3>${hourlySvg(d.hourly)}</div>${downtimeHtml(d)}</div>`
     + ordersHtml(d) + queueHtml(d) + recentHtml(d);
 }
 
+// TSC keeps thickness in inches (e.g. 0.019), whatever unit lengths are in.
+const fmtThick = (t) => (t == null || t === "" ? "" : `${Number(t).toFixed(3).replace(/0+$/, "").replace(/\.$/, "")}"`);
+
 function partSpec(p, unit) {
-  return [p.profile, p.color, p.gauge != null ? `${p.gauge} ga` : "", fmtLen(p.length, unit)].filter(Boolean).map(esc).join(" &middot; ");
+  return [p.profile || p.part, p.color, fmtThick(p.thickness), fmtLen(p.length, unit)].filter(Boolean).map(esc).join(" &middot; ");
 }
 
 const STATION_STATE = { running: ["okchip", "running"], done: ["", "done with this part"], idle: ["", "idle"] };
@@ -147,7 +152,7 @@ function runningHtml(d) {
         <div><div class="k">Done in about</div><div class="v">${p.eta_s != null ? esc(fmtMins(p.eta_s)) : "-"}</div></div>
         <div><div class="k">Bundle / piece mark</div><div class="v">${esc(p.bundle || "-")} / ${esc(p.piece_mark || "-")}</div></div>
         <div><div class="k">Coil</div><div class="v">${esc(p.coil || "-")}</div></div>
-        <div><div class="k">Part line</div><div class="v">${esc(pNum(p.feet))} ft</div></div>
+        <div><div class="k">This part</div><div class="v">${esc(pNum(p.feet))} ft</div></div>
       </div></div>`;
   }).join("");
 }
@@ -155,7 +160,7 @@ function runningHtml(d) {
 function heldHtml(d) {
   if (!d.held.length) return "";
   return `<div class="panel mbanner warn"><h3>On hold</h3>${d.held.map((p) =>
-    `<div class="small">Order <b>${esc(p.order)}</b>, bundle ${esc(p.bundle || "-")}: ${partSpec(p, d.unit)}, ${pNum(p.quantity)} pieces <span class="chip warnchip">${esc(p.status || "hold")}</span></div>`).join("")}</div>`;
+    `<div class="small">Order <b>${esc(p.order)}</b>, bundle ${esc(p.bundle || "-")}: ${partSpec(p, d.unit)}, ${pNum(p.quantity)} pieces <span class="chip warnchip">${esc(p.status || "Hold")}</span></div>`).join("")}</div>`;
 }
 
 function hourlySvg(hours) {
@@ -165,7 +170,7 @@ function hourlySvg(hours) {
     const bh = Math.round((h.feet / max) * (H - top - bottom));
     const x = i * slot + slot * 0.15, y = H - bottom - bh, w = slot * 0.7;
     const label = new Date(h.start * 1000).toLocaleTimeString([], { hour: "2-digit" });
-    return `<g><title>${esc(label)}: ${esc(pNum(h.feet))} ft, ${esc(pNum(h.pieces))} pieces, ${esc(h.parts)} part lines</title>
+    return `<g><title>${esc(label)}: ${esc(pNum(h.feet))} ft, ${esc(pNum(h.pieces))} pieces, ${esc(h.parts)} parts</title>
       <rect class="pbar${i === n - 1 ? " now" : ""}" x="${x}" y="${y}" width="${w}" height="${Math.max(bh, h.feet ? 1 : 0)}" rx="2"></rect>
       ${h.feet ? `<text class="pval" x="${x + w / 2}" y="${y - 4}" text-anchor="middle">${esc(pNum(h.feet))}</text>` : ""}
       <text class="plab" x="${x + w / 2}" y="${H - 6}" text-anchor="middle">${esc(label)}</text></g>`;
@@ -203,8 +208,8 @@ function ordersHtml(d) {
       <td>${known ? `${pNum(o.parts_done)} / ${pNum(o.parts)}` : "-"}</td><td>${known ? pNum(o.feet_left) : "-"}</td></tr>`;
   }).join("");
   return `<div class="panel"><h3>Orders on the schedule</h3><div class="tablewrap"><table class="ptable"><thead><tr>
-    <th>Order</th><th>Bundles</th><th>Progress</th><th>Pieces done</th><th>Part lines done</th><th>Feet left</th></tr></thead><tbody>${rows}</tbody></table></div>
-    <p class="small muted">Whole orders, in the order they come up on the line. A part line is one row of the cut list (a length and a quantity).</p></div>`;
+    <th>Order</th><th>Bundles</th><th>Progress</th><th>Pieces done</th><th>Parts done</th><th>Feet left</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <p class="small muted">Whole orders, in the order they come up on the line. A part is one row of the cut list (a length and a quantity); pieces are what it is made as.</p></div>`;
 }
 
 function stationPills(p) {
@@ -215,23 +220,23 @@ function queueHtml(d) {
   const more = d.queue_total.parts - d.queue.length;
   const multi = d.stations.length > 1;
   const rows = d.queue.map((p, i) => `<tr class="${p.state === "held" ? "held" : ""}"><td>${i + 1}</td><td>${esc(p.order)}</td><td>${esc(p.bundle)}</td>
-    <td>${esc(p.profile)}</td><td>${esc(p.color)}</td><td>${p.gauge != null ? esc(p.gauge) : "-"}</td><td>${esc(fmtLen(p.length, d.unit))}</td>
+    <td>${esc(p.profile || "-")}</td><td>${esc(p.color)}</td><td>${esc(fmtThick(p.thickness) || "-")}</td><td>${esc(fmtLen(p.length, d.unit))}</td>
     <td>${pNum(p.quantity)}</td><td>${pNum(p.feet)}</td>${multi ? `<td>${stationPills(p)}</td>` : ""}
-    <td>${p.state === "held" ? `<span class="chip warnchip">on hold</span>` : ""}</td></tr>`).join("");
+    <td>${p.state === "held" ? `<span class="chip warnchip">${esc(p.status || "Hold")}</span>` : ""}</td></tr>`).join("");
   return `<div class="panel"><h3>Up next: ${pNum(d.queue_total.orders)} orders, ${pNum(d.queue_total.bundles)} bundles, ${pNum(d.queue_total.pieces)} pieces</h3>
     ${d.queue.length ? `<div class="tablewrap"><table class="ptable"><thead><tr><th>#</th><th>Order</th><th>Bundle</th><th>Profile</th>
-    <th>Color</th><th>Gauge</th><th>Length</th><th>Pieces</th><th>Feet</th>${multi ? "<th>Stations</th>" : ""}<th></th></tr></thead><tbody>${rows}</tbody></table></div>
-    ${more > 0 ? `<p class="small muted">and ${more} more part line(s) after these.</p>` : ""}
+    <th>Color</th><th>Thickness</th><th>Length</th><th>Qty</th><th>Feet</th>${multi ? "<th>Stations</th>" : ""}<th></th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${more > 0 ? `<p class="small muted">and ${more} more ${more === 1 ? "part" : "parts"} after these.</p>` : ""}
     <p class="small muted">In TSC's run order. Parts on hold stay in the queue but the line skips them.</p>` : `<p class="muted small">The queue is empty.</p>`}</div>`;
 }
 
 function recentHtml(d) {
-  const rows = d.recent.map((p) => `<tr><td>${esc(fmtHm(p.end))}</td><td>${esc(p.order)}</td><td>${esc(p.bundle)}</td><td>${esc(p.profile)}</td>
+  const rows = d.recent.map((p) => `<tr><td>${esc(fmtHm(p.end))}</td><td>${esc(p.order)}</td><td>${esc(p.bundle)}</td><td>${esc(p.profile || "-")}</td>
     <td>${esc(fmtLen(p.length, d.unit))}</td><td>${pNum(p.actual)}</td><td>${pNum(p.feet)}</td>
     <td>${p.start && p.end ? esc(fmtMins(p.end - p.start)) : "-"}</td>
     <td>${p.scrap ? `<span class="chip errchip">scrap</span>` : ""}${p.remake ? `<span class="chip warnchip">remake</span>` : ""}${p.error ? esc(p.error) : ""}</td></tr>`).join("");
   return `<div class="panel"><h3>Recently completed</h3>${d.recent.length ? `<div class="tablewrap"><table class="ptable"><thead><tr><th>Done</th><th>Order</th>
-    <th>Bundle</th><th>Profile</th><th>Length</th><th>Pieces</th><th>Feet</th><th>Took</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+    <th>Bundle</th><th>Profile</th><th>Length</th><th>Qty</th><th>Feet</th><th>Took</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
     : `<p class="muted small">Nothing finished in the last 12 hours.</p>`}</div>`;
 }
 

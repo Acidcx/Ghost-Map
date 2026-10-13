@@ -152,7 +152,7 @@
           <label class="small">Show <select id="svFilter"><option value="">all</option><option value="due">due soon and overdue</option></select></label>
           <button class="btn primary small admin-only" id="svAdd">Add item</button>
         </div>
-        <p class="small muted">Each item counts up from when it was last done: feet or pieces made and punch strokes (from TSC), production hours,
+        <p class="small muted">Each item counts up from when it was last done: feet or pieces made and hole hits (from TSC), production hours,
           run hours measured from the PLC's running bit, or days. Mark it done when the work is finished and it starts again.</p>
       </div>
       <div id="svBody"></div>
@@ -173,7 +173,7 @@
       <div class="panel">
         <h2>TSC database</h2>
         <p class="small muted">Ghost Map reads TSC's part schedule views with fixed SELECT queries on a read-only connection. Use a SQL login that can only SELECT
-          (for example <span class="mono">GRANT SELECT ON SCHEMA::DataView TO ghostmap_ro</span>). Stations, shifts, stops and punch strokes need a few more read grants: see <b>What Ghost Map can read</b> below. Type <b>demo</b> as the server to try a simulated schedule.</p>
+          (for example <span class="mono">GRANT SELECT ON SCHEMA::DataView TO ghostmap_ro</span>). Stations, shifts, stops and hole hits need a few more read grants: see <b>What Ghost Map can read</b> below. Type <b>demo</b> as the server to try a simulated schedule.</p>
         <form id="tForm" class="tform" autocomplete="off">
           <div class="row">
             <label>Server <input name="server" required maxlength="200" placeholder="SQLHOST, SQLHOST\INSTANCE or 10.0.0.5,1433"></label>

@@ -21,9 +21,10 @@ import time
 import uuid
 from datetime import datetime, timedelta
 
+from ghostmap.analysis.production import STATUS_NAMES  # dbo.PartStatus as TSC ships it
+
 UNSET = datetime(1900, 1, 1)
 LINES = [(1, "Line 1"), (2, "Line 2")]
-STATUS_NAMES = {0: "Import", 1: "Pending", 2: "Queued", 3: "Hold", 4: "In Progress", 5: "Complete", 6: "Error"}
 STATIONS = [  # StationID, LineID, Name, Description
     (1, 1, "Punch / Rollformer", "Pre-punch press and rollformer"),
     (2, 1, "Notcher", "End notcher (some parts only)"),

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
-from ghostmap.analysis.production import current_shift, feet, shift_start, state, stop_window, summary
+from ghostmap.analysis.production import current_shift, feet, shift_start, state, status_name, stop_window, summary
 from ghostmap.collectors.tsc import COLUMNS, TscConfig, parse_shifts
 from ghostmap.sim.tsc import PATTERNS, SimTsc, demo_service_items, pattern_hits, world
 from ghostmap.web.app import create_app
@@ -27,9 +27,16 @@ def row(**kw):
 
 
 def test_states_feet_and_shifts():
-    # TSC's status codes: 0 import, 1 pending, 2 queued, 3 hold, 4 in progress, 5 complete, 6 error.
+    # TSC's dbo.PartStatus: 0 Imported, 1 Pending, 2 Queued, 3 Hold, 4 IP, 5 Completed, 6 Error,
+    # 20 Pre-Import Processing, 22 Pre-Queue Processing.
     assert [state(row(Status=n)) for n in range(7)] == ["pending", "pending", "queued", "held", "running", "done", "error"]
-    assert state(row(Status=None, StatusDescription="On Hold")) == "held"
+    assert state(row(Status=20)) == state(row(Status=22)) == "pending"
+    assert state(row(Status=2, StatusDescription="On Hold")) == "queued"  # the code decides, not the wording
+    # The page shows TSC's own word: the view's description, else dbo.PartStatus's name for the code.
+    assert status_name(row(Status=3, StatusDescription="Hold")) == "Hold"
+    assert status_name(row(Status=3, StatusDescription=None)) == "Hold"
+    assert status_name(row(Status=22, StatusDescription="")) == "Pre-Queue Processing"
+    assert status_name(row(Status=99, StatusDescription=None)) == "Status 99"
     assert state(row(Status=None, StartTime=NOW)) == "running"
     assert state(row(Status=None, StartTime=NOW, EndTime=NOW)) == "done"
     assert state(row(Status=2, StartTime=UNSET)) == "queued"  # 1900-01-01 means "not yet"
@@ -202,7 +209,7 @@ def test_maintenance_items(tmp_path):
         assert len(items) == len(demo_service_items()) and all(it["value"] is not None for it in items)
         assert {it["state"] for it in items} == {"ok", "soon", "overdue"}
         punch = next(it for it in items if it["kind"] == "strokes" and it["tool"] == "RD25")
-        assert punch["state"] == "overdue" and punch["value"] >= 1_540_000 and punch["unit"] == "strokes"
+        assert punch["state"] == "overdue" and punch["value"] >= 1_540_000 and punch["unit"] == "hits"
         # Add, mark done (logged with the reading, count starts again), edit, delete.
         it = c.post("/api/maintenance/items", json={"name": "Notcher blades", "kind": "strokes", "line": 1, "station": 2,
                                                     "interval": 1000, "offset": 950}).json()

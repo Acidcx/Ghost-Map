@@ -3,8 +3,9 @@
 An item counts up from its last service. What it counts:
 
 - ``feet``: feet of parts made on a TSC line (completed parts x length);
-- ``pieces``: pieces made on a TSC line (each one is a shear cut);
-- ``strokes``: punch strokes at one station of a TSC line, for one tool type or all of them;
+- ``pieces``: pieces made on a TSC line (scrap included);
+- ``strokes``: hole hits at one station of a TSC line, for one tool type or all of them. An estimate: one per hole
+  or notch on each piece, so a gang die that punches several holes in one hit is counted once per hole;
 - ``prod_hours``: hours the TSC line spent making parts (start to end of each completed part);
 - ``run_hours``: hours the machine's PLC said it was running, measured by Ghost Map's collector;
 - ``online_hours``: hours Ghost Map could read the machine at all;
@@ -26,8 +27,8 @@ from typing import Optional
 
 KINDS = {
     "feet": {"label": "Feet made", "unit": "ft", "source": "tsc"},
-    "pieces": {"label": "Pieces made (shear cuts)", "unit": "pcs", "source": "tsc"},
-    "strokes": {"label": "Punch strokes", "unit": "strokes", "source": "tsc"},
+    "pieces": {"label": "Pieces made", "unit": "pcs", "source": "tsc"},
+    "strokes": {"label": "Hole hits (estimate)", "unit": "hits", "source": "tsc"},
     "prod_hours": {"label": "Production hours (TSC)", "unit": "h", "source": "tsc"},
     "run_hours": {"label": "Run hours (PLC running)", "unit": "h", "source": "plc"},
     "online_hours": {"label": "Powered-on hours (PLC readable)", "unit": "h", "source": "plc"},

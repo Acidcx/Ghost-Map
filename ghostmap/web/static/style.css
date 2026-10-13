@@ -538,6 +538,7 @@ dialog::backdrop { backdrop-filter: blur(3px); }
 .plat .pbar { fill: url(#gmLatGrad); }
 .tile.ringtile { display: flex; align-items: center; gap: 14px; }
 .tile.ringtile .l { white-space: normal; }
+.tile.ringtile > div:last-child { min-width: 0; }
 .svhead > .ring { flex: none; margin-right: 4px; }
 .svhead > .ring .lbl { font-size: 11px; }
 .svhead > div { min-width: 0; }

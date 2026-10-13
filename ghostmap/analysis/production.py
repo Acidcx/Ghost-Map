@@ -4,8 +4,8 @@ TSC's words: an **order** holds jobs, a job holds **bundles**, a bundle holds **
 list: a part number, length and quantity), and a part is made as **pieces**. Each part goes through one or
 more **stations** (separate machines on the line; a part that skips a station has no row for it).
 
-Part status (from TSC's views): 0 import, 1 pending, 2 queued, 3 hold, 4 in progress, 5 complete, 6 error.
-TSC writes 1900-01-01 for "no time yet"; those become ``None`` here.
+Part status is TSC's ``dbo.PartStatus`` (``STATUS_NAMES`` below, confirmed against a real TSC database). TSC
+writes 1900-01-01 for "no time yet"; those become ``None`` here.
 """
 
 from __future__ import annotations
@@ -19,6 +19,9 @@ HOURS_SHOWN = 12
 QUEUE_SHOWN = 15
 RECENT_SHOWN = 15
 DONE, RUNNING, HELD, QUEUED, PENDING, ERROR = "done", "running", "held", "queued", "pending", "error"
+# dbo.PartStatus as TSC ships it. The view's StatusDescription wins when it has one; this fills in when it doesn't.
+STATUS_NAMES = {0: "Imported", 1: "Pending", 2: "Queued", 3: "Hold", 4: "IP", 5: "Completed", 6: "Error",
+                20: "Pre-Import Processing", 22: "Pre-Queue Processing"}
 
 
 def _time(v) -> Optional[datetime]:
@@ -48,19 +51,28 @@ def normalize(row: dict) -> dict:
 
 
 def state(row: dict) -> str:
+    """Ghost Map's own state key for a part (used for grouping, never shown): from TSC's status code."""
     st = row.get("Status")
-    text = str(row.get("StatusDescription") or "").lower()
     if st == 5 or _time(row.get("EndTime")):
         return DONE
     if st == 4 or (st is None and _time(row.get("StartTime"))):
         return RUNNING
-    if st == 3 or "hold" in text or "held" in text:
+    if st == 3:
         return HELD
     if st == 6:
         return ERROR
-    if st in (0, 1):
+    if st in (0, 1, 20, 22):
         return PENDING
     return QUEUED
+
+
+def status_name(row: dict) -> str:
+    """The status word TSC itself shows for a part."""
+    text = str(row.get("StatusDescription") or "").strip()
+    if text:
+        return text
+    st = row.get("Status")
+    return STATUS_NAMES.get(st, f"Status {st}") if st is not None else ""
 
 
 def feet(row: dict, unit: str = "in", qty_field: str = "ActualQuantity") -> float:
@@ -128,9 +140,10 @@ def part_view(r: dict, unit: str, now: Optional[datetime] = None, stations: Opti
     qty = _num(r.get("Quantity"))
     act = _num(r.get("ActualQuantity"))
     out = {"id": str(r.get("PartID") or ""), "order": str(r.get("OrderNumber") or ""), "state": state(r),
-           "status": r.get("StatusDescription") or "", "queue": r.get("QueueIndex"),
-           "profile": r.get("ProfileName") or r.get("StandardPartName") or "", "part": r.get("StandardPartName") or "",
-           "color": r.get("Color") or "", "gauge": r.get("Thickness"), "coil": r.get("RequestedCoil") or "",
+           "status": status_name(r), "queue": r.get("QueueIndex"),
+           # A standard part name (e.g. "9362222") is not a profile, so there is no fallback between the two.
+           "profile": r.get("ProfileName") or "", "part": r.get("StandardPartName") or "",
+           "color": r.get("Color") or "", "thickness": r.get("Thickness"), "coil": r.get("RequestedCoil") or "",
            "length": r.get("Length"), "bundle": r.get("BundleMark") or "", "piece_mark": r.get("PieceMark") or "",
            "quantity": qty, "actual": act,
            "remaining": _num(r.get("QuantityRemaining")) if r.get("QuantityRemaining") is not None else max(qty - act, 0),
@@ -193,6 +206,7 @@ def summary(open_rows: Iterable[dict], done_rows: Iterable[dict], now: datetime,
     worked = {r.get("OrderNumber") for r in shift_done} | {r.get("OrderNumber") for r in running}
     totals = {"orders": len(worked - {None}), "parts": len(shift_done), "pieces": pieces, "feet": round(ft, 1),
               "scrap_pieces": sum(_num(r.get("ActualQuantity")) for r in shift_done if r["IsScrap"]),
+              "good_pieces": sum(_num(r.get("ActualQuantity")) for r in shift_done if not r["IsScrap"]),
               "remakes": sum(1 for r in shift_done if _num(r.get("RemakeCode")) or r["IsForcedRemake"]),
               "pieces_per_hour": round(pieces / hours, 1), "feet_per_hour": round(ft / hours, 1)}
     down = None
@@ -206,7 +220,7 @@ def summary(open_rows: Iterable[dict], done_rows: Iterable[dict], now: datetime,
             x["seconds"] += s["seconds"]
         elapsed = max((now - start).total_seconds(), 1)
         down = {"stops": in_shift[:20], "count": len(in_shift), "seconds": secs, "ongoing": any(s["ongoing"] for s in in_shift),
-                "uptime": round(max(elapsed - secs, 0) / elapsed, 3),
+                "running_share": round(max(elapsed - secs, 0) / elapsed, 3),
                 "reasons": sorted(reasons.values(), key=lambda x: -x["seconds"])}
 
     # ---- stations: what each one is doing now

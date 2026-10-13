@@ -3,7 +3,7 @@
 Ghost Map reads the part schedule through TSC's own DataView views (``vPartScheduleCommon``, the queue view
 ``vHmiPartScheduleQueueOrInProgress`` with the run order in QueueIndex, and ``vPartScheduleCompleted``), and,
 when the login is allowed to, a few lookup tables: stations and per-station progress, station dependencies,
-the shift calendar, downtime with stop reasons, and the tooling tables used to count punch strokes. Every
+the shift calendar, downtime with stop reasons, and the tooling tables used to count hole hits. Every
 query is a fixed SELECT; nothing else is ever sent (no INSERT, UPDATE, DELETE, EXEC or DDL), and the connection
 asks for a read-only session (ApplicationIntent=ReadOnly). Give Ghost Map a SQL login that can only SELECT.
 Customer names and comments are never read.
@@ -99,7 +99,7 @@ FEATURES = {
                       "GRANT SELECT ON dbo.StationDependencyType TO <login>;"),
     "shifts": ("The shift calendar", "GRANT SELECT ON dbo.Shift TO <login>; GRANT SELECT ON dbo.DayOfWeek TO <login>;"),
     "downtime": ("Stops and their reasons", "GRANT SELECT ON dbo.vGetDownTimeData TO <login>;"),
-    "strokes": ("Punch strokes per tool (maintenance)", "GRANT SELECT ON dbo.PartPattern TO <login>; GRANT SELECT ON dbo.PatternHole TO <login>; "
+    "strokes": ("Hole hits per tool (maintenance)", "GRANT SELECT ON dbo.PartPattern TO <login>; GRANT SELECT ON dbo.PatternHole TO <login>; "
                 "GRANT SELECT ON dbo.Hole TO <login>; GRANT SELECT ON dbo.PartNotch TO <login>;"),
     "tool_types": ("Tool names", "GRANT SELECT ON Machine.ToolType TO <login>;"),
 }
@@ -263,7 +263,7 @@ class SqlTsc:
         return self._query("SELECT HoleType, Description FROM Machine.ToolType")
 
     def strokes(self, line_id: int, since: datetime) -> list[dict]:
-        """Punch strokes per station and tool type for parts finished since a time: pattern holes (repeats
+        """Hole hits per station and tool type for parts finished since a time: pattern holes (repeats
         counted along the part), one-off holes and notches, times the pieces made."""
         return [{**r, "Strokes": r["S_0"]} for r in self._strokes(line_id, [since])]
 
