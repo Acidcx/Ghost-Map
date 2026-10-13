@@ -125,7 +125,10 @@ def test_viewer_cannot_scan_or_probe(secured):
     assert secured.get("/api/scans").status_code == 200
     assert secured.post("/api/scans", json={"targets": ["127.0.0.1"]}).status_code == 403
     assert secured.post("/api/demo").status_code == 403
-    assert secured.get("/api/probe/127.0.0.1").status_code == 403
+    assert secured.post("/api/inspect", json={"ip": "127.0.0.1"}).status_code == 403
+    assert secured.get("/api/probe/127.0.0.1/ping").status_code == 403
+    assert secured.post("/api/live/listeners/arp", json={"enabled": False}).status_code == 403
+    assert secured.get("/api/live").status_code == 200
     assert secured.delete("/api/scans/demo-today").status_code == 403
 
 

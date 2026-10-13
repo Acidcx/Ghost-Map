@@ -56,7 +56,8 @@ def read_arp_cache() -> dict[str, str]:
         return parse_proc_net_arp(proc.read_text())
     try:
         args = ["arp", "-a"] if sys.platform.startswith("win") else ["arp", "-an"]
-        text = subprocess.run(args, capture_output=True, text=True, timeout=10).stdout
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # Windows: no console window flashing up every read
+        text = subprocess.run(args, capture_output=True, text=True, timeout=10, creationflags=flags).stdout
     except (OSError, subprocess.SubprocessError):
         return {}
     return parse_arp_a(text)

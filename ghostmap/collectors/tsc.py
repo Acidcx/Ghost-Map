@@ -1,9 +1,12 @@
-"""Read-only queries against the TSC (Total System Control) part schedule on SQL Server.
+"""Read-only queries against the TSC (Total System Control) database on SQL Server.
 
-Ghost Map reads one view, ``DataView.vPartScheduleCommon`` by default, with three fixed SELECTs: the lines,
-a line's open parts (not finished yet) and a line's parts finished since a time. Nothing else is ever sent:
-no INSERT, UPDATE, DELETE, EXEC or DDL, and the connection asks for a read-only session
-(ApplicationIntent=ReadOnly). Give Ghost Map a SQL login that can only SELECT from the view's schema.
+Ghost Map reads the part schedule through TSC's own DataView views (``vPartScheduleCommon``, the queue view
+``vHmiPartScheduleQueueOrInProgress`` with the run order in QueueIndex, and ``vPartScheduleCompleted``), and,
+when the login is allowed to, a few lookup tables: stations and per-station progress, station dependencies,
+the shift calendar, downtime with stop reasons, and the tooling tables used to count punch strokes. Every
+query is a fixed SELECT; nothing else is ever sent (no INSERT, UPDATE, DELETE, EXEC or DDL), and the connection
+asks for a read-only session (ApplicationIntent=ReadOnly). Give Ghost Map a SQL login that can only SELECT.
+Customer names and comments are never read.
 
 The driver is python-tds (pure Python), so GhostMap.exe needs no ODBC driver on the HMI. Encryption uses
 pyOpenSSL: "trust server certificate" accepts the server's self-signed certificate, like the ODBC option of
@@ -12,6 +15,7 @@ the same name; otherwise give the CA file that signed it.
 
 from __future__ import annotations
 
+import contextlib
 import re
 import time
 from dataclasses import dataclass, field
@@ -19,8 +23,10 @@ from datetime import datetime
 from typing import Optional
 
 DEFAULT_VIEW = "DataView.vPartScheduleCommon"
+DEFAULT_QUEUE_VIEW = "DataView.vHmiPartScheduleQueueOrInProgress"  # status 2, 3, 4 with QueueIndex
+DEFAULT_DONE_VIEW = "DataView.vPartScheduleCompleted"              # status 5
 # The columns the Production page uses. CustomerName and the comments are left out on purpose.
-COLUMNS = ["PartID", "OrderNumber", "Status", "StatusDescription", "RequestedQuantity", "QuantityAdjust",
+COLUMNS = ["PartID", "Quantity", "RequestedCoil", "OrderNumber", "Status", "StatusDescription", "RequestedQuantity", "QuantityAdjust",
            "ActualQuantity", "QuantityRemaining", "ProfileName", "StandardPartName", "Thickness", "StripWidth",
            "Tooling", "Color", "BundleMark", "Length", "PieceMark", "RecordXofY", "IsEndOfBundle", "ErrorCode",
            "ErrorCodeDescription", "RemakeCode", "IsScrap", "IsForcedRemake", "PriorityIndex", "ImportIndex",
@@ -41,6 +47,8 @@ class TscConfig:
     trust_cert: bool = True     # with encrypt: accept the server's self-signed certificate
     cafile: str = ""            # with encrypt and not trust_cert: CA certificate (PEM) to check it against
     view: str = DEFAULT_VIEW
+    queue_view: str = DEFAULT_QUEUE_VIEW
+    done_view: str = DEFAULT_DONE_VIEW
     length_unit: str = "in"     # unit of the Length column: in, ft or mm
     shifts: str = "06:00,18:00"  # shift start times, for "this shift"
     cache_s: int = 30           # how long a read is reused (several people watching cost one query)
@@ -53,8 +61,9 @@ class TscConfig:
                 raise ValueError("database is required")
             if not self.username.strip():
                 raise ValueError("username is required")
-        if not _VIEW_RE.match(self.view.strip()):
-            raise ValueError("view must look like Schema.ViewName")
+        for v in (self.view, self.queue_view, self.done_view):
+            if not _VIEW_RE.match(v.strip()):
+                raise ValueError("views must look like Schema.ViewName")
         if self.length_unit not in ("in", "ft", "mm"):
             raise ValueError("length unit must be in, ft or mm")
         parse_shifts(self.shifts)
@@ -82,22 +91,60 @@ def _split_server(server: str) -> tuple[str, Optional[int]]:
     return s, None
 
 
+# Optional reads and the GRANT each needs; a read the login may not do is reported, not fatal.
+FEATURES = {
+    "stations": ("Station names, and progress at every station (3 and up)",
+                 "GRANT SELECT ON dbo.Station TO <login>; GRANT SELECT ON dbo.StationPart TO <login>;"),
+    "station_links": ("Stations that wait on others (e.g. pan + back skin)", "GRANT SELECT ON dbo.StationDependency TO <login>; "
+                      "GRANT SELECT ON dbo.StationDependencyType TO <login>;"),
+    "shifts": ("The shift calendar", "GRANT SELECT ON dbo.Shift TO <login>; GRANT SELECT ON dbo.DayOfWeek TO <login>;"),
+    "downtime": ("Stops and their reasons", "GRANT SELECT ON dbo.vGetDownTimeData TO <login>;"),
+    "strokes": ("Punch strokes per tool (maintenance)", "GRANT SELECT ON dbo.PartPattern TO <login>; GRANT SELECT ON dbo.PatternHole TO <login>; "
+                "GRANT SELECT ON dbo.Hole TO <login>; GRANT SELECT ON dbo.PartNotch TO <login>;"),
+    "tool_types": ("Tool names", "GRANT SELECT ON Machine.ToolType TO <login>;"),
+}
+
+# Holes one pattern puts on a part: once, or along the part every RepeatOffset between the lead and end offsets.
+_HITS = ("CASE WHEN pp.IsRepeat = 1 AND pp.RepeatOffset > 0 THEN CASE WHEN p.Length - pp.LeadOffset - pp.EndOffset >= 0 "
+         "THEN FLOOR((p.Length - pp.LeadOffset - pp.EndOffset) / pp.RepeatOffset) + 1 ELSE 0 END ELSE 1 END")
+
+
 class SqlTsc:
     """The real source: python-tds, a short-lived connection per query batch."""
 
     name = "sql"
+    HEAVY_TIMEOUT_S = 120  # sums over every completed part (maintenance counters) can take a while on a big database
 
     def __init__(self, cfg: TscConfig):
         cfg.check()
         self.cfg = cfg
-        self.view = cfg.view.strip()
+        self.view, self.queue_view, self.done_view = cfg.view.strip(), cfg.queue_view.strip(), cfg.done_view.strip()
+        self._conn = None
+        self.timings: list[tuple[str, float]] = []  # (query name, seconds) for the last session
 
-    def _connect(self):
+    @contextlib.contextmanager
+    def session(self, heavy: bool = False):
+        """One connection for a batch of queries (a login per query is slow, more so with encryption)."""
+        if self._conn is not None:
+            yield self
+            return
+        self._conn = self._connect(self.HEAVY_TIMEOUT_S if heavy else 30)
+        self.timings = []
+        try:
+            yield self
+        finally:
+            conn, self._conn = self._conn, None
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _connect(self, timeout: int = 30):
         import pytds
 
         host, port = _split_server(self.cfg.server)
         kw = dict(dsn=host, database=self.cfg.database, user=self.cfg.username, password=self.cfg.password,
-                  login_timeout=10, timeout=30, autocommit=True, readonly=True, appname="Ghost Map (read-only)")
+                  login_timeout=10, timeout=timeout, autocommit=True, readonly=True, appname="Ghost Map (read-only)")
         if port:
             kw["port"] = port
         if self.cfg.encrypt:
@@ -106,25 +153,139 @@ class SqlTsc:
             kw["validate_host"] = not self.cfg.trust_cert
         return pytds.connect(**kw)
 
-    def _query(self, sql: str, args: tuple = ()) -> list[dict]:
+    def _query(self, sql: str, args: tuple = (), name: str = "") -> list[dict]:
         assert sql.lstrip().upper().startswith("SELECT"), "Ghost Map only reads"
-        with self._connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(sql, args)
-                names = [d[0] for d in cur.description]
-                return [dict(zip(names, row)) for row in cur.fetchall()]
+        t0 = time.perf_counter()
+        if self._conn is not None:
+            rows = self._run(self._conn, sql, args)
+        else:
+            with self._connect() as conn:
+                rows = self._run(conn, sql, args)
+        if not name:  # the first table or view it reads says which one was slow
+            m = re.search(r"\bFROM\s+([\w.\[\]]+)", sql)
+            name = m.group(1) if m else "query"
+        self.timings.append((name, time.perf_counter() - t0))
+        return rows
 
+    @staticmethod
+    def _run(conn, sql: str, args: tuple) -> list[dict]:
+        with conn.cursor() as cur:
+            cur.execute(sql, args)
+            names = [d[0] for d in cur.description]
+            return [dict(zip(names, row)) for row in cur.fetchall()]
+
+    # ------------------------------------------------------------- the part schedule (DataView)
     def lines(self) -> list[dict]:
         return self._query(f"SELECT DISTINCT LineID, LineName FROM {self.view} ORDER BY LineID")
 
     def open_parts(self, line_id: int, limit: int = 300) -> list[dict]:
-        return self._query(f"SELECT TOP {int(limit)} {', '.join(COLUMNS)} FROM {self.view} "
-                           "WHERE LineID = %s AND (EndTime IS NULL OR EndTime < %s) ORDER BY PriorityIndex, ImportIndex",
-                           (int(line_id), UNSET_BEFORE))
+        """Queued, held and in-progress parts in the order the machine runs them."""
+        return self._query(f"SELECT TOP {int(limit)} QueueIndex, {', '.join(COLUMNS)} FROM {self.queue_view} "
+                           "WHERE LineID = %s ORDER BY QueueIndex", (int(line_id),))
 
     def done_parts(self, line_id: int, since: datetime, limit: int = 3000) -> list[dict]:
-        return self._query(f"SELECT TOP {int(limit)} {', '.join(COLUMNS)} FROM {self.view} "
+        return self._query(f"SELECT TOP {int(limit)} {', '.join(COLUMNS)} FROM {self.done_view} "
                            "WHERE LineID = %s AND EndTime >= %s ORDER BY EndTime DESC", (int(line_id), since))
+
+    def order_totals(self, line_id: int, orders: list[str]) -> list[dict]:
+        """Whole-order progress (every part of the order, not only the ones in view) for the given orders."""
+        orders = [str(o) for o in orders][:200]
+        if not orders:
+            return []
+        marks = ", ".join(["%s"] * len(orders))
+        return self._query(
+            "SELECT OrderNumber, COUNT(*) AS Parts, SUM(CASE WHEN Status = 5 THEN 1 ELSE 0 END) AS PartsDone, "
+            "SUM(CAST(Quantity AS bigint)) AS Pieces, SUM(CAST(ActualQuantity AS bigint)) AS PiecesDone, "
+            "COUNT(DISTINCT BundleID) AS Bundles, "
+            "SUM(CASE WHEN Quantity > ActualQuantity THEN CAST(Length AS float) * (Quantity - ActualQuantity) ELSE 0 END) AS LengthLeft "
+            f"FROM {self.view} WHERE LineID = %s AND OrderNumber IN ({marks}) GROUP BY OrderNumber",
+            (int(line_id), *orders))
+
+    def totals(self, line_id: int, since: datetime) -> dict:
+        """Finished parts since a time, summed on the server: parts, pieces, length, scrap and run time."""
+        rows = self._query(
+            "SELECT COUNT(*) AS Parts, SUM(CAST(ActualQuantity AS bigint)) AS Pieces, "
+            "SUM(CAST(Length AS float) * ActualQuantity) AS LengthTotal, "
+            "SUM(CASE WHEN IsScrap = 1 THEN CAST(ActualQuantity AS bigint) ELSE 0 END) AS ScrapPieces, "
+            "SUM(CASE WHEN StartTime > '19010101' AND EndTime > StartTime THEN CAST(DATEDIFF(second, StartTime, EndTime) AS bigint) ELSE 0 END) AS RunSeconds, "
+            f"MIN(EndTime) AS FirstEnd FROM {self.done_view} WHERE LineID = %s AND EndTime >= %s", (int(line_id), since))
+        return rows[0] if rows else {}
+
+    def totals_windows(self, line_id: int, sinces: dict) -> dict:
+        """``totals`` for several start times in one pass over the completed parts: {name: row}."""
+        names = list(sinces)
+        parts = []
+        args: list = []
+        for i, n in enumerate(names):
+            w = "EndTime >= %s"
+            parts.append(f"SUM(CASE WHEN {w} THEN 1 ELSE 0 END) AS Parts_{i}, "
+                         f"SUM(CASE WHEN {w} THEN CAST(ActualQuantity AS bigint) ELSE 0 END) AS Pieces_{i}, "
+                         f"SUM(CASE WHEN {w} THEN CAST(Length AS float) * ActualQuantity ELSE 0 END) AS LengthTotal_{i}, "
+                         f"SUM(CASE WHEN {w} AND IsScrap = 1 THEN CAST(ActualQuantity AS bigint) ELSE 0 END) AS ScrapPieces_{i}, "
+                         f"SUM(CASE WHEN {w} AND StartTime > '19010101' AND EndTime > StartTime "
+                         f"THEN CAST(DATEDIFF(second, StartTime, EndTime) AS bigint) ELSE 0 END) AS RunSeconds_{i}, "
+                         f"MIN(CASE WHEN {w} THEN EndTime END) AS FirstEnd_{i}")
+            args += [sinces[n]] * 6
+        rows = self._query(f"SELECT {', '.join(parts)} FROM {self.done_view} WHERE LineID = %s AND EndTime >= %s",
+                           (*args, int(line_id), min(sinces.values())), "totals")
+        r = rows[0] if rows else {}
+        return {n: {k: r.get(f"{k}_{i}") for k in ("Parts", "Pieces", "LengthTotal", "ScrapPieces", "RunSeconds", "FirstEnd")}
+                for i, n in enumerate(names)}
+
+    # ------------------------------------------------------------- optional lookups (dbo / Machine)
+    def station_parts(self, part_ids: list[str]) -> list[dict]:
+        out = []
+        ids = [str(i) for i in part_ids]
+        for i in range(0, len(ids), 100):
+            chunk = ids[i:i + 100]
+            out += self._query("SELECT StationID, PartID, QuantityCompleted, IsInProgress, IsCompleted FROM dbo.StationPart "
+                               f"WHERE PartID IN ({', '.join(['%s'] * len(chunk))})", tuple(chunk))
+        return out
+
+    def stations(self) -> list[dict]:
+        return self._query("SELECT StationID, LineID, Name, Description FROM dbo.Station ORDER BY StationID")
+
+    def station_links(self) -> list[dict]:
+        return self._query("SELECT d.DependentStationID, d.IndependentStationID, t.Name AS TypeName FROM dbo.StationDependency d "
+                           "LEFT JOIN dbo.StationDependencyType t ON t.StationDependencyTypeID = d.StationDependencyTypeID")
+
+    def shifts(self) -> list[dict]:
+        return self._query("SELECT s.ShiftID, s.Name, s.DayNumber, d.Name AS DayName, s.ShiftNumber, s.StartTime, s.EndTime "
+                           "FROM dbo.Shift s LEFT JOIN dbo.DayOfWeek d ON d.DayNumber = s.DayNumber ORDER BY s.DayNumber, s.ShiftNumber")
+
+    def downtime(self, line_id: int, since: datetime, limit: int = 500) -> list[dict]:
+        """Stops that ended after ``since`` or haven't ended (StartTime is the restart; 1900 = still stopped)."""
+        return self._query(f"SELECT TOP {int(limit)} LineID, StopTime, StartTime, StopCode, Description FROM dbo.vGetDownTimeData "
+                           "WHERE LineID = %s AND (StartTime >= %s OR StartTime < '19010101') ORDER BY StopTime DESC",
+                           (int(line_id), since))
+
+    def tool_types(self) -> list[dict]:
+        return self._query("SELECT HoleType, Description FROM Machine.ToolType")
+
+    def strokes(self, line_id: int, since: datetime) -> list[dict]:
+        """Punch strokes per station and tool type for parts finished since a time: pattern holes (repeats
+        counted along the part), one-off holes and notches, times the pieces made."""
+        return [{**r, "Strokes": r["S_0"]} for r in self._strokes(line_id, [since])]
+
+    def strokes_windows(self, line_id: int, sinces: dict) -> list[dict]:
+        """``strokes`` for several start times in one pass: rows of StationID, ToolType and one column per name."""
+        names = list(sinces)
+        return [{"StationID": r["StationID"], "ToolType": r["ToolType"], **{n: r[f"S_{i}"] for i, n in enumerate(names)}}
+                for r in self._strokes(line_id, [sinces[n] for n in names])]
+
+    def _strokes(self, line_id: int, sinces: list) -> list[dict]:
+        q, first = int(line_id), min(sinces)
+        cols = ", ".join(f"SUM(CASE WHEN EndTime >= %s THEN Strokes ELSE 0 END) AS S_{i}" for i in range(len(sinces)))
+        return self._query(
+            f"SELECT StationID, ToolType, {cols} FROM ("
+            f"SELECT ph.StationID, ph.ToolType, p.EndTime, CAST(p.ActualQuantity AS bigint) * {_HITS} AS Strokes "
+            f"FROM {self.done_view} p JOIN dbo.PartPattern pp ON pp.PartID = p.PartID "
+            "JOIN dbo.PatternHole ph ON ph.PatternName = pp.PatternName WHERE p.LineID = %s AND p.EndTime >= %s "
+            "UNION ALL SELECT h.StationID, h.ToolType, p.EndTime, CAST(p.ActualQuantity AS bigint) "
+            f"FROM {self.done_view} p JOIN dbo.Hole h ON h.PartID = p.PartID WHERE p.LineID = %s AND p.EndTime >= %s "
+            "UNION ALL SELECT n.StationID, n.ToolType, p.EndTime, CAST(p.ActualQuantity AS bigint) "
+            f"FROM {self.done_view} p JOIN dbo.PartNotch n ON n.PartID = p.PartID WHERE p.LineID = %s AND p.EndTime >= %s"
+            ") x GROUP BY StationID, ToolType", (*sinces, q, first, q, first, q, first), "strokes")
 
 
 def source_for(cfg: TscConfig):
