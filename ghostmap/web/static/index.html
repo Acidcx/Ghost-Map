@@ -17,6 +17,7 @@
         <select id="scanSelect"></select>
         <a id="csvLink" class="btn ghost" href="#" download>Export CSV</a>
       </span>
+      <button id="alertsBtn" class="btn ghost" title="Everything that needs attention: this PC, machine comms, switches, the network, service items, TSC">Alerts <span id="alertsCount" class="chip">-</span></button>
       <button id="debugBtn" class="btn ghost admin-only" title="Ghost Map's own log: errors, OPC UA drops and reconnects">Debug log</button>
       <button id="newScanBtn" class="btn primary admin-only">New scan</button>
       <span id="who" class="who hidden"><span id="whoName"></span>
@@ -44,7 +45,8 @@
       <button data-tab="tscconn" class="admin-only">Connection</button></span>
     <span class="tabgroup hidden" data-group="maintenance">
       <button data-tab="service">Service</button>
-      <button data-tab="counters">Counters</button></span>
+      <button data-tab="counters">Counters</button>
+      <button data-tab="hostpc">This PC</button></span>
     <span class="tabgroup" data-group="network">
       <button data-tab="live">Live <span class="livedot sm" aria-hidden="true"></span></button>
       <button data-tab="overview" class="active">Overview</button>
@@ -54,6 +56,8 @@
       <button data-tab="compare">Compare</button>
       <button data-tab="probe" class="admin-only">Probe</button></span>
   </nav>
+  <!-- Errors from the alert list, on every page (warnings are only counted on the Alerts button). -->
+  <div id="alertBar" class="alertbar hidden" role="alert"></div>
 
   <main>
     <section id="empty" class="panel hidden">
@@ -99,6 +103,7 @@
         <div id="pNote"></div>
       </div>
       <div id="pBody"></div>
+      <div id="pHist"></div>
     </section>
 
     <section id="tab-traffic" class="tab hidden">
@@ -152,7 +157,7 @@
           <label class="small">Show <select id="svFilter"><option value="">all</option><option value="due">due soon and overdue</option></select></label>
           <button class="btn primary small admin-only" id="svAdd">Add item</button>
         </div>
-        <p class="small muted">Each item counts up from when it was last done: feet or pieces made and punch strokes (from TSC), production hours,
+        <p class="small muted">Each item counts up from when it was last done: feet or pieces made and hole hits (from TSC), production hours,
           run hours measured from the PLC's running bit, or days. Mark it done when the work is finished and it starts again.</p>
       </div>
       <div id="svBody"></div>
@@ -169,11 +174,28 @@
       <div id="ctBody"></div>
     </section>
 
+    <section id="tab-hostpc" class="tab hidden">
+      <div class="panel">
+        <div class="toolbar">
+          <h2 class="grow" id="hpTitle">This PC</h2>
+          <span id="hpAt" class="small muted"></span>
+        </div>
+        <p class="small muted">The health of the PC Ghost Map runs on. Ghost Map only looks: it never starts, stops or changes anything here.
+          Disk, memory and CPU are checked every minute, services and the Windows event log every 5 minutes.</p>
+        <div id="hpTiles" class="tiles"></div>
+        <div id="hpAlerts"></div>
+      </div>
+      <div class="pgrid">
+        <div class="panel"><h3>FactoryTalk and Rockwell services</h3><div id="hpServices"></div></div>
+        <div class="panel"><h3 id="hpEventsTitle">Windows event log</h3><div id="hpEvents"></div></div>
+      </div>
+    </section>
+
     <section id="tab-tscconn" class="tab hidden">
       <div class="panel">
         <h2>TSC database</h2>
         <p class="small muted">Ghost Map reads TSC's part schedule views with fixed SELECT queries on a read-only connection. Use a SQL login that can only SELECT
-          (for example <span class="mono">GRANT SELECT ON SCHEMA::DataView TO ghostmap_ro</span>). Stations, shifts, stops and punch strokes need a few more read grants: see <b>What Ghost Map can read</b> below. Type <b>demo</b> as the server to try a simulated schedule.</p>
+          (for example <span class="mono">GRANT SELECT ON SCHEMA::DataView TO ghostmap_ro</span>). Stations, shifts, stops and hole hits need a few more read grants: see <b>What Ghost Map can read</b> below. Type <b>demo</b> as the server to try a simulated schedule.</p>
         <form id="tForm" class="tform" autocomplete="off">
           <div class="row">
             <label>Server <input name="server" required maxlength="200" placeholder="SQLHOST, SQLHOST\INSTANCE or 10.0.0.5,1433"></label>
@@ -335,6 +357,11 @@
           <div id="uaAttrs" class="muted small">Select a node.</div>
         </div>
       </div>
+      <div class="panel" id="uaTrustBox">
+        <h3>Gateway certificates</h3>
+        <p class="small muted">The first certificate each OPC UA server shows is pinned to its address. If a different one turns up later, a signed or encrypted session is refused, and a Security None session keeps reading with a warning, until an admin accepts the new certificate here. Accept only if you know the gateway was reinstalled or its certificate renewed.</p>
+        <div id="uaTrust"></div>
+      </div>
     </section>
   </main>
 
@@ -463,6 +490,15 @@
     </form>
   </dialog>
 
+  <dialog id="alertsDialog" class="wide">
+    <div class="toolbar"><h3 class="grow">Alerts</h3><span id="alertsAt" class="small muted"></span></div>
+    <div id="alertsList"></div>
+    <details id="alertsRecentBox" class="hidden"><summary class="small muted">Raised and cleared lately</summary><div id="alertsRecent"></div></details>
+    <p class="small muted">Each alert is also written to Ghost Map's log and, on Windows, to the Application event log (source GhostMap), once when it
+      starts and once when it clears.</p>
+    <div class="actions"><button type="button" class="btn" id="alertsClose">Close</button></div>
+  </dialog>
+
   <dialog id="debugDialog" class="wide">
     <h3>Debug log</h3>
     <p class="small muted">Errors, OPC UA drops and reconnects, and errors from this page, newest at the bottom.
@@ -540,5 +576,6 @@
   <script src="static/maintenance.js"></script>
   <script src="static/probe.js"></script>
   <script src="static/live.js"></script>
+  <script src="static/alerts.js"></script>
 </body>
 </html>

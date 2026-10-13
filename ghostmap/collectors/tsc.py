@@ -3,7 +3,7 @@
 Ghost Map reads the part schedule through TSC's own DataView views (``vPartScheduleCommon``, the queue view
 ``vHmiPartScheduleQueueOrInProgress`` with the run order in QueueIndex, and ``vPartScheduleCompleted``), and,
 when the login is allowed to, a few lookup tables: stations and per-station progress, station dependencies,
-the shift calendar, downtime with stop reasons, and the tooling tables used to count punch strokes. Every
+the shift calendar, downtime with stop reasons, and the tooling tables used to count hole hits. Every
 query is a fixed SELECT; nothing else is ever sent (no INSERT, UPDATE, DELETE, EXEC or DDL), and the connection
 asks for a read-only session (ApplicationIntent=ReadOnly). Give Ghost Map a SQL login that can only SELECT.
 Customer names and comments are never read.
@@ -99,7 +99,7 @@ FEATURES = {
                       "GRANT SELECT ON dbo.StationDependencyType TO <login>;"),
     "shifts": ("The shift calendar", "GRANT SELECT ON dbo.Shift TO <login>; GRANT SELECT ON dbo.DayOfWeek TO <login>;"),
     "downtime": ("Stops and their reasons", "GRANT SELECT ON dbo.vGetDownTimeData TO <login>;"),
-    "strokes": ("Punch strokes per tool (maintenance)", "GRANT SELECT ON dbo.PartPattern TO <login>; GRANT SELECT ON dbo.PatternHole TO <login>; "
+    "strokes": ("Hole hits per tool (maintenance)", "GRANT SELECT ON dbo.PartPattern TO <login>; GRANT SELECT ON dbo.PatternHole TO <login>; "
                 "GRANT SELECT ON dbo.Hole TO <login>; GRANT SELECT ON dbo.PartNotch TO <login>;"),
     "tool_types": ("Tool names", "GRANT SELECT ON Machine.ToolType TO <login>;"),
 }
@@ -211,6 +211,17 @@ class SqlTsc:
             f"MIN(EndTime) AS FirstEnd FROM {self.done_view} WHERE LineID = %s AND EndTime >= %s", (int(line_id), since))
         return rows[0] if rows else {}
 
+    def hourly(self, line_id: int, since: datetime) -> list[dict]:
+        """Finished parts since a time, summed by the clock hour they ended in (for Ghost Map's own history)."""
+        hour = "DATEADD(hour, DATEDIFF(hour, 0, EndTime), 0)"
+        return self._query(
+            f"SELECT {hour} AS Hour, COUNT(*) AS Parts, SUM(CAST(ActualQuantity AS bigint)) AS Pieces, "
+            "SUM(CAST(Length AS float) * ActualQuantity) AS LengthTotal, "
+            "SUM(CASE WHEN IsScrap = 1 THEN CAST(ActualQuantity AS bigint) ELSE 0 END) AS ScrapPieces, "
+            "SUM(CASE WHEN StartTime > '19010101' AND EndTime > StartTime THEN CAST(DATEDIFF(second, StartTime, EndTime) AS bigint) ELSE 0 END) AS RunSeconds "
+            f"FROM {self.done_view} WHERE LineID = %s AND EndTime >= %s GROUP BY {hour} ORDER BY Hour",
+            (int(line_id), since), "hourly")
+
     def totals_windows(self, line_id: int, sinces: dict) -> dict:
         """``totals`` for several start times in one pass over the completed parts: {name: row}."""
         names = list(sinces)
@@ -263,7 +274,7 @@ class SqlTsc:
         return self._query("SELECT HoleType, Description FROM Machine.ToolType")
 
     def strokes(self, line_id: int, since: datetime) -> list[dict]:
-        """Punch strokes per station and tool type for parts finished since a time: pattern holes (repeats
+        """Hole hits per station and tool type for parts finished since a time: pattern holes (repeats
         counted along the part), one-off holes and notches, times the pieces made."""
         return [{**r, "Strokes": r["S_0"]} for r in self._strokes(line_id, [since])]
 

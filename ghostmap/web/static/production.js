@@ -37,16 +37,22 @@ async function prodLoadLines() {
 $("#pLine").addEventListener("change", (e) => {
   prod.line = Number(e.target.value);
   prod.data = null;
+  phist.data = null;
   try { localStorage.setItem("gm.tscline", prod.line); } catch (_) { /* ignore */ }
   prodRender();
   prodPoll();
+  histRender();
+  histPoll();
 });
 
 async function prodPoll() {
   clearTimeout(prod.timer);
   if (document.hidden || $("#tab-production").classList.contains("hidden")) return;
   try {
-    if (!prod.lines) await prodLoadLines();
+    if (!prod.lines) {
+      await prodLoadLines();
+      if (prod.line != null && !phist.data) histPoll();
+    }
     if (prod.lines && prod.line != null) {
       const line = prod.line;
       const d = await api(`api/tsc/production?line=${encodeURIComponent(line)}`, { timeout: 60000 });
@@ -87,23 +93,28 @@ function prodRender() {
   const T = d.totals, Q = d.queue_total, D = d.downtime;
   const tiles = [
     ["Orders worked", pNum(T.orders), "", "Orders with a part finished or running this shift"],
-    ["Pieces made", pNum(T.pieces), "", `${pNum(T.parts)} part lines finished, ${pNum(T.pieces_per_hour, 1)} pieces an hour`],
-    ["Feet made", pNum(T.feet)], ["Feet / hour", pNum(T.feet_per_hour)],
+    ["Pieces made", pNum(T.pieces), "", `${pNum(T.good_pieces)} good, ${pNum(T.scrap_pieces)} scrap; ${pNum(T.parts)} ${T.parts === 1 ? "part" : "parts"} finished`],
+    ["Feet made", pNum(T.feet)],
+    ["Feet / hour", pNum(T.feet_per_hour), "", `Shift average, stops included; ${pNum(T.pieces_per_hour, 1)} pieces an hour`],
   ];
-  if (D) tiles.push(["Uptime", `${Math.round(D.uptime * 100)}%`, D.ongoing ? "err" : D.uptime < 0.8 ? "warn" : "ok",
-    `${D.count} stop(s), ${fmtMins(D.seconds)} down this shift (TSC stop reasons)`]);
-  tiles.push(["Scrap / remakes", `${pNum(T.scrap_pieces)} / ${pNum(T.remakes)}`, T.scrap_pieces ? "warn" : "", "Scrap pieces / remade part lines"],
-    ["In queue", `${pNum(Q.orders)} orders`, "", `${pNum(Q.bundles)} bundles, ${pNum(Q.parts)} part lines, ${pNum(Q.pieces)} pieces, ${pNum(Q.feet)} ft`],
+  // Not availability: TSC's stops include planned ones (breaks, meetings), so this is only "not stopped".
+  if (D) tiles.push(["Running time", `${Math.round(D.running_share * 100)}%`, D.ongoing ? "err" : D.running_share < 0.8 ? "warn" : "ok",
+    `Share of the shift so far with no TSC stop open. ${D.count} stop(s), ${fmtMins(D.seconds)} stopped, planned stops included.`]);
+  tiles.push(["Scrap / remakes", `${pNum(T.scrap_pieces)} / ${pNum(T.remakes)}`, T.scrap_pieces ? "warn" : "", "Scrap pieces / remade parts"],
+    ["In queue", `${pNum(Q.orders)} orders`, "", `${pNum(Q.bundles)} bundles, ${pNum(Q.parts)} parts, ${pNum(Q.pieces)} pieces, ${pNum(Q.feet)} ft`],
     ["On hold", `${pNum(d.held.length)} ${d.held.length === 1 ? "part" : "parts"}`, d.held.length ? "warn" : ""]);
-  const tilesHtml = `<div class="tiles">${tiles.map(([l, n, c, t]) => l === "Uptime" ? `<div class="tile ringtile ${c}" title="${esc(t)}">${ring(D.uptime * 100, esc(n), c, 58, 6)}
+  const tilesHtml = `<div class="tiles">${tiles.map(([l, n, c, t]) => l === "Running time" ? `<div class="tile ringtile ${c}" title="${esc(t)}">${ring(D.running_share * 100, esc(n), c, 58, 6)}
     <div><div class="l">${esc(l)}</div><div class="s">${esc(t)}</div></div></div>` : `<div class="tile ${c || ""}" ${t ? `title="${esc(t)}"` : ""}><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div>${t ? `<div class="s">${esc(t)}</div>` : ""}</div>`).join("")}</div>`;
   $("#pBody").innerHTML = tilesHtml + stationsHtml(d) + runningHtml(d) + heldHtml(d)
     + `<div class="pgrid"><div class="panel"><h3>Feet per hour</h3>${hourlySvg(d.hourly)}</div>${downtimeHtml(d)}</div>`
     + ordersHtml(d) + queueHtml(d) + recentHtml(d);
 }
 
+// TSC keeps thickness in inches (e.g. 0.019), whatever unit lengths are in.
+const fmtThick = (t) => (t == null || t === "" ? "" : `${Number(t).toFixed(3).replace(/0+$/, "").replace(/\.$/, "")}"`);
+
 function partSpec(p, unit) {
-  return [p.profile, p.color, p.gauge != null ? `${p.gauge} ga` : "", fmtLen(p.length, unit)].filter(Boolean).map(esc).join(" &middot; ");
+  return [p.profile || p.part, p.color, fmtThick(p.thickness), fmtLen(p.length, unit)].filter(Boolean).map(esc).join(" &middot; ");
 }
 
 const STATION_STATE = { running: ["okchip", "running"], done: ["", "done with this part"], idle: ["", "idle"] };
@@ -147,7 +158,7 @@ function runningHtml(d) {
         <div><div class="k">Done in about</div><div class="v">${p.eta_s != null ? esc(fmtMins(p.eta_s)) : "-"}</div></div>
         <div><div class="k">Bundle / piece mark</div><div class="v">${esc(p.bundle || "-")} / ${esc(p.piece_mark || "-")}</div></div>
         <div><div class="k">Coil</div><div class="v">${esc(p.coil || "-")}</div></div>
-        <div><div class="k">Part line</div><div class="v">${esc(pNum(p.feet))} ft</div></div>
+        <div><div class="k">This part</div><div class="v">${esc(pNum(p.feet))} ft</div></div>
       </div></div>`;
   }).join("");
 }
@@ -155,27 +166,89 @@ function runningHtml(d) {
 function heldHtml(d) {
   if (!d.held.length) return "";
   return `<div class="panel mbanner warn"><h3>On hold</h3>${d.held.map((p) =>
-    `<div class="small">Order <b>${esc(p.order)}</b>, bundle ${esc(p.bundle || "-")}: ${partSpec(p, d.unit)}, ${pNum(p.quantity)} pieces <span class="chip warnchip">${esc(p.status || "hold")}</span></div>`).join("")}</div>`;
+    `<div class="small">Order <b>${esc(p.order)}</b>, bundle ${esc(p.bundle || "-")}: ${partSpec(p, d.unit)}, ${pNum(p.quantity)} pieces <span class="chip warnchip">${esc(p.status || "Hold")}</span></div>`).join("")}</div>`;
+}
+
+// Feet per period as bars, the last one (the period in progress) lighter. label(item) names a bar.
+function feetBars(items, label, aria, short = false, W = 600) {
+  const H = 190, top = 18, bottom = 22, n = items.length, slot = W / n;
+  const max = Math.max(1, ...items.map((h) => h.feet));
+  const val = (v) => (short && v >= 10000 ? `${Math.round(v / 1000)}k` : pNum(v));
+  const bars = items.map((h, i) => {
+    const bh = Math.round((h.feet / max) * (H - top - bottom));
+    const x = i * slot + slot * 0.15, y = H - bottom - bh, w = slot * 0.7;
+    const name = label(h);
+    return `<g><title>${esc(name)}: ${esc(pNum(h.feet))} ft, ${esc(pNum(h.pieces))} pieces, ${esc(h.parts)} parts</title>
+      <rect class="pbar${i === n - 1 ? " now" : ""}" x="${x}" y="${y}" width="${w}" height="${Math.max(bh, h.feet ? 1 : 0)}" rx="2"></rect>
+      ${h.feet ? `<text class="pval" x="${x + w / 2}" y="${y - 4}" text-anchor="middle">${esc(val(h.feet))}</text>` : ""}
+      <text class="plab" x="${x + w / 2}" y="${H - 6}" text-anchor="middle">${esc(name)}</text></g>`;
+  }).join("");
+  return `<svg class="pchart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(aria)}">
+    <defs><linearGradient id="gmBarGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--accent)"></stop>
+      <stop offset="1" style="stop-color:var(--accent-2);stop-opacity:.55"></stop></linearGradient></defs>
+    <line class="paxis" x1="0" x2="${W}" y1="${H - bottom}" y2="${H - bottom}"></line>${bars}</svg>`;
 }
 
 function hourlySvg(hours) {
-  const W = 600, H = 190, top = 18, bottom = 22, n = hours.length, slot = W / n;
-  const max = Math.max(1, ...hours.map((h) => h.feet));
-  const bars = hours.map((h, i) => {
-    const bh = Math.round((h.feet / max) * (H - top - bottom));
-    const x = i * slot + slot * 0.15, y = H - bottom - bh, w = slot * 0.7;
-    const label = new Date(h.start * 1000).toLocaleTimeString([], { hour: "2-digit" });
-    return `<g><title>${esc(label)}: ${esc(pNum(h.feet))} ft, ${esc(pNum(h.pieces))} pieces, ${esc(h.parts)} part lines</title>
-      <rect class="pbar${i === n - 1 ? " now" : ""}" x="${x}" y="${y}" width="${w}" height="${Math.max(bh, h.feet ? 1 : 0)}" rx="2"></rect>
-      ${h.feet ? `<text class="pval" x="${x + w / 2}" y="${y - 4}" text-anchor="middle">${esc(pNum(h.feet))}</text>` : ""}
-      <text class="plab" x="${x + w / 2}" y="${H - 6}" text-anchor="middle">${esc(label)}</text></g>`;
-  }).join("");
-  return `<svg class="pchart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Feet produced per hour">
-    <defs><linearGradient id="gmBarGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--accent)"></stop>
-      <stop offset="1" style="stop-color:var(--accent-2);stop-opacity:.55"></stop></linearGradient></defs>
-    <line class="paxis" x1="0" x2="${W}" y1="${H - bottom}" y2="${H - bottom}"></line>${bars}</svg>
-    <p class="small muted">Last 12 hours by clock hour; the last bar is the hour in progress.</p>`;
+  return feetBars(hours, (h) => new Date(h.start * 1000).toLocaleTimeString([], { hour: "2-digit" }), "Feet produced per hour")
+    + `<p class="small muted">Last 12 hours by clock hour; the last bar is the hour in progress.</p>`;
 }
+
+// ------------------------------------------------------------------ history (Ghost Map's own copy, by day or week)
+const HIST_POLL_MS = 300000;
+const HIST_COUNT = { day: 14, week: 12 };
+const phist = { by: "day", data: null, timer: null, line: null };
+try { phist.by = localStorage.getItem("gm.prodhist.by") === "week" ? "week" : "day"; } catch (_) { /* ignore */ }
+
+async function histPoll() {
+  clearTimeout(phist.timer);
+  if (document.hidden || $("#tab-production").classList.contains("hidden") || prod.line == null) return;
+  const line = prod.line, by = phist.by;
+  try {
+    const d = await api(`api/tsc/history?line=${encodeURIComponent(line)}&by=${by}&count=${HIST_COUNT[by]}`, { timeout: 180000 });
+    if (line === prod.line && by === phist.by) phist.data = d;
+  } catch (e) { phist.data = { ok: false, error: e.message }; }
+  histRender();
+  phist.timer = setTimeout(histPoll, HIST_POLL_MS);
+}
+
+function histRender() {
+  const d = phist.data, el = $("#pHist");
+  if (prod.error || prod.line == null) { el.innerHTML = ""; return; }
+  const by = phist.by;
+  const nav = `<span class="mnav" style="margin:0">${["day", "week"].map((b) =>
+    `<button class="${b === by ? "active" : ""}" data-histby="${b}">By ${b}</button>`).join("")}</span>`;
+  const csv = `api/tsc/history.csv?line=${encodeURIComponent(prod.line)}&by=${by}&count=${by === "day" ? 90 : 52}`;
+  const head = `<div class="toolbar"><h3 class="grow">History</h3>${nav}<a class="btn ghost small" href="${csv}" download>Download CSV</a></div>`;
+  if (!d || d.line !== prod.line) { el.innerHTML = `<div class="panel">${head}<p class="small muted">Reading...</p></div>`; return; }
+  if (!d.ok) { el.innerHTML = `<div class="panel">${head}<p class="errtext small">Can't show the history: ${esc(d.error)}</p></div>`; return; }
+  const rows = d.rows;
+  const short = (r) => (by === "day" ? new Date(r.start * 1000).toLocaleDateString([], { weekday: "short", day: "numeric" })
+    : new Date(r.start * 1000).toLocaleDateString([], { month: "short", day: "numeric" }));
+  const table = rows.slice().reverse().map((r) => `<tr><td class="nowrap">${esc(r.label)}${r.now ? ` <span class="chip okchip">so far</span>` : ""}${
+    r.partial ? ` <span class="chip" title="Began before Ghost Map's history did">partial</span>` : ""}</td>
+    <td class="num">${pNum(r.parts)}</td><td class="num">${pNum(r.pieces)}</td><td class="num">${pNum(r.feet)}</td>
+    <td class="num">${pNum(r.scrap_pieces)}</td><td class="num">${pNum(r.prod_hours, 1)}</td></tr>`).join("");
+  const ds = String(d.day_start).padStart(2, "0");
+  el.innerHTML = `<div class="panel">${head}
+    ${feetBars(rows, short, `Feet produced per ${by}`, true, 900)}
+    <div class="tablewrap"><table class="ptable"><thead><tr><th>${by === "day" ? "Day" : "Week"}</th><th class="num">Parts</th><th class="num">Pieces</th>
+      <th class="num">Feet</th><th class="num">Scrap pieces</th><th class="num">Production hours</th></tr></thead><tbody>${table}</tbody></table></div>
+    <p class="small muted">Kept by Ghost Map: copied from TSC's finished parts every 5 minutes${d.synced_at ? ` (last ${esc(fmtHm(d.synced_at))})` : ""},
+      so it stays when TSC clears old parts or can't be reached. Days start at ${ds}:00, the start of the first shift${by === "week" ? "; weeks on Monday" : ""}.
+      A part counts in the hour it finished. Production hours are start to end of each part.${d.sync_error ? ` <span class="errtext">Last copy failed: ${esc(d.sync_error)}</span>` : ""}</p></div>`;
+}
+
+$("#pHist").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-histby]");
+  if (!b) return;
+  phist.by = b.dataset.histby;
+  try { localStorage.setItem("gm.prodhist.by", phist.by); } catch (_) { /* ignore */ }
+  phist.data = null;
+  histRender();
+  histPoll();
+});
+document.addEventListener("gm:tab", (e) => { if (e.detail === "production") histPoll(); else clearTimeout(phist.timer); });
 
 function downtimeHtml(d) {
   const D = d.downtime;
@@ -203,8 +276,8 @@ function ordersHtml(d) {
       <td>${known ? `${pNum(o.parts_done)} / ${pNum(o.parts)}` : "-"}</td><td>${known ? pNum(o.feet_left) : "-"}</td></tr>`;
   }).join("");
   return `<div class="panel"><h3>Orders on the schedule</h3><div class="tablewrap"><table class="ptable"><thead><tr>
-    <th>Order</th><th>Bundles</th><th>Progress</th><th>Pieces done</th><th>Part lines done</th><th>Feet left</th></tr></thead><tbody>${rows}</tbody></table></div>
-    <p class="small muted">Whole orders, in the order they come up on the line. A part line is one row of the cut list (a length and a quantity).</p></div>`;
+    <th>Order</th><th>Bundles</th><th>Progress</th><th>Pieces done</th><th>Parts done</th><th>Feet left</th></tr></thead><tbody>${rows}</tbody></table></div>
+    <p class="small muted">Whole orders, in the order they come up on the line. A part is one row of the cut list (a length and a quantity); pieces are what it is made as.</p></div>`;
 }
 
 function stationPills(p) {
@@ -215,23 +288,23 @@ function queueHtml(d) {
   const more = d.queue_total.parts - d.queue.length;
   const multi = d.stations.length > 1;
   const rows = d.queue.map((p, i) => `<tr class="${p.state === "held" ? "held" : ""}"><td>${i + 1}</td><td>${esc(p.order)}</td><td>${esc(p.bundle)}</td>
-    <td>${esc(p.profile)}</td><td>${esc(p.color)}</td><td>${p.gauge != null ? esc(p.gauge) : "-"}</td><td>${esc(fmtLen(p.length, d.unit))}</td>
+    <td>${esc(p.profile || "-")}</td><td>${esc(p.color)}</td><td>${esc(fmtThick(p.thickness) || "-")}</td><td>${esc(fmtLen(p.length, d.unit))}</td>
     <td>${pNum(p.quantity)}</td><td>${pNum(p.feet)}</td>${multi ? `<td>${stationPills(p)}</td>` : ""}
-    <td>${p.state === "held" ? `<span class="chip warnchip">on hold</span>` : ""}</td></tr>`).join("");
+    <td>${p.state === "held" ? `<span class="chip warnchip">${esc(p.status || "Hold")}</span>` : ""}</td></tr>`).join("");
   return `<div class="panel"><h3>Up next: ${pNum(d.queue_total.orders)} orders, ${pNum(d.queue_total.bundles)} bundles, ${pNum(d.queue_total.pieces)} pieces</h3>
     ${d.queue.length ? `<div class="tablewrap"><table class="ptable"><thead><tr><th>#</th><th>Order</th><th>Bundle</th><th>Profile</th>
-    <th>Color</th><th>Gauge</th><th>Length</th><th>Pieces</th><th>Feet</th>${multi ? "<th>Stations</th>" : ""}<th></th></tr></thead><tbody>${rows}</tbody></table></div>
-    ${more > 0 ? `<p class="small muted">and ${more} more part line(s) after these.</p>` : ""}
+    <th>Color</th><th>Thickness</th><th>Length</th><th>Qty</th><th>Feet</th>${multi ? "<th>Stations</th>" : ""}<th></th></tr></thead><tbody>${rows}</tbody></table></div>
+    ${more > 0 ? `<p class="small muted">and ${more} more ${more === 1 ? "part" : "parts"} after these.</p>` : ""}
     <p class="small muted">In TSC's run order. Parts on hold stay in the queue but the line skips them.</p>` : `<p class="muted small">The queue is empty.</p>`}</div>`;
 }
 
 function recentHtml(d) {
-  const rows = d.recent.map((p) => `<tr><td>${esc(fmtHm(p.end))}</td><td>${esc(p.order)}</td><td>${esc(p.bundle)}</td><td>${esc(p.profile)}</td>
+  const rows = d.recent.map((p) => `<tr><td>${esc(fmtHm(p.end))}</td><td>${esc(p.order)}</td><td>${esc(p.bundle)}</td><td>${esc(p.profile || "-")}</td>
     <td>${esc(fmtLen(p.length, d.unit))}</td><td>${pNum(p.actual)}</td><td>${pNum(p.feet)}</td>
     <td>${p.start && p.end ? esc(fmtMins(p.end - p.start)) : "-"}</td>
     <td>${p.scrap ? `<span class="chip errchip">scrap</span>` : ""}${p.remake ? `<span class="chip warnchip">remake</span>` : ""}${p.error ? esc(p.error) : ""}</td></tr>`).join("");
   return `<div class="panel"><h3>Recently completed</h3>${d.recent.length ? `<div class="tablewrap"><table class="ptable"><thead><tr><th>Done</th><th>Order</th>
-    <th>Bundle</th><th>Profile</th><th>Length</th><th>Pieces</th><th>Feet</th><th>Took</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+    <th>Bundle</th><th>Profile</th><th>Length</th><th>Qty</th><th>Feet</th><th>Took</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
     : `<p class="muted small">Nothing finished in the last 12 hours.</p>`}</div>`;
 }
 

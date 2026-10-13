@@ -13,17 +13,25 @@ Production area with run state and counters. The tag names are invented.
 
 This is an approximation for demos and tests, not a copy of FT Linx Gateway's
 real address space.
+
+With ``cert_dir`` the server has its own self-signed certificate (made once and
+kept there) and offers Basic256Sha256 Sign and SignAndEncrypt next to Security
+None, so certificate pinning can be tried; another ``cert_dir`` is another
+certificate, like a reinstalled gateway.
 """
 
 from __future__ import annotations
 
 import asyncio
 import random
+import socket
+from pathlib import Path
 from typing import Optional
 
 from asyncua import Server, ua
 
 NS_URI = "urn:ghostmap:sim:ftlinx"
+APP_URI = "urn:ghostmap:sim:gateway"  # not NS_URI: the application URI takes namespace 1
 
 MACHINES = {
     "PRESS_01": {
@@ -82,8 +90,9 @@ def _vt(value):
 
 
 class SimUaServer:
-    def __init__(self, host: str = "127.0.0.1", port: int = 4899):
+    def __init__(self, host: str = "127.0.0.1", port: int = 4899, cert_dir: Optional[Path] = None):
         self.endpoint = f"opc.tcp://{host}:{port}"
+        self.cert_dir = Path(cert_dir) if cert_dir else None
         self.server = Server()
         self._task: Optional[asyncio.Task] = None
         self._counters: list[tuple] = []
@@ -101,7 +110,16 @@ class SimUaServer:
         await self.server.init()
         self.server.set_endpoint(self.endpoint)
         self.server.set_server_name("Ghost Map simulated FactoryTalk Linx Gateway")
-        self.server.set_security_policy([ua.SecurityPolicyType.NoSecurity])
+        if self.cert_dir:
+            key, cert = await self._certificate()
+            await self.server.set_application_uri(APP_URI)
+            await self.server.load_certificate(str(cert))
+            await self.server.load_private_key(str(key))
+            self.server.set_security_policy([ua.SecurityPolicyType.NoSecurity,
+                                             ua.SecurityPolicyType.Basic256Sha256_Sign,
+                                             ua.SecurityPolicyType.Basic256Sha256_SignAndEncrypt])
+        else:
+            self.server.set_security_policy([ua.SecurityPolicyType.NoSecurity])
         ns = self._ns = await self.server.register_namespace(NS_URI)
         root = await self.server.nodes.objects.add_folder(ua.NodeId("FTLinxGateway", ns),
                                                           ua.QualifiedName("FactoryTalk Linx Gateway", ns))
@@ -257,6 +275,18 @@ class SimUaServer:
         """Stop the heartbeat counter, like a gateway serving stale values (tests)."""
         if self._lev:
             self._lev["hb_frozen"] = frozen
+
+    async def _certificate(self) -> tuple[Path, Path]:
+        from asyncua.crypto.cert_gen import setup_self_signed_certificate
+        from cryptography.x509.oid import ExtendedKeyUsageOID
+
+        self.cert_dir.mkdir(parents=True, exist_ok=True)
+        key, cert = self.cert_dir / "sim-gateway-key.pem", self.cert_dir / "sim-gateway-cert.der"
+        if not cert.exists():
+            await setup_self_signed_certificate(
+                key, cert, APP_URI, socket.gethostname(), [ExtendedKeyUsageOID.SERVER_AUTH],
+                {"countryName": "US", "organizationName": "Ghost Map", "commonName": "Simulated FT Linx Gateway"})
+        return key, cert
 
     async def stop(self):
         if self._task:

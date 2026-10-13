@@ -64,6 +64,57 @@ jobs:
           if (-not $sql) { throw "TSC SQL link, DPAPI password or build info failed in the exe" }
           Write-Host "web UI, OPC UA and TSC OK"
 
+      - name: Windows service smoke test
+        shell: pwsh
+        run: |
+          # The exe from the step above must be gone (the onefile child process too) before the service takes the port.
+          Get-Process GhostMap -ErrorAction SilentlyContinue | Stop-Process -Force
+          Start-Sleep -Seconds 2
+          # Something in ~/.ghostmap to carry over to C:\ProgramData\GhostMap.
+          New-Item -ItemType Directory -Force "$env:USERPROFILE\.ghostmap" | Out-Null
+          '{"smoke": true}' | Set-Content "$env:USERPROFILE\.ghostmap\smoke-carried-over.json"
+          .\dist\GhostMap.exe service install
+          if ($LASTEXITCODE -ne 0) {
+            Get-Content C:\ProgramData\GhostMap\logs\ghostmap.log -ErrorAction SilentlyContinue
+            Get-WinEvent -LogName System -MaxEvents 15 | Where-Object ProviderName -eq "Service Control Manager" | Format-List TimeCreated, Message
+            throw "service install failed ($LASTEXITCODE)"
+          }
+          $info = Invoke-RestMethod http://127.0.0.1:8470/api/info
+          if ($info.data_dir -ne "C:\ProgramData\GhostMap") { throw "the service uses $($info.data_dir), not C:\ProgramData\GhostMap" }
+          if (-not (Test-Path "C:\Program Files\GhostMap\GhostMap.exe")) { throw "the exe was not copied to Program Files" }
+          if (-not (Test-Path "C:\ProgramData\GhostMap\smoke-carried-over.json")) { throw "~/.ghostmap was not carried over" }
+          $svc = Get-CimInstance Win32_Service -Filter "Name='GhostMap'"
+          Write-Host "service: $($svc.State), $($svc.StartMode), $($svc.StartName), $($svc.PathName)"
+          sc.exe qfailure GhostMap
+          if ($svc.StartName -ne "LocalSystem" -or $svc.StartMode -ne "Auto") { throw "unexpected account or start mode" }
+          # Kill it: Windows' recovery actions must start it again (10 s after the first failure).
+          Get-Process GhostMap -ErrorAction SilentlyContinue | Stop-Process -Force
+          $back = $false
+          foreach ($i in 1..60) {
+            Start-Sleep -Seconds 1
+            $now = Get-CimInstance Win32_Service -Filter "Name='GhostMap'"
+            if ($now.State -eq "Running" -and $now.ProcessId -ne $svc.ProcessId) {
+              try { Invoke-RestMethod http://127.0.0.1:8470/api/info | Out-Null; $back = $true; break } catch {}
+            }
+          }
+          if (-not $back) { throw "the service was not restarted after its process was killed" }
+          if (-not [System.Diagnostics.EventLog]::SourceExists("GhostMap")) { throw "the GhostMap event log source was not registered" }
+          # Upgrade in place to HTTPS: the self-signed certificate is made in ProgramData and the service serves it.
+          .\dist\GhostMap.exe service install --https
+          if ($LASTEXITCODE -ne 0) { throw "service install --https failed ($LASTEXITCODE)" }
+          $tlsInfo = Invoke-RestMethod https://127.0.0.1:8470/api/info -SkipCertificateCheck
+          $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new("C:\ProgramData\GhostMap\tls\ghostmap.crt")
+          $want = ($cert.GetCertHashString([System.Security.Cryptography.HashAlgorithmName]::SHA256) -split '(..)' -ne '') -join ':'
+          if (-not $tlsInfo.https -or $tlsInfo.tls.sha256 -ne $want) { throw "the service does not serve its certificate ($($tlsInfo.tls.sha256) vs $want)" }
+          Write-Host "HTTPS: $($cert.Subject), SHA-256 $want"
+          .\dist\GhostMap.exe service status
+          .\dist\GhostMap.exe service stop
+          if ($LASTEXITCODE -ne 0) { throw "service stop failed" }
+          .\dist\GhostMap.exe service uninstall
+          if (Get-Service GhostMap -ErrorAction SilentlyContinue) { throw "the service is still registered" }
+          if (-not (Test-Path "C:\ProgramData\GhostMap\history.db")) { throw "uninstall should keep the data" }
+          Write-Host "Windows service: install, data carried over, restart after a crash, HTTPS upgrade, stop and uninstall OK"
+
       - uses: actions/upload-artifact@v4
         with:
           name: GhostMap-windows

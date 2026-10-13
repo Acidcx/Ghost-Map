@@ -198,7 +198,8 @@ def test_clean_layout_checks_running_tags():
     known = {r["node_id"] for r in ROWS}
     L["machine"] = {"running": [ROWS[0]["node_id"]], "mode": "all"}
     assert clean_layout(L, known)["machine"] == {"running": [ROWS[0]["node_id"]], "mode": "all", "heartbeat": [],
-                                                 "freshness": "response", "max_read_ms": 2000}
+                                                 "freshness": "response", "max_read_ms": 2000,
+                                                 "read_mode": "subscribe", "sample_ms": 250}
     L["machine"]["running"] = ["ns=2;s=Made.Up"]
     with pytest.raises(ValueError):
         clean_layout(L, known)

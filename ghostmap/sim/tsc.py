@@ -21,9 +21,10 @@ import time
 import uuid
 from datetime import datetime, timedelta
 
+from ghostmap.analysis.production import STATUS_NAMES  # dbo.PartStatus as TSC ships it
+
 UNSET = datetime(1900, 1, 1)
 LINES = [(1, "Line 1"), (2, "Line 2")]
-STATUS_NAMES = {0: "Import", 1: "Pending", 2: "Queued", 3: "Hold", 4: "In Progress", 5: "Complete", 6: "Error"}
 STATIONS = [  # StationID, LineID, Name, Description
     (1, 1, "Punch / Rollformer", "Pre-punch press and rollformer"),
     (2, 1, "Notcher", "End notcher (some parts only)"),
@@ -280,6 +281,37 @@ class SimTsc:
                 "ScrapPieces": round(sum(r["ActualQuantity"] for r in done if r["IsScrap"]) * k),
                 "RunSeconds": sum((r["EndTime"] - r["StartTime"]).total_seconds() for r in done) * k,
                 "FirstEnd": min((r["EndTime"] for r in done), default=None)}
+
+    def hourly(self, line_id: int, since: datetime) -> list[dict]:
+        return self._timed("hourly", lambda: self._hourly(line_id, since))
+
+    def _hourly(self, line_id: int, since: datetime) -> list[dict]:
+        """The last ~14 hours from the simulated parts; before that, made-up hours at the line's usual pace
+        (three shifts on weekdays, the first shift on Saturdays, nothing on Sundays), the same on every call."""
+        w = self._w()
+        out: dict = {}
+        for r in w["rows"]:
+            if r["LineID"] == line_id and r["Status"] == 5 and r["EndTime"] >= since:
+                h = out.setdefault(r["EndTime"].replace(minute=0, second=0, microsecond=0),
+                                   {"Parts": 0, "Pieces": 0, "LengthTotal": 0.0, "ScrapPieces": 0, "RunSeconds": 0.0})
+                h["Parts"] += 1
+                h["Pieces"] += r["ActualQuantity"]
+                h["LengthTotal"] += r["Length"] * r["ActualQuantity"]
+                h["ScrapPieces"] += r["ActualQuantity"] if r["IsScrap"] else 0
+                h["RunSeconds"] += (r["EndTime"] - r["StartTime"]).total_seconds()
+        t = max(since.replace(minute=0, second=0, microsecond=0), w["start"] - timedelta(days=SIM_AGE_DAYS))
+        piece_in, qty, pace = (174.0, 27.4, 0.5) if line_id == 1 else (135.0, 7.5, 0.34)  # as world() averages
+        while t < w["start"]:
+            working = t.weekday() < 5 or (t.weekday() == 5 and 6 <= t.hour < 14)
+            rng = random.Random(f"{line_id}-{t:%Y%m%d%H}")
+            busy = rng.uniform(0.6, 1.25) if working and rng.random() > 0.08 else 0.0
+            if busy:
+                pieces = round(FEET_PER_MIN[line_id] * 60 * pace * busy * 12 / piece_in)
+                out[t] = {"Parts": max(1, round(pieces / qty)), "Pieces": pieces, "LengthTotal": pieces * piece_in,
+                          "ScrapPieces": round(pieces * rng.uniform(0, 0.05)) if rng.random() < 0.3 else 0,
+                          "RunSeconds": 3600 * min(0.97, 0.78 * busy)}
+            t += timedelta(hours=1)
+        return [{"Hour": k, **v} for k, v in sorted(out.items())]
 
     def totals_windows(self, line_id: int, sinces: dict) -> dict:
         return self._timed("totals", lambda: {n: self.totals(line_id, since) for n, since in sinces.items()})

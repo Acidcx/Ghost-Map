@@ -1,8 +1,9 @@
-"""Read-only OPC UA client for the Tag Browser (e.g. FactoryTalk Linx Gateway).
+"""Read-only OPC UA client for the Tag Browser and the machine dashboards (e.g. FactoryTalk Linx Gateway).
 
-Only browse, read and GetEndpoints are implemented. There is deliberately no
-write, call or node-management code here: Ghost Map never changes a value on
-a controller. Values are converted to JSON-friendly types for the web UI.
+Only browse, read, subscriptions (data-change notifications) and GetEndpoints are implemented. There is
+deliberately no write, call or node-management code here: Ghost Map never changes a value on a controller.
+A subscription only asks the gateway to send values when they change. Values are converted to JSON-friendly
+types for the web UI.
 
 FactoryTalk Linx Gateway serves OPC UA on ``opc.tcp://<host>:4990`` by
 default, with Security None and anonymous login available.
@@ -15,6 +16,8 @@ import datetime as _dt
 import enum
 import hashlib
 import socket
+import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Optional
 
@@ -28,6 +31,9 @@ EXPORT_BATCH = 50          # nodes per Browse request
 BROWSE_MAX_REFS = 1000     # children per node per response; the rest come via BrowseNext
 MAX_EXPORT_DEPTH = 16
 MAX_ARRAY_PREVIEW = 64
+SERVER_STATE = "i=2259"    # Server.ServerStatus.State: a one-value read that proves the session is alive
+CHANGES_KEPT = 20000       # value changes buffered per subscription for the history (oldest dropped first)
+CLOCK_SKEW_S = 5.0         # a source timestamp further than this from Ghost Map's clock is not trusted
 
 SECURITY_POLICIES = {
     "None": None,
@@ -111,6 +117,118 @@ def _status(dv: ua.DataValue) -> str:
     return code.name if code is not None else "Good"
 
 
+def _epoch(t) -> Optional[float]:
+    if not isinstance(t, _dt.datetime):
+        return None
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=_dt.timezone.utc)  # OPC UA timestamps are UTC
+    try:
+        return t.timestamp()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+class SubscriptionRefused(Exception):
+    """The gateway won't give us a subscription (too many, not supported, ...), but the session is fine."""
+
+
+class UaFeed:
+    """The latest value of every subscribed tag, kept up to date by the gateway's data-change notifications.
+
+    ``values``/``bad`` look exactly like a full read. ``changes`` lists every change since it was last drained,
+    in arrival order, as ``(time, node_id, value, status)``; the time is the gateway's source timestamp when its
+    clock agrees with ours, else when the notification arrived. Only changes after ``seed()`` are kept, so the
+    burst of initial values the gateway sends for a new subscription doesn't count as changes.
+    """
+
+    def __init__(self, node_ids: list[str]):
+        self.ids = list(dict.fromkeys(node_ids))
+        self.values: dict[str, Any] = {}
+        self.bad: dict[str, str] = {}
+        self.changes: deque = deque(maxlen=CHANGES_KEPT)
+        self.dropped = 0          # changes lost because nobody drained them in time
+        self.notifications = 0
+        self.refused: dict[str, str] = {}  # tags the gateway would not monitor, with its status
+        self.dead: Optional[str] = None   # why the subscription stopped (set by a status-change notification)
+        self.seeded = False
+        self.created = time.time()
+        self.last_check = self.last_full = 0.0
+        self.sub = None
+        self._by_node: dict = {}
+
+    # asyncua calls these two from its publish loop
+    def datachange_notification(self, node, val, data) -> None:
+        nid = self._by_node.get(node.nodeid)
+        if nid is None:
+            return
+        self.notifications += 1
+        dv = data.monitored_item.Value
+        value = jsonable(dv.Value.Value) if dv is not None and dv.Value is not None else None
+        status = _status(dv) if dv is not None else "BadNoData"
+        now = time.time()
+        src = _epoch(dv.SourceTimestamp) if dv is not None else None
+        t = src if src is not None and abs(src - now) <= CLOCK_SKEW_S else now
+        self._apply(nid, value, status, t)
+
+    def status_change_notification(self, status) -> None:
+        code = getattr(status, "Status", status)
+        self.dead = f"subscription ended by the gateway ({getattr(code, 'name', code)})"
+
+    def _apply(self, nid: str, value, status: str, t: float) -> None:
+        good = str(status).startswith("Good")
+        was_bad = nid in self.bad
+        if self.seeded and (self.values.get(nid) != value or was_bad == good):
+            if len(self.changes) == self.changes.maxlen:
+                self.dropped += 1
+            self.changes.append((t, nid, value, status))
+        self.values[nid] = value
+        if good:
+            self.bad.pop(nid, None)
+        else:
+            self.bad[nid] = status
+
+    def seed(self, rows: list[dict]) -> None:
+        """Start from a full read: everything the gateway sends from here on is a change."""
+        for r in rows:
+            self.values[r["node_id"]] = r["value"]
+            if str(r["status"]).startswith("Good"):
+                self.bad.pop(r["node_id"], None)
+            else:
+                self.bad[r["node_id"]] = r["status"]
+        self.bad.update(self.refused)
+        self.seeded = True
+
+    def reconcile(self, rows: list[dict], t: float) -> int:
+        """Fold in a full read (a periodic check that nothing was missed). Returns how many tags differed."""
+        n = 0
+        for r in rows:
+            nid = r["node_id"]
+            if nid in self.refused:
+                continue
+            if self.values.get(nid) != r["value"] or (nid in self.bad) == str(r["status"]).startswith("Good"):
+                n += 1
+                self._apply(nid, r["value"], r["status"], t)
+        return n
+
+    def drain(self) -> list[tuple]:
+        out = list(self.changes)
+        self.changes.clear()
+        return out
+
+    def publish_age(self) -> Optional[float]:
+        """Seconds since the gateway last answered a publish (data or keep-alive); None if asyncua doesn't say."""
+        last = getattr(self.sub, "last_publish_at", None)
+        return time.monotonic() - last if isinstance(last, (int, float)) and last else None
+
+    async def close(self) -> None:
+        if self.sub is not None:
+            try:
+                await self.sub.delete()
+            except Exception:
+                pass
+            self.sub = None
+
+
 def _endpoint_info(e: ua.EndpointDescription) -> dict:
     return {
         "url": e.EndpointUrl,
@@ -136,9 +254,13 @@ class UaBrowser:
         self.url = normalize_endpoint(url)
         self.client = Client(self.url, timeout=timeout)
         self.server_cert_sha1: Optional[str] = None
+        self.cert_warning: Optional[str] = None  # the server's certificate is not the pinned one (Security None)
 
     async def connect(self, security: str = "None", mode: str = "SignAndEncrypt", username: str = "",
-                      password: str = "", pki_dir: Optional[Path] = None) -> dict:
+                      password: str = "", pki_dir: Optional[Path] = None, trust=None) -> dict:
+        """Open the session. ``trust`` (a ``ua_trust.CertTrust``) checks the server's certificate against the
+        one pinned for this address while the session is created; a secure session to a server whose
+        certificate changed is refused there (``CertificateChanged``)."""
         if security not in SECURITY_POLICIES:
             raise ValueError(f"security must be one of {', '.join(SECURITY_POLICIES)}")
         if security != "None":
@@ -151,6 +273,13 @@ class UaBrowser:
         if username:
             self.client.set_user(username)
             self.client.set_password(password)
+        if trust is not None:
+            async def check(cert, _server) -> None:
+                from cryptography.hazmat.primitives.serialization import Encoding
+
+                self.cert_warning = trust.check(self.url, cert.public_bytes(Encoding.DER), secure=security != "None")
+
+            self.client.certificate_validator = check
         await self.client.connect()
         info = {"url": self.url, "security": security if security != "None" else "None",
                 "mode": mode if security != "None" else "None", "user": username or "anonymous"}
@@ -169,6 +298,8 @@ class UaBrowser:
         if cert:
             self.server_cert_sha1 = hashlib.sha1(cert).hexdigest()
             info["server_cert_sha1"] = self.server_cert_sha1
+            info["server_cert_sha256"] = hashlib.sha256(cert).hexdigest()
+        info["cert_warning"] = self.cert_warning
         return info
 
     async def disconnect(self) -> None:
@@ -176,6 +307,12 @@ class UaBrowser:
             await self.client.disconnect()
         except Exception:
             pass
+
+    def connected(self) -> bool:
+        """False once the socket under the session is closed (no request is sent to find out)."""
+        proto = getattr(self.client.uaclient, "protocol", None)
+        state = getattr(proto, "state", None)
+        return proto is not None and getattr(state, "name", "OPEN") != "CLOSED"
 
     async def browse(self, node_id: Optional[str] = None) -> list[dict]:
         node = self.client.get_node(node_id) if node_id else self.client.nodes.objects
@@ -222,6 +359,56 @@ class UaBrowser:
                 "server_time": jsonable(dv.ServerTimestamp),
             })
         return out
+
+    async def subscribe(self, node_ids: list[str], sample_ms: int = 250, publish_ms: int = 1000,
+                        queue: int = 8) -> UaFeed:
+        """A data-change subscription on ``node_ids``. Raises SubscriptionRefused when the gateway says no.
+
+        The gateway samples each tag every ``sample_ms`` and sends what changed every ``publish_ms``, queueing up
+        to ``queue`` changes per tag in between, so a bit that flicks on and off within one publish still
+        arrives as two changes. A keep-alive comes at least every 10 publishes when nothing changes.
+        """
+        feed = UaFeed(node_ids)
+        params = ua.CreateSubscriptionParameters()
+        params.RequestedPublishingInterval = float(publish_ms)
+        params.RequestedMaxKeepAliveCount = 10
+        params.RequestedLifetimeCount = 60
+        params.MaxNotificationsPerPublish = 0
+        params.PublishingEnabled = True
+        params.Priority = 0
+        try:
+            feed.sub = await self.client.create_subscription(params, feed)
+        except Exception as exc:
+            if is_connection_error(exc):
+                raise
+            raise SubscriptionRefused(f"{type(exc).__name__}: {exc}") from exc
+        nodes = []
+        for nid in feed.ids:
+            try:
+                parsed = ua.NodeId.from_string(nid)
+            except Exception:
+                feed.refused[nid] = "BadNodeIdInvalid"
+                continue
+            feed._by_node[parsed] = nid
+            nodes.append((nid, self.client.get_node(parsed)))
+        try:
+            for i in range(0, len(nodes), MAX_READ):
+                chunk = nodes[i:i + MAX_READ]
+                handles = await feed.sub.subscribe_data_change([n for _, n in chunk], queuesize=queue,
+                                                               sampling_interval=float(sample_ms))
+                for (nid, _), h in zip(chunk, handles if isinstance(handles, list) else [handles]):
+                    if isinstance(h, ua.StatusCode):
+                        feed.refused[nid] = h.name
+        except Exception as exc:
+            await feed.close()
+            if is_connection_error(exc):
+                raise
+            raise SubscriptionRefused(f"{type(exc).__name__}: {exc}") from exc
+        if nodes and len(feed.refused) >= len(feed.ids):
+            reasons = sorted(set(feed.refused.values()))
+            await feed.close()
+            raise SubscriptionRefused(f"the gateway refused every tag ({', '.join(reasons[:3])})")
+        return feed
 
     async def attributes(self, node_id: str) -> dict:
         node = self.client.get_node(node_id)

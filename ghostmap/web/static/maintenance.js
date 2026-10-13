@@ -1,6 +1,6 @@
 "use strict";
 // Maintenance pages: service items (a counter, an interval and a log of the work done) and the counters behind
-// them (feet, pieces, production hours and punch strokes from TSC; run hours measured from the PLC).
+// them (feet, pieces, production hours and hole hits from TSC; run hours measured from the PLC).
 // Uses $, esc and api from app.js, and pNum, fmtHm and prodLoadLines' line list from production.js.
 
 const MAINT_POLL_MS = 60000;
@@ -63,7 +63,7 @@ function svRender() {
   if ($("#svFilter").value === "due") items = items.filter((x) => x.state === "overdue" || x.state === "soon");
   if (!maint.data.items.length) {
     $("#svBody").innerHTML = `<div class="panel"><h3>No service items yet</h3><p class="small muted">${admin
-      ? "Press <b>Add item</b> for each job with an interval: a shear blade every so many cuts, a punch every so many strokes, rollformer grease every so many feet, hydraulic oil every so many run hours."
+      ? "Press <b>Add item</b> for each job with an interval: a shear blade every so many cuts, a punch every so many hole hits, rollformer grease every so many feet, hydraulic oil every so many run hours."
       : "Ask an admin to add the jobs that have a service interval."}</p></div>`;
     return;
   }
@@ -275,32 +275,32 @@ function ctRender(c) {
   $("#ctNote").innerHTML = t && t.ok && t.source === "demo"
     ? `<p class="small muted">Simulated TSC line (server set to <b>demo</b>): longer periods are extrapolated from the last 14 hours.</p>` : "";
   $("#ctLive").innerHTML = t && t.ok ? `Added up ${esc(fmtHm(t.at))}${t.stale ? ` <span class="chip pulse">refreshing</span>` : ""}` : "";
-  if (!t) html += `<div class="panel"><h3>Production counters</h3><p class="small muted">No TSC connection: set one up under Production &gt; Connection for feet, pieces and punch strokes.</p></div>`;
+  if (!t) html += `<div class="panel"><h3>Production counters</h3><p class="small muted">No TSC connection: set one up under Production &gt; Connection for feet, pieces and hole hits.</p></div>`;
   else if (!t.ok) html += `<div class="panel"><h3>Production counters</h3><p class="errtext small">Can't read the TSC database: ${esc(t.error)}</p></div>`;
   else {
     const strokesAll = (t.strokes || []).reduce((a, s) => a + (s.all || 0), 0);
     const runAll = c.machines.reduce((a, m) => a + (m.run_h || 0), 0);
-    html += `<div class="odos">${odo("Feet made, all time", t.periods.all.feet)}${odo("Pieces (shear cuts)", t.periods.all.pieces)}
-      ${t.strokes_ok ? odo("Punch strokes", strokesAll) : ""}${odo("Production hours", t.periods.all.prod_hours, 1)}
+    html += `<div class="odos">${odo("Feet made, all time", t.periods.all.feet)}${odo("Pieces made, all time", t.periods.all.pieces)}
+      ${t.strokes_ok ? odo("Hole hits (estimate)", strokesAll) : ""}${odo("Production hours", t.periods.all.prod_hours, 1)}
       ${c.machines.length ? odo("PLC run hours", runAll, 1) : ""}</div>`;
     const P = t.periods, cols = [["24h", "Last 24 h"], ["7d", "Last 7 days"], ["30d", "Last 30 days"], ["all", "All time"]];
     const row = (label, k, dp = 0) => `<tr><td>${esc(label)}</td>${cols.map(([c2]) => `<td>${pNum(P[c2][k], dp)}</td>`).join("")}</tr>`;
     html += `<div class="panel"><h3>Production counters (from TSC)</h3><div class="tablewrap"><table class="ptable ctable"><thead><tr><th></th>
       ${cols.map(([, l]) => `<th>${esc(l)}</th>`).join("")}</tr></thead><tbody>
-      ${row("Feet made", "feet")}${row("Pieces made (shear cuts)", "pieces")}${row("Part lines finished", "parts")}
+      ${row("Feet made", "feet")}${row("Pieces made", "pieces")}${row("Parts finished", "parts")}
       ${row("Production hours", "prod_hours", 1)}${row("Scrap pieces", "scrap_pieces")}</tbody></table></div>
       <p class="small muted">From completed parts in TSC. Production hours add up start to end of each part, so stops between parts don't count.
         ${P.all.first ? `TSC's completed parts go back to ${esc(fmtDate(P.all.first))}.` : ""}</p></div>`;
-    if (!t.strokes_ok) html += `<div class="panel"><h3>Punch strokes</h3><p class="small muted">The SQL login can't read TSC's pattern, hole and notch tables yet.
+    if (!t.strokes_ok) html += `<div class="panel"><h3>Hole hits per tool</h3><p class="small muted">The SQL login can't read TSC's pattern, hole and notch tables yet.
       See <b>What Ghost Map can read</b> on Production &gt; Connection for the grant.</p></div>`;
     else {
       const max = Math.max(1, ...t.strokes.map((s) => s.all));
-      html += `<div class="panel"><h3>Punch strokes</h3><div class="tablewrap"><table class="ptable"><thead><tr><th>Station</th><th>Tool</th><th></th>
+      html += `<div class="panel"><h3>Hole hits per tool (estimate)</h3><div class="tablewrap"><table class="ptable"><thead><tr><th>Station</th><th>Tool</th><th></th>
         <th>Last 30 days</th><th>All time</th><th></th></tr></thead><tbody>${t.strokes.map((s) => `<tr><td>${esc(s.station_name)}</td>
         <td class="mono">${esc(s.tool || "-")}</td><td>${esc(s.tool_name)}</td><td>${pNum(s["30d"])}</td><td><b>${pNum(s.all)}</b></td>
         <td><div class="pbarwrap sm"><span style="width:${Math.round((s.all / max) * 100)}%"></span></div></td></tr>`).join("")
         || `<tr><td colspan="6" class="muted">No holes or notches on the completed parts.</td></tr>`}</tbody></table></div>
-        <p class="small muted">Pieces made times the holes and notches on each part, counting repeat patterns along the length. One stroke per hole, per tool type.</p></div>`;
+        <p class="small muted">Pieces made times the holes and notches on each part, counting repeat patterns along the length: one hit per hole, per tool type. A gang die that punches several holes in one stroke is counted once per hole, so set die-life intervals in hits, not press strokes. Pieces made include scrap.</p></div>`;
     }
   }
   const M = c.machines;

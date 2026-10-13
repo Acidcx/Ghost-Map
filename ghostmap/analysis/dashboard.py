@@ -77,6 +77,7 @@ _COMMAND = re.compile(r"(^|_)(reset|rst|clear|clr|ack|acknowledge|silence)(_|$)|
 _OK_WHEN_ON = re.compile(r"^(no|not)_?(faults?|flts?|alarms?|alms?|errors?|errs?)$|(^|_)(ok|healthy|good)$", re.I)
 FRESHNESS = ("heartbeat", "response")
 DEFAULT_MAX_READ_MS = 2000
+DEFAULT_SAMPLE_MS = 250   # how often the gateway samples a subscribed tag (subscription mode)
 
 # An area where at least this share of the bits is on, and whose bit names
 # don't say "fault", may be using "on = healthy" (e.g. comms OK bits).
@@ -611,10 +612,15 @@ def clean_layout(layout: dict, known_ids: Optional[set] = None) -> dict:
         max_ms = min(max(int(m.get("max_read_ms") or DEFAULT_MAX_READ_MS), 100), 60000)
     except (TypeError, ValueError):
         raise ValueError("bad max_read_ms")
+    try:
+        sample_ms = min(max(int(m.get("sample_ms") or DEFAULT_SAMPLE_MS), 100), 10000)
+    except (TypeError, ValueError):
+        raise ValueError("bad sample_ms")
     machine = {"running": [nid(x) for x in running], "mode": "all" if m.get("mode") == "all" else "any",
                "heartbeat": [nid(x) for x in heartbeat],
                "freshness": m.get("freshness") if m.get("freshness") in FRESHNESS else ("heartbeat" if heartbeat else "response"),
-               "max_read_ms": max_ms}
+               "max_read_ms": max_ms, "read_mode": "poll" if m.get("read_mode") == "poll" else "subscribe",
+               "sample_ms": sample_ms}
     result = dict(layout, areas=out, machine=machine)
     result["summary"] = dict(layout.get("summary", {}), areas=len(out),
                              alarms=sum(len(a["alarms"]) for a in out), timers=sum(len(a["timers"]) for a in out),

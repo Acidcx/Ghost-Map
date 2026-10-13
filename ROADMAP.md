@@ -45,15 +45,17 @@ Web face first, because it's the biggest risk:
 - [x] Logins with roles (viewer / admin), hashed passwords, session cookies, login lockout
 - [x] Audit log of logins and actions (scans started, scans deleted)
 - [x] Security headers; state-changing requests protected against cross-site requests
-- [ ] HTTPS between the IXrouter and the HMI (self-signed certificate or plant CA)
+- [x] HTTPS between the IXrouter and the HMI (self-signed certificate or plant CA): `--https`, `--cert`/`--key`
 
 Then the service:
-- [ ] `GhostMap.exe service install|uninstall|start|stop` to run as a Windows service at boot
+- [x] `GhostMap.exe service install|uninstall|start|stop|status` to run as a Windows service at boot (LocalSystem, data in `C:\ProgramData\GhostMap`, restarted after a failure; install again to upgrade)
 - [ ] Scheduled background scans and polling, with history in SQLite (switch traffic, CPU and storm events: done, Network > Traffic)
   - [x] Background reading of every machine dashboard (resident collector), one OPC UA session per gateway, alarm history in SQLite (90 days)
 - [ ] Change timeline: device added or removed, firmware changed, port down, new MAC on a port
 - [ ] Alerts: thresholds and rate of change (e.g. CRC errors climbing); notifications through the IXON-approved path
-- [ ] HMI self-health: disk, uptime, Windows event-log errors, FactoryTalk Linx / View services running
+  - [x] One alert list from every page (top-bar count, errors as a line under the tabs), each with a hint and a link; written to the Windows Application event log (source GhostMap)
+  - [ ] Notifications off the HMI (email or IXON push), once the IXON-approved path is decided
+- [x] HMI self-health: disk, memory, CPU, uptime, Windows event-log errors, FactoryTalk Linx / View services running (Maintenance > This PC)
 
 ## Phase 3: passive detection
 
@@ -67,8 +69,8 @@ Then the service:
 ## Phase 4: machine data, OEE and maintenance (OPC UA)
 
 - [x] OPC UA Tag Browser (UaExpert-style): endpoints, browse, attributes, live watch, tag-list CSV export; Security None or signed/encrypted with a self-signed client certificate
-- [ ] Server certificate trust list (accept once, then pin)
-- [ ] Background OPC UA subscriptions for the resident service
+- [x] Server certificate trust list (accept once, then pin): Tags (OPC UA) > Gateway certificates
+- [x] Background OPC UA subscriptions for the resident service (full reads once a second as the fallback; changes replayed into the alarm history in order)
 - [ ] **L5X import**: read the Studio 5000 project export for fault UDTs, member descriptions and fault message text, so no fault tables are typed by hand
 - [ ] **Machine profiles** (see below), with automatic profile and variant detection from the OPC UA browse
 - [ ] OEE: availability × performance × quality per shift, day and week
@@ -93,7 +95,8 @@ Then the service:
 - [x] Production page per line: shift totals, running part, queue, holds, feet per hour, orders, recent parts
 - [x] Queue in TSC's run order (QueueIndex) with status codes; orders, bundles and pieces counted as TSC counts them
 - [x] Stations (paired stations shown together), TSC shift calendar, stops and reasons; optional grants listed on the Connection page
-- [ ] Completed-parts history beyond 12 hours (day / week reports)
+- [x] Completed-parts history beyond 12 hours: Ghost Map's own hourly copy (`production.db`), shown by day and week with CSV
+- [ ] Shift report (waits on planned stop codes and target speeds)
 - [ ] Combine with the machine dashboard: feet per hour against run time and stops (OEE performance)
 
 ## Test-phase readiness
@@ -145,7 +148,7 @@ variants:
 ```
 
 Rules that keep this reliable:
-- **Counters, not pulse bits.** A one-scan "fire" bit is invisible to any polling tool. A DINT counter in the PLC can't be missed. Machines that only have the bit need a one-line counter added.
+- **Counters, not pulse bits.** A one-scan "fire" bit is invisible to any polling tool, and to a subscription too (the gateway samples every 250 ms at best). A DINT counter in the PLC can't be missed. Machines that only have the bit need a one-line counter added.
 - Profiles live in this repo, versioned, and ship with each release. The same profile on every machine of a type means the same dashboards everywhere.
 
 ## Updating machines

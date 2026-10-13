@@ -12,9 +12,12 @@ requests, and an audit log.
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import contextlib
 import logging
 import re
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -33,9 +36,14 @@ from ghostmap.models import to_dict
 from ghostmap.protocols.snmp import SnmpCredentials
 from ghostmap.scanner import ScanRequest, run_scan
 from ghostmap.store import ScanStore, inventory_csv
+from ghostmap.ua_trust import CertificateChanged, CertTrust
 from ghostmap.web.auth import AuditLog, Lockout, Sessions, UserStore, client_allowed
 from ghostmap.history import RETENTION_DAYS, History
+from ghostmap.prodhistory import ProductionHistory
 from ghostmap.collectors.passive import PassiveMonitor
+from ghostmap.collectors.host import HostMonitor
+from ghostmap.analysis import alerts as alert_rules
+from ghostmap.web.alerts import AlertCenter
 from ghostmap.protocols.oui import mac_vendor
 from ghostmap.web.collector import Collector
 from ghostmap.web.dashboards import DashboardStore, LiveValues, visible_node_ids
@@ -50,6 +58,7 @@ DEMO_UA_PORT = 4899    # not 4990, so the demo never collides with a real FT Lin
 
 CLIENT_LOG_PER_MIN = 30  # browser error reports accepted per client per minute
 log = logging.getLogger("ghostmap.web")
+REFUSED_LOG_S = 600  # how often one refused address is written to the audit log
 
 STATIC = Path(__file__).parent / "static"
 SESSION_COOKIE = "gm_session"
@@ -82,6 +91,11 @@ class UaConnectIn(BaseModel):
     mode: str = Field("SignAndEncrypt", pattern="^(Sign|SignAndEncrypt)$")
     username: str = Field("", max_length=128)
     password: str = Field("", max_length=256)
+
+
+class UaTrustIn(BaseModel):
+    key: str = Field(..., max_length=300)
+    sha256: Optional[str] = Field(None, max_length=64)
 
 
 class UaUrlIn(BaseModel):
@@ -242,7 +256,8 @@ def _needs_admin(request: Request) -> bool:
 
 def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=None,
                allow: Optional[list] = None, demo_opcua: Optional[bool] = None,
-               demo_opcua_port: int = DEMO_UA_PORT, collect: bool = True, listen: bool = False) -> FastAPI:
+               demo_opcua_port: int = DEMO_UA_PORT, collect: bool = True, listen: bool = False,
+               tls: Optional[dict] = None) -> FastAPI:
     """``allow``: client networks besides loopback that may connect. ``None`` disables the check (tests).
 
     ``listen``: run the passive listeners (``collectors/passive.py``) for Network > Live. In the demo they are
@@ -267,7 +282,8 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
                 try:
                     from ghostmap.sim.opcua_server import SimUaServer
 
-                    demo_ua["server"] = await SimUaServer(port=demo_opcua_port).start()
+                    # Its own certificate, kept with the pins, so the demo gateway can be pinned like a real one.
+                    demo_ua["server"] = await SimUaServer(port=demo_opcua_port, cert_dir=store.root / "pki" / "sim-gateway").start()
                 except Exception:  # port taken or similar: everything else still works without it
                     demo_ua.pop("server", None)
                     return None
@@ -291,10 +307,16 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         if collect:
             collector.start()
             netmon.start()
+            hostmon.start()
+            alerts.start()
+            tsc.start_history()
         if listen:
             await passive.start()
         yield
         await passive.stop()
+        await alerts.stop()
+        await hostmon.stop()
+        await tsc.stop_history()
         await collector.stop()
         await netmon.stop()
         for b, *_ in list(ua_sessions.values()):
@@ -302,6 +324,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
                 await b.disconnect()
         await live.close()
         history.close()
+        prodhist.close()
         if "server" in demo_ua:
             await demo_ua["server"].stop()
 
@@ -317,10 +340,13 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     audit = AuditLog(store.root)
     jobs: dict[str, Job] = {}
     dashboards = DashboardStore(store.root)
+    trust = CertTrust(store.root)
     live = LiveValues(resolve_ua_url)
+    live.trust = trust
     history = History(store.root)
     collector = Collector(dashboards, live, history)
-    tsc = TscService(store.root, demo=demo)
+    prodhist = ProductionHistory(store.root)
+    tsc = TscService(store.root, demo=demo, history=prodhist)
     def scan_device_names() -> dict[str, str]:
         """MAC -> device name from the newest scan, so the traffic monitor can say what is on each port."""
         scans = sorted(store.list(), key=lambda x: x.get("started") or "", reverse=True)
@@ -357,18 +383,67 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         return known_cache["labels"], known_cache["ips"], known_cache["names"]
 
     passive = PassiveMonitor(store.root, known_devices, simulate=demo)
+    hostmon = HostMonitor(store.root, demo=demo)
+
+    # ------------------------------------------------------------- the alert list (rules: analysis/alerts.py)
+    def dashboard_alerts(now: float) -> list[dict]:
+        out = []
+        for meta in dashboards.list():
+            try:
+                dash = dashboards.load(meta["id"])
+            except (KeyError, OSError, ValueError):
+                continue
+            out += alert_rules.comms_alerts(dash, live.health(dash), collector.status(dash["id"]), now)
+            last = history.stops(dash["id"], now - 7 * 86400, limit=1)
+            out += alert_rules.stop_alerts(dash, last[0] if last else None, now)
+        return out
+
+    def switch_alerts(now: float) -> list[dict]:
+        if netmon.cfg is None:
+            return []
+        open_events = [e for e in netmon.events(now - 7 * 86400) if e.get("end") is None]
+        return alert_rules.switch_alerts(open_events, netmon.status(), now)
+
+    async def maintenance_alerts(now: float) -> list[dict]:
+        return alert_rules.maintenance_alerts((await maint_list())["items"])
+
+    alerts = AlertCenter({
+        "hmi": lambda now: alert_rules.host_alerts(hostmon.snapshot()),
+        "dashboards": dashboard_alerts,
+        "switches": switch_alerts,
+        "network": lambda now: alert_rules.network_alerts(list(passive.events), now),
+        "maintenance": maintenance_alerts,
+        "production": lambda now: alert_rules.tsc_alerts(tsc.status(), now),
+        "access": lambda now: alert_rules.access_alerts(list(refused.values()), now),
+    })
     tasks: set[asyncio.Task] = set()
     app.state.demo_ua, app.state.live, app.state.ua_sessions = demo_ua, live, ua_sessions  # for tests
     app.state.history, app.state.collector, app.state.tsc, app.state.passive = history, collector, tsc, passive
-    app.state.netmon = netmon
+    app.state.netmon, app.state.hostmon, app.state.alerts = netmon, hostmon, alerts
 
     def client_of(request: Request) -> str:
         return request.client.host if request.client else ""
+
+    refused: dict[str, dict] = {}  # addresses the allow-list turned away, for the audit log and the alert list
+
+    def note_refused(client: str, path: str) -> None:
+        now = time.time()
+        r = refused.get(client)
+        if r is None or now - r["logged"] > REFUSED_LOG_S:  # once per address per 10 minutes, not per request
+            audit.write(client, None, "access.refused", path)
+            log.warning("refused a connection from %s (not in --allow)", client)
+            if r is None and len(refused) >= 100:
+                refused.pop(min(refused, key=lambda k: refused[k]["last"]))
+            r = refused[client] = {"ip": client, "first": now, "count": 0, "logged": now}
+        r.update(last=now, count=r["count"] + 1, path=path)
+
+    app.state.refused = refused
 
     @app.middleware("http")
     async def access_control(request: Request, call_next):
         client = client_of(request)
         if allow is not None and not client_allowed(client, allow):
+            note_refused(client, request.url.path)
             return PlainTextResponse("Forbidden", status_code=403, headers=SECURITY_HEADERS)
         if request.method not in ("GET", "HEAD") and not request.headers.get(CSRF_HEADER):
             return JSONResponse({"detail": "missing X-Ghostmap header"}, status_code=403, headers=SECURITY_HEADERS)
@@ -438,7 +513,8 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
             raise HTTPException(401, "wrong user name or password")
         lockout.clear(client, f"user:{body.user}")
         token = sessions.create(body.user, role)
-        response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="strict", path="/")
+        response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="strict", path="/",
+                            secure=request.url.scheme == "https")
         audit.write(client, body.user, "login.ok", role)
         return {"user": body.user, "role": role}
 
@@ -457,7 +533,8 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         auth = users.has_users()
         return {"version": __version__, "build": BUILD, "data_dir": str(store.root), "auth": auth,
                 "user": s.user if s else None, "role": s.role if s else ("admin" if not auth else None),
-                "local": _is_loopback(client_of(request)),
+                "local": _is_loopback(client_of(request)), "https": request.url.scheme == "https",
+                "tls": {k: tls[k] for k in ("sha256", "not_after", "self_signed")} if tls else None,
                 "demo_opcua": demo_ua["server"].endpoint if "server" in demo_ua else None}
 
     # ------------------------------------------------------------- users
@@ -474,7 +551,8 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         token = sessions.create(body.name, "admin")
-        response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="strict", path="/")
+        response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="strict", path="/",
+                            secure=request.url.scheme == "https")
         audit.write(client, body.name, "user.setup", "admin")
         return {"user": body.name, "role": "admin"}
 
@@ -524,7 +602,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
             raise HTTPException(400, str(exc))
         try:
             info = await ua_call(browser.connect(args["security"], args["mode"], args["username"], args["password"],
-                                                 pki_dir=store.root / "pki"))
+                                                 pki_dir=store.root / "pki", trust=trust))
         except HTTPException:
             await browser.disconnect()
             raise
@@ -590,6 +668,9 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
             return await asyncio.wait_for(coro, timeout=60)
         except HTTPException:
             raise
+        except CertificateChanged as exc:
+            log.warning("opcua connect refused: %s", exc)
+            raise HTTPException(409, str(exc))
         except Exception as exc:  # asyncua raises its own error types (BadNodeIdUnknown, ...)
             log.warning("opcua call failed: %s: %s", type(exc).__name__, exc)
             raise HTTPException(502, f"{type(exc).__name__}: {exc}")
@@ -621,6 +702,30 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         audit.write(client_of(request), who(request), "opcua.connect",
                     f"{browser.url} security={body.security} user={body.username or 'anonymous'}")
         return {"sid": sid, **info}
+
+    @app.get("/api/opcua/trust")
+    def ua_trust_list(request: Request):
+        """The gateway certificates Ghost Map has pinned, and any that changed since (Tags page, admins)."""
+        require_admin(request)
+        return trust.list()
+
+    @app.post("/api/opcua/trust/accept")
+    def ua_trust_accept(body: UaTrustIn, request: Request):
+        try:
+            pinned = trust.accept(body.key, body.sha256 or "", who(request))
+        except KeyError:
+            raise HTTPException(404, "no changed certificate with that fingerprint at that address")
+        audit.write(client_of(request), who(request), "opcua.cert.accept", f"{body.key} sha256={pinned['sha256']}")
+        return trust.list()
+
+    @app.post("/api/opcua/trust/forget")
+    def ua_trust_forget(body: UaTrustIn, request: Request):
+        try:
+            trust.forget(body.key)
+        except KeyError:
+            raise HTTPException(404, "no pinned certificate at that address")
+        audit.write(client_of(request), who(request), "opcua.cert.forget", body.key)
+        return trust.list()
 
     @app.post("/api/opcua/disconnect")
     async def ua_disconnect(body: UaNodeIn):
@@ -812,7 +917,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         layout = build_layout(rows, name=dash["name"])
         known = {r["node_id"] for r in rows}
         old = dash["layout"].get("machine") or {}
-        keep = {k: old[k] for k in ("mode", "freshness", "max_read_ms") if k in old}
+        keep = {k: old[k] for k in ("mode", "freshness", "max_read_ms", "read_mode", "sample_ms") if k in old}
         for k in ("running", "heartbeat"):
             if old.get(k) and all(n in known for n in old[k]):
                 keep[k] = old[k]
@@ -1026,6 +1131,37 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         except Exception as exc:
             return {"ok": False, "configured": True, "error": tsc_error(exc)}
 
+    @app.get("/api/tsc/history")
+    async def tsc_history(line: int, by: str = "day", count: int = 14):
+        """A line's totals per hour, production day or week, from Ghost Map's own copy (prodhistory.py)."""
+        try:
+            return {"ok": True, **await tsc.history(line, by, count)}
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except LookupError as exc:
+            return {"ok": False, "configured": False, "error": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "configured": True, "error": tsc_error(exc)}
+
+    @app.get("/api/tsc/history.csv")
+    async def tsc_history_csv(line: int, by: str = "day", count: int = 14):
+        try:
+            h = await tsc.history(line, by, count)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        except Exception as exc:
+            raise HTTPException(503, tsc_error(exc))
+        out = io.StringIO()
+        w = csv.writer(out)
+        w.writerow([by, "start", "parts", "pieces", "feet", "scrap_pieces", "production_hours", "in_progress", "partial"])
+        for r in h["rows"]:
+            w.writerow([r["label"], time.strftime("%Y-%m-%d %H:%M", time.localtime(r["start"])), r["parts"], r["pieces"],
+                        r["feet"], r["scrap_pieces"], r["prod_hours"], int(r["now"]), int(r["partial"])])
+        name = f"ghostmap-line{line}-by-{by}.csv"
+        return PlainTextResponse(out.getvalue(), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
     # ------------------------------------------------------------- traffic monitor (switch counters over SNMP)
     @app.get("/api/netmon/config")
     def netmon_config(request: Request):
@@ -1228,8 +1364,23 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
                 "netmon": {**netmon.status(), "db": netmon.store.counts()},
                 "dashboards": [{k: d[k] for k in ("id", "name", "endpoint", "summary")} for d in dashboards.list()],
                 "comms": live.snapshot(), "gateway_sessions": live.sessions(),
+                "host": hostmon.snapshot(), "alerts": alerts.list(),
+                "tls": {k: v for k, v in tls.items() if k != "key"} if tls else None,
                 "opcua_sessions": [{"url": e[3]["url"], "open": e[0] is not None, "idle_s": int(time.time() - e[1]),
                                     "security": e[3]["security"]} for e in ua_sessions.values()]}
+
+    @app.get("/api/alerts")
+    async def alert_list():
+        """Everything that needs attention now, worst first (see analysis/alerts.py)."""
+        return await alerts.current()
+
+    @app.get("/api/host")
+    async def host_health():
+        """This PC's health: disk, memory, CPU, uptime, FactoryTalk services and event-log errors."""
+        if hostmon.slow.get("at") is None and (demo or sys.platform == "win32"):
+            await hostmon.read_windows()
+        snap = hostmon.snapshot()
+        return {**snap, "alerts": alert_rules.host_alerts(snap)}
 
     @app.get("/api/debug/log")
     def debug_log(request: Request, lines: int = 300):

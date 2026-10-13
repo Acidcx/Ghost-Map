@@ -205,7 +205,7 @@ function machineRender() {
   const frozen = !!(vals?.ok && H.heartbeat?.frozen);
   $("#mLive").innerHTML = !vals ? `reading <span class="mono">${esc(d.endpoint)}</span>...`
     : vals.ok ? `<span class="chip ${frozen ? "errchip" : "okchip"}">${frozen ? "frozen?" : "live"}</span> <span class="mono">${esc(d.endpoint)}</span> &middot; ${esc(new Date(vals.at * 1000).toLocaleTimeString())}
-      &middot; ${Object.keys(vals.values).length} tags${H.latency_ms != null ? ` in ${esc(fmtMs(H.latency_ms))}` : ""}${
+      &middot; ${Object.keys(vals.values).length} tags${H.mode === "subscription" ? ", subscribed" : H.latency_ms != null ? ` in ${esc(fmtMs(H.latency_ms))}` : ""}${
       vals.bad.length ? ` &middot; <a href="#" data-view="health" class="errtext">${vals.bad.length} not readable</a>` : ""}`
       : `<span class="chip errchip">no data</span> <span class="errtext">${esc(vals.error)}</span>`;
 
@@ -266,6 +266,9 @@ function machineRender() {
   } else if (vals?.ok && vals.bad.length) {
     html0 = `<div class="mbanner warn">${vals.bad.length} of ${Object.keys(vals.values).length} tags aren't readable right now, so their alarms show grey (no data), not OK.
       <a href="#" data-view="health">Which ones</a></div>`;
+  } else if (H?.cert_changed) {
+    html0 = `<div class="mbanner warn">The gateway's certificate changed since Ghost Map pinned it. If it was reinstalled or its certificate
+      renewed, an admin can accept the new one in Tags (OPC UA) &gt; Gateway certificates; if not, find out what is answering at that address.</div>`;
   }
   if (view.startsWith("sec:") && !sections.some((x) => `sec:${x.name}` === view)) view = "overview";
   if (view === "drives" && !axesTotal) view = "overview";
@@ -376,10 +379,11 @@ function commsState(vals) {
   if (H.heartbeat?.frozen) return { n: "frozen", cls: "err", title: "The heartbeat tag stopped changing" };
   const cls = H.good === H.total ? (H.slow ? "warn" : "ok") : pct >= 95 ? "warn" : "err";
   return { n: `${pct}%`, cls, sub: fmtMs(H.latency_ms),
-    title: `${H.good} of ${H.total} tags read Good; last read ${fmtMs(H.latency_ms)}${H.slow ? " (slow)" : ""}` };
+    title: `${H.good} of ${H.total} tags read Good; last ${H.mode === "subscription" ? "check" : "read"} ${fmtMs(H.latency_ms)}${H.slow ? " (slow)" : ""}` };
 }
 
-const EVENT_LABEL = { connected: "Connected", drop: "Dropped", reconnected: "Reconnected", error: "Error", coverage: "Tags" };
+const EVENT_LABEL = { connected: "Connected", drop: "Dropped", reconnected: "Reconnected", error: "Error", coverage: "Tags", subscribe: "Subscription",
+  certificate: "Certificate" };
 
 // ------------------------------------------------------------------ alarm history (recorded by the server)
 const HIST_REFRESH_MS = 10000;
@@ -460,12 +464,18 @@ function healthView(L, vals) {
         : `<span class="oktext">moving</span> <span class="small muted">changed ${esc(fmtAge(hb.age_s))} ago</span>`;
   const cell = (k, val, tip = "") => `<div title="${esc(tip)}"><div class="k">${k}</div><div class="v">${val}</div></div>`;
   const pct = H.total ? `${H.good} of ${H.total} (${Math.floor((H.good / H.total) * 1000) / 10}%)` : "-";
+  const sub = H.mode === "subscription";
+  const modeTxt = sub ? `<span class="oktext">subscription</span> <span class="small muted">sampled every ${esc(H.sample_ms)} ms, ${esc(Number(H.notifications || 0).toLocaleString())} changes</span>`
+    : H.read_mode === "poll" ? `full read every second <span class="small muted">(set below)</span>`
+      : `<span class="warntext">full read every second</span> <span class="small muted">${esc(H.sub_error ? `subscription refused: ${H.sub_error}` : "subscribing...")}</span>`;
   let html = `<div class="panel"><h3>Comms with the gateway</h3>
-    <p class="small muted">Measured on the reads behind this dashboard, while someone has it open. A tag that doesn't read Good shows grey (no data), never OK.</p>
+    <p class="small muted">${sub ? `The gateway sends each change as it happens; Ghost Map checks the session every 5 s and reads everything once a minute to make sure nothing was missed. The alarm history runs ${esc(H.history_lag_s ?? 2)} s behind so late changes land in order.`
+      : "Measured on the reads behind this dashboard."} A tag that doesn't read Good shows grey (no data), never OK.</p>
     <div class="mhealth">
       ${cell("Connection", vals?.ok ? `<span class="oktext">reading</span> <span class="small muted">since ${esc(fmtClock(H.connected_at))}</span>` : `<span class="errtext">no data</span>`, vals?.error || "")}
+      ${cell("Values by", modeTxt, sub && H.not_monitored ? `${H.not_monitored} tag(s) the gateway would not monitor` : "")}
       ${cell("Tags read Good", `<span class="${H.good === H.total ? "" : "errtext"}">${esc(pct)}</span>`)}
-      ${cell("Read time", H.latency_ms != null ? `<span class="${H.slow ? "errtext" : ""}">${esc(fmtMs(H.latency_ms))}</span> <span class="small muted">avg ${esc(fmtMs(H.latency_avg_ms))}, max ${esc(fmtMs(H.latency_max_ms))}</span>` : "-", `Slow above ${m.max_read_ms || 2000} ms`)}
+      ${cell(sub ? "Check time" : "Read time", H.latency_ms != null ? `<span class="${H.slow ? "errtext" : ""}">${esc(fmtMs(H.latency_ms))}</span> <span class="small muted">avg ${esc(fmtMs(H.latency_avg_ms))}, max ${esc(fmtMs(H.latency_max_ms))}</span>` : "-", `Slow above ${m.max_read_ms || 2000} ms`)}
       ${cell("Last good read", H.last_ok ? `${esc(fmtClock(H.last_ok))} <span class="small muted">${esc(fmtAge(now - H.last_ok))} ago</span>` : "-")}
       ${cell("Drops / reconnects", `${H.drops || 0} / ${H.reconnects || 0}`, "Since this dashboard was first opened after Ghost Map started")}
       ${cell("Heartbeat", hbState, m.heartbeat?.[0] || "A tag the PLC changes all the time")}
@@ -476,6 +486,10 @@ function healthView(L, vals) {
         <option value="heartbeat" ${freshness === "heartbeat" ? "selected" : ""}>Heartbeat tag</option>
         <option value="response" ${freshness === "response" ? "selected" : ""}>Response time only</option></select></label>
       <label>Slow above <input type="number" id="mMaxMs" min="100" max="60000" step="100" value="${esc(m.max_read_ms || 2000)}" ${mach.edit ? "" : "disabled"}> ms</label>
+      <label title="Subscription: the gateway sends changes as they happen. Full read: every tag is read once a second, as Ghost Map 0.3 did.">Values by <select id="mReadMode" ${mach.edit ? "" : "disabled"}>
+        <option value="subscribe" ${m.read_mode !== "poll" ? "selected" : ""}>Subscription</option>
+        <option value="poll" ${m.read_mode === "poll" ? "selected" : ""}>Full read every second</option></select></label>
+      <label title="How often the gateway checks each tag for a change. Faster catches shorter blips but asks more of the gateway and the PLC.">Sample every <input type="number" id="mSampleMs" min="100" max="10000" step="50" value="${esc(m.sample_ms || 250)}" ${mach.edit && m.read_mode !== "poll" ? "" : "disabled"}> ms</label>
       ${mach.edit ? "" : `<span class="muted admin-only">Tick Edit to change these.</span>`}
     </div>
     ${freshness === "heartbeat" ? `<p class="small">Heartbeat tag: <span class="mono" title="${esc(m.heartbeat?.[0] || "")}">${esc(shortId(m.heartbeat?.[0])) || "none"}</span>
@@ -568,7 +582,8 @@ function axisDetailHtml(d) {
 
 async function saveFreshness() {
   const L = layoutCopy();
-  L.machine = { ...(L.machine || {}), freshness: $("#mFreshness").value, max_read_ms: Number($("#mMaxMs").value) || 2000 };
+  L.machine = { ...(L.machine || {}), freshness: $("#mFreshness").value, max_read_ms: Number($("#mMaxMs").value) || 2000,
+    read_mode: $("#mReadMode").value, sample_ms: Number($("#mSampleMs").value) || 250 };
   try { await machineSaveLayout(L); } catch (err) { alert(err.message); }
 }
 
@@ -715,7 +730,7 @@ $("#mAreas").addEventListener("change", (e) => {
     historyLoad().then(machineRender);
     return;
   }
-  if (e.target.id === "mFreshness" || e.target.id === "mMaxMs") { e.target.blur(); saveFreshness(); return; }
+  if (["mFreshness", "mMaxMs", "mReadMode", "mSampleMs"].includes(e.target.id)) { e.target.blur(); saveFreshness(); return; }
   const id = e.target.dataset.invert;
   if (id !== undefined) machineSaveOverrides((ov) => { ov.invert[id] = e.target.checked; });
 });

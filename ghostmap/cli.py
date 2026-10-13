@@ -259,16 +259,68 @@ def cmd_diff(args) -> int:
     return 0
 
 
-def cmd_web(args) -> int:
-    import socket
-    import threading
-    import webbrowser
+LOCAL_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def _exposure(host: str, allow_args, data_dir, user_cmd: str = "ghostmap user add <name> --role admin"):
+    """The client allow-list, and why it isn't safe to serve on ``host`` (None when it is)."""
+    from ghostmap.web.auth import UserStore, parse_allow
+
+    try:
+        allow = parse_allow(allow_args)
+    except ValueError as exc:
+        return [], f"error: {exc}"
+    if host not in LOCAL_HOSTS:
+        # Reachable from the network (e.g. the IXON IXrouter): require an allow-list and logins.
+        if not allow:
+            return allow, ("error: serving beyond localhost needs --allow with the addresses that may connect, "
+                           "e.g. --allow <IXrouter LAN IP>")
+        if not UserStore(data_dir).has_users():
+            return allow, f"error: serving beyond localhost needs at least one login. Create one first:\n  {user_cmd}"
+    return allow, None
+
+
+def _tls(args) -> Optional[dict]:
+    """The certificate to serve HTTPS with (made on first use), or None for plain HTTP."""
+    if not getattr(args, "https", False):
+        if getattr(args, "cert", None) or getattr(args, "key", None):
+            raise ValueError("--cert and --key need --https")
+        return None
+    from ghostmap import tls
+    from ghostmap.store import default_data_dir
+
+    return tls.ensure(args.data_dir or default_data_dir(), args.cert, args.key)
+
+
+def _server(args, allow, tls_info: Optional[dict] = None):
+    """The uvicorn server for ``web`` and ``service run``."""
+    import inspect
 
     import uvicorn
 
     from ghostmap.web.app import create_app
 
-    url = f"http://{'127.0.0.1' if args.host in ('0.0.0.0', '::') else args.host}:{args.port}"
+    app = create_app(data_dir=args.data_dir, demo=getattr(args, "demo", False), allow=allow,
+                     collect=not getattr(args, "no_collect", False), listen=not args.no_listen, tls=tls_info)
+    extra = {}
+    if "timeout_graceful_shutdown" in inspect.signature(uvicorn.Config).parameters:
+        extra["timeout_graceful_shutdown"] = 10  # an open browser tab must not hold up a stop
+    if tls_info:
+        extra.update(ssl_certfile=tls_info["cert"], ssl_keyfile=tls_info["key"])
+    # log_config=None: uvicorn's own logging config would remove the debug-log file handler from
+    # "uvicorn.error", and bind failures and ASGI exceptions would only reach the console.
+    config = uvicorn.Config(app, host=args.host, port=args.port, log_level="warning", log_config=None, **extra)
+    return uvicorn.Server(config)
+
+
+def cmd_web(args) -> int:
+    import os
+    import socket
+    import threading
+    import webbrowser
+
+    https = args.https or (not args.data_dir and _service_https())
+    url = f"{'https' if https else 'http'}://{'127.0.0.1' if args.host in ('0.0.0.0', '::') else args.host}:{args.port}"
     with socket.socket() as probe_sock:
         probe_sock.settimeout(0.5)
         already_running = probe_sock.connect_ex(("127.0.0.1", args.port)) == 0
@@ -279,33 +331,63 @@ def cmd_web(args) -> int:
         return 0
 
     from ghostmap.store import default_data_dir
-    from ghostmap.web.auth import UserStore, parse_allow
 
+    if sys.platform == "win32" and not args.data_dir and not os.environ.get("GHOSTMAP_DATA"):
+        from ghostmap.winservice import installed_data_dir
+
+        if installed_data_dir() is not None:
+            print("Ghost Map is installed as a Windows service, but the service isn't running. Start it from "
+                  "services.msc or with 'GhostMap.exe service start' (elevated prompt), then open "
+                  f"{url}. To run Ghost Map in this window instead, give it its own --data-dir.", file=sys.stderr)
+            return 1
+    allow, problem = _exposure(args.host, args.allow, args.data_dir or default_data_dir())
+    if problem:
+        print(problem, file=sys.stderr)
+        return 2
+    if args.host not in LOCAL_HOSTS:
+        print(f"Serving on {args.host}; clients allowed: localhost, {', '.join(map(str, allow))}", file=sys.stderr)
+        if not args.https:
+            print("Logins cross the network unencrypted; add --https to serve HTTPS.", file=sys.stderr)
     try:
-        allow = parse_allow(args.allow)
+        tls_info = _tls(args)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    if args.host not in ("127.0.0.1", "localhost", "::1"):
-        # Reachable from the network (e.g. the IXON IXrouter): require an allow-list and logins.
-        if not allow:
-            print("error: serving beyond localhost needs --allow with the addresses that may connect, "
-                  "e.g. --allow <IXrouter LAN IP>", file=sys.stderr)
-            return 2
-        if not UserStore(args.data_dir or default_data_dir()).has_users():
-            print("error: serving beyond localhost needs at least one login. Create one first:\n"
-                  "  ghostmap user add <name> --role admin", file=sys.stderr)
-            return 2
-        print(f"Serving on {args.host}; clients allowed: localhost, {', '.join(map(str, allow))}", file=sys.stderr)
-    app = create_app(data_dir=args.data_dir, demo=args.demo, allow=allow, collect=not args.no_collect,
-                     listen=not args.no_listen)
+    if tls_info:
+        print(f"HTTPS certificate {tls_info['cert']}{' (new, self-signed)' if tls_info['made'] else ''}\n"
+              f"  SHA-256 {tls_info['sha256']}", file=sys.stderr)
+    server = _server(args, allow, tls_info)
     print(f"Ghost Map is running at {url}  (close this window or press Ctrl+C to stop)", file=sys.stderr)
     if args.open:
         threading.Timer(1.5, webbrowser.open, args=(url,)).start()
-    # log_config=None: uvicorn's own logging config would remove the debug-log file handler from
-    # "uvicorn.error", and bind failures and ASGI exceptions would only reach the console.
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning", log_config=None)
+    server.run()
     return 0
+
+
+def cmd_service(args) -> int:
+    from ghostmap import winservice as ws
+    from ghostmap.store import default_data_dir
+
+    if args.action == "run":
+        allow, problem = _exposure(args.host, args.allow, args.data_dir or default_data_dir())
+        if problem:
+            print(problem, file=sys.stderr)
+            return 2
+        return ws.run_as_service(lambda: _server(args, allow, _tls(args)))
+    if args.action == "install":
+        def check(data_dir):
+            exe = "GhostMap.exe" if getattr(sys, "frozen", False) else "ghostmap"
+            return _exposure(args.host, args.allow, data_dir,
+                             user_cmd=f'{exe} --data-dir "{data_dir}" user add <name> --role admin')[1]
+
+        if (args.cert or args.key) and not args.https:
+            print("error: --cert and --key need --https", file=sys.stderr)
+            return 2
+        return ws.install(args.host, args.port, args.allow, args.no_listen, check, https=args.https,
+                          cert=args.cert, key=args.key)
+    if args.action == "uninstall":
+        return ws.uninstall()
+    return ws.control(args.action)
 
 
 def cmd_user(args) -> int:
@@ -368,10 +450,27 @@ def cmd_simulate(args) -> int:
     return 0
 
 
+def _https_args(s) -> None:
+    s.add_argument("--https", action="store_true",
+                   help="serve HTTPS with a self-signed certificate Ghost Map makes in <data dir>/tls (or --cert/--key)")
+    s.add_argument("--cert", metavar="FILE", help="with --https: the plant CA's certificate (PEM) instead of the self-signed one")
+    s.add_argument("--key", metavar="FILE", help="with --https: the private key (PEM) for --cert")
+
+
+def _service_https() -> bool:
+    """Whether the installed Windows service serves HTTPS (so a double-click opens the right address)."""
+    if sys.platform != "win32":
+        return False
+    from ghostmap import winservice
+
+    return bool((winservice.installed_info() or {}).get("https"))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="ghostmap", description="Ghost Map - read-only OT device & Stratix switch mapper")
     p.add_argument("--version", action="version", version=f"ghostmap {__version__}")
-    p.add_argument("--data-dir", default=None, help="scan storage (default ~/.ghostmap or $GHOSTMAP_DATA)")
+    p.add_argument("--data-dir", default=None,
+                   help="data folder (default $GHOSTMAP_DATA, else C:\\ProgramData\\GhostMap when installed as a service, else ~/.ghostmap)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("discover", help="find EtherNet/IP devices (ListIdentity)")
@@ -422,7 +521,22 @@ def build_parser() -> argparse.ArgumentParser:
                    help="don't read dashboards in the background or record alarm history (only while someone watches)")
     s.add_argument("--no-listen", action="store_true",
                    help="don't run the passive listeners (ARP table, BOOTP/DHCP, syslog, SNMP traps) on the Network > Live page")
+    _https_args(s)
     s.set_defaults(func=cmd_web)
+
+    s = sub.add_parser("service", help="run Ghost Map as a Windows service (install needs an elevated prompt)",
+                       description="install: copy the exe to Program Files, the data to ProgramData, register the "
+                                   "service (starts with Windows, restarted if it stops) and start it. Run install "
+                                   "again from a newer exe to upgrade. uninstall keeps the data.")
+    s.add_argument("action", choices=("install", "uninstall", "start", "stop", "status", "run"),
+                   help="run is what Windows starts; you don't need it yourself")
+    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--port", type=int, default=8470)
+    s.add_argument("--allow", action="append", default=[], metavar="IP[/BITS]",
+                   help="client address or subnet that may connect besides localhost (see web --allow)")
+    s.add_argument("--no-listen", action="store_true", help="don't run the passive listeners")
+    _https_args(s)
+    s.set_defaults(func=cmd_service)
 
     s = sub.add_parser("user", help="manage web UI logins (any user turns login on)")
     s.add_argument("action", choices=("add", "remove", "list"), help="add also changes an existing user's password/role")

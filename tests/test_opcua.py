@@ -421,3 +421,159 @@ def test_collector_records_first_out_on_one_shared_session(tmp_path, monkeypatch
         # Deleting a dashboard stops its collection; the gateway session stays for the other one.
         c.delete(f"/api/dashboards/{other}")
         assert wait(lambda: live.sessions() and live.sessions()[0]["dashboards"] == 1)
+
+
+def leveler_dashboard(c, app, name="Leveler"):
+    url = c.get("/api/info").json()["demo_opcua"]
+    sid = c.post("/api/opcua/connect", json={"url": url}).json()["sid"]
+    gw = find(c, sid, None, "FactoryTalk Linx Gateway")
+    lev = find(c, sid, gw["node_id"], "LEVELER_01")
+    rows = [{"path": t["path"], "node_id": t["node_id"], "type": t["variant_type"], "value": t["value"]}
+            for t in run_export(c, sid, lev["node_id"])["tags"]]
+    dash = c.post("/api/dashboards", json={"name": name, "endpoint": url, "tags": rows}).json()
+    comms = next(a["id"] for a in dash["layout"]["areas"] if a["id"].endswith("Comms"))
+    c.post(f"/api/dashboards/{dash['id']}/overrides", json={"invert": {comms: True}, "hidden": []})
+    return dash["id"]
+
+
+def wait_for(cond, secs=10):
+    import time
+
+    end = time.time() + secs
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def test_subscription_catches_a_fault_shorter_than_a_second(tmp_path, monkeypatch):
+    """Values come from one OPC UA subscription per dashboard; a fault bit that is on for a fraction of a
+    second, between two collector cycles, still lands in the alarm history with its real duration."""
+    import time
+
+    from ghostmap.web import collector as collector_mod
+
+    monkeypatch.setattr(collector_mod, "RESCAN_S", 0.2)
+    app = create_app(data_dir=str(tmp_path), demo_opcua=True, demo_opcua_port=free_port())
+    with TestClient(app, headers=H) as c:
+        sim = app.state.demo_ua["server"]
+        sim.auto_faults = False
+        did = leveler_dashboard(c, app)
+        live = app.state.live
+        assert wait_for(lambda: live.subscribed(did) and app.state.history.current(did)["stop"] is None)
+        h = c.get(f"/api/dashboards/{did}/health").json()
+        assert h["mode"] == "subscription" and h["read_mode"] == "subscribe" and h["sample_ms"] == 250
+        assert any(e["kind"] == "subscribe" and "subscribed to" in e["detail"] for e in h["events"])
+        n0 = h["notifications"]
+        assert wait_for(lambda: c.get(f"/api/dashboards/{did}/health").json()["notifications"] > n0)  # the heartbeat ticks
+
+        c.portal.call(sim.set_fault, "E_Stop_Flt", True)
+        time.sleep(0.3)
+        c.portal.call(sim.set_fault, "E_Stop_Flt", False)
+
+        def recorded():
+            ev = c.get(f"/api/dashboards/{did}/history", params={"hours": 1}).json()["events"]
+            return [e for e in ev if e["key"].endswith("E_Stop_Flt") and e["end"] is not None]
+        assert wait_for(recorded, 6)
+        e = recorded()[0]
+        assert 0.1 <= e["end"] - e["start"] < 0.9 and e["first_out"]
+
+        # The dashboard's values are the subscription's, the same as a full read (the bits; the simulator moves
+        # speeds, currents and counters every second, and the subscription is up to a publish behind).
+        v = c.get(f"/api/dashboards/{did}/values").json()
+        full = c.portal.call(live.read_once, c.get(f"/api/dashboards/{did}").json(), list(v["values"]))
+        bits = [n for n, x in v["values"].items() if isinstance(x, bool)]
+        assert len(bits) > 20 and all(v["values"][n] == full["values"][n] for n in bits)
+
+
+def test_gateway_that_refuses_subscriptions_is_read_every_second(tmp_path, monkeypatch):
+    from ghostmap.collectors import opcua as ua_mod
+
+    async def refuse(self, *a, **k):
+        raise ua_mod.SubscriptionRefused("BadTooManySubscriptions")
+
+    monkeypatch.setattr(ua_mod.UaBrowser, "subscribe", refuse)
+    app = create_app(data_dir=str(tmp_path), demo_opcua=True, demo_opcua_port=free_port(), collect=False)
+    with TestClient(app, headers=H) as c:
+        did = leveler_dashboard(c, app)
+        v = c.get(f"/api/dashboards/{did}/values").json()
+        assert v["ok"] and v["health"]["mode"] == "polling" and "BadTooManySubscriptions" in v["health"]["sub_error"]
+        assert v["health"]["latency_ms"] is not None
+        ev = c.get(f"/api/dashboards/{did}/health").json()["events"]
+        assert any(e["kind"] == "subscribe" and "reading every second instead" in e["detail"] for e in ev)
+
+        # A dashboard set to full reads never asks for a subscription.
+        dash = c.get(f"/api/dashboards/{did}").json()
+        layout = dict(dash["layout"], machine={**dash["layout"]["machine"], "read_mode": "poll", "sample_ms": 50})
+        saved = c.post(f"/api/dashboards/{did}/layout", json={"layout": layout}).json()
+        assert saved["layout"]["machine"]["read_mode"] == "poll" and saved["layout"]["machine"]["sample_ms"] == 100
+
+
+def test_feed_keeps_values_and_orders_changes():
+    from types import SimpleNamespace as NS
+
+    from asyncua import ua
+
+    feed = opcua.UaFeed(["ns=2;s=A", "ns=2;s=B", "ns=2;s=A"])
+    assert feed.ids == ["ns=2;s=A", "ns=2;s=B"]
+    feed._by_node = {ua.NodeId.from_string(n): n for n in feed.ids}
+
+    def note(nid, value, status=ua.StatusCodes.Good):
+        dv = ua.DataValue(ua.Variant(value), ua.StatusCode(status))
+        feed.datachange_notification(NS(nodeid=ua.NodeId.from_string(nid)), value, NS(monitored_item=NS(Value=dv)))
+
+    note("ns=2;s=A", False)  # the initial burst before seeding is not a change
+    assert feed.values["ns=2;s=A"] is False and not feed.changes
+    feed.seed([{"node_id": "ns=2;s=A", "value": False, "status": "Good"},
+               {"node_id": "ns=2;s=B", "value": 0, "status": "BadCommunicationError"}])
+    assert feed.bad == {"ns=2;s=B": "BadCommunicationError"}
+    note("ns=2;s=A", True)
+    note("ns=2;s=A", True)  # same value again: not a change
+    note("ns=2;s=A", False)
+    note("ns=2;s=B", 0)     # same value but Good again: a change
+    got = feed.drain()
+    assert [(n, v, s) for _, n, v, s in got] == [("ns=2;s=A", True, "Good"), ("ns=2;s=A", False, "Good"), ("ns=2;s=B", 0, "Good")]
+    assert not feed.bad and not feed.drain()
+    # A full read that disagrees is folded in as a change.
+    assert feed.reconcile([{"node_id": "ns=2;s=A", "value": True, "status": "Good"}], 5.0) == 1
+    assert feed.drain() == [(5.0, "ns=2;s=A", True, "Good")]
+    feed.status_change_notification(NS(Status=ua.StatusCode(ua.StatusCodes.BadTimeout)))
+    assert "BadTimeout" in feed.dead
+
+
+def test_collector_replays_changes_in_order(tmp_path):
+    """Changes arrive up to a publish late; the history waits for them and plays them at the time they happened:
+    two alarms 300 ms apart are a first-out and a second alarm, not a tie, and a 100 ms blip is recorded."""
+    from ghostmap.history import History
+    from ghostmap.web.collector import Collector
+
+    a, b, run = "ns=2;s=A", "ns=2;s=B", "ns=2;s=Run"
+    dash = {"id": "d1", "name": "x", "layout": {"areas": [{"id": "f", "title": "Faults", "alarms": [
+        {"node_id": a, "label": "A"}, {"node_id": b, "label": "B"}]}], "machine": {"running": [run]}}}
+    hist = History(tmp_path)
+    col = Collector(store=None, live=None, history=hist)
+
+    def snap(at, va, vb, vrun, bad=()):
+        return {"ok": True, "values": {a: va, b: vb, run: vrun}, "bad": list(bad), "at": at}
+
+    col.follow(dash, snap(100.0, False, False, True), [], lag=1.75)  # the history starts at 98.25
+    # At 101.0 the gateway has reported A at 100.2 and B on/off at 100.5/100.6; the stop at 100.7 isn't in yet.
+    col.follow(dash, snap(101.0, True, False, True), [(100.2, a, True, "Good"), (100.5, b, True, "Good"),
+                                                     (100.6, b, False, "Good")], lag=1.75)
+    assert not hist.events("d1", 0)  # nothing is due before 99.25
+    col.follow(dash, snap(102.0, True, False, False), [(100.7, run, False, "Good")], lag=1.75)
+    col.follow(dash, snap(103.0, True, False, False), [], lag=1.75)  # due up to 101.25
+    ev = {e["key"]: e for e in hist.events("d1", 0)}
+    assert ev[a]["start"] == 100.2 and ev[a]["first_out"] == 1
+    assert ev[b]["start"] == 100.5 and ev[b]["end"] == 100.6 and ev[b]["first_out"] == 0
+    # A tag that changed without a notification (a new subscription after a reconnect) counts from the snapshot.
+    col.follow(dash, snap(104.0, False, False, False), [], lag=1.75)
+    col.follow(dash, snap(106.0, False, False, False), [], lag=1.75)
+    assert {e["key"]: e for e in hist.events("d1", 0)}[a]["end"] == 104.0
+    # The subscription ends: what it had reported still goes in, in order.
+    col.follow(dash, snap(107.0, False, False, False), [(106.5, b, True, "Good")], lag=1.75)
+    col.flush(dash, [(106.8, b, False, "Good")], until=107.5)
+    e = max((x for x in hist.events("d1", 0) if x["key"] == b), key=lambda x: x["start"])
+    assert e["start"] == 106.5 and e["end"] == 106.8
+    hist.close()

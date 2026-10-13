@@ -538,6 +538,7 @@ dialog::backdrop { backdrop-filter: blur(3px); }
 .plat .pbar { fill: url(#gmLatGrad); }
 .tile.ringtile { display: flex; align-items: center; gap: 14px; }
 .tile.ringtile .l { white-space: normal; }
+.tile.ringtile > div:last-child { min-width: 0; }
 .svhead > .ring { flex: none; margin-right: 4px; }
 .svhead > .ring .lbl { font-size: 11px; }
 .svhead > div { min-width: 0; }
@@ -590,3 +591,13 @@ dialog::backdrop { backdrop-filter: blur(3px); }
 .livestrip.err { border-left-color: var(--err); }
 .livestrip .small { min-width: 0; overflow-wrap: anywhere; }
 .livedev td.ldev { white-space: normal; min-width: 140px; }
+
+/* The alert list: a line under the tabs for errors, and the Alerts dialog (static/alerts.js). */
+.alertbar { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; box-sizing: border-box; width: calc(100% - 40px);
+  max-width: 1560px; margin: 12px auto 0; padding: 8px 14px; border: 1px solid var(--err); border-radius: 10px;
+  background: color-mix(in srgb, var(--err) 10%, var(--panel)); font-size: 14px; }
+@media (max-width: 700px) { .alertbar { width: calc(100% - 32px); } }
+#alertsBtn .chip { margin: 0 0 0 4px; }
+#alertsList { max-height: 60vh; overflow: auto; }
+.finding.alert .hint + .hint { margin-top: -2px; }
+#tab-hostpc .tile .pbarwrap { margin: 6px 0 4px; }
