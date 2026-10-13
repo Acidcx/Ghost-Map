@@ -33,6 +33,7 @@ from ghostmap.models import to_dict
 from ghostmap.protocols.snmp import SnmpCredentials
 from ghostmap.scanner import ScanRequest, run_scan
 from ghostmap.store import ScanStore, inventory_csv
+from ghostmap.ua_trust import CertificateChanged, CertTrust
 from ghostmap.web.auth import AuditLog, Lockout, Sessions, UserStore, client_allowed
 from ghostmap.history import RETENTION_DAYS, History
 from ghostmap.collectors.passive import PassiveMonitor
@@ -82,6 +83,11 @@ class UaConnectIn(BaseModel):
     mode: str = Field("SignAndEncrypt", pattern="^(Sign|SignAndEncrypt)$")
     username: str = Field("", max_length=128)
     password: str = Field("", max_length=256)
+
+
+class UaTrustIn(BaseModel):
+    key: str = Field(..., max_length=300)
+    sha256: Optional[str] = Field(None, max_length=64)
 
 
 class UaUrlIn(BaseModel):
@@ -267,7 +273,8 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
                 try:
                     from ghostmap.sim.opcua_server import SimUaServer
 
-                    demo_ua["server"] = await SimUaServer(port=demo_opcua_port).start()
+                    # Its own certificate, kept with the pins, so the demo gateway can be pinned like a real one.
+                    demo_ua["server"] = await SimUaServer(port=demo_opcua_port, cert_dir=store.root / "pki" / "sim-gateway").start()
                 except Exception:  # port taken or similar: everything else still works without it
                     demo_ua.pop("server", None)
                     return None
@@ -317,7 +324,9 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     audit = AuditLog(store.root)
     jobs: dict[str, Job] = {}
     dashboards = DashboardStore(store.root)
+    trust = CertTrust(store.root)
     live = LiveValues(resolve_ua_url)
+    live.trust = trust
     history = History(store.root)
     collector = Collector(dashboards, live, history)
     tsc = TscService(store.root, demo=demo)
@@ -524,7 +533,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
             raise HTTPException(400, str(exc))
         try:
             info = await ua_call(browser.connect(args["security"], args["mode"], args["username"], args["password"],
-                                                 pki_dir=store.root / "pki"))
+                                                 pki_dir=store.root / "pki", trust=trust))
         except HTTPException:
             await browser.disconnect()
             raise
@@ -590,6 +599,9 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
             return await asyncio.wait_for(coro, timeout=60)
         except HTTPException:
             raise
+        except CertificateChanged as exc:
+            log.warning("opcua connect refused: %s", exc)
+            raise HTTPException(409, str(exc))
         except Exception as exc:  # asyncua raises its own error types (BadNodeIdUnknown, ...)
             log.warning("opcua call failed: %s: %s", type(exc).__name__, exc)
             raise HTTPException(502, f"{type(exc).__name__}: {exc}")
@@ -621,6 +633,29 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         audit.write(client_of(request), who(request), "opcua.connect",
                     f"{browser.url} security={body.security} user={body.username or 'anonymous'}")
         return {"sid": sid, **info}
+
+    @app.get("/api/opcua/trust")
+    def ua_trust_list():
+        """The gateway certificates Ghost Map has pinned, and any that changed since."""
+        return trust.list()
+
+    @app.post("/api/opcua/trust/accept")
+    def ua_trust_accept(body: UaTrustIn, request: Request):
+        try:
+            pinned = trust.accept(body.key, body.sha256 or "", who(request))
+        except KeyError:
+            raise HTTPException(404, "no changed certificate with that fingerprint at that address")
+        audit.write(client_of(request), who(request), "opcua.cert.accept", f"{body.key} sha256={pinned['sha256']}")
+        return trust.list()
+
+    @app.post("/api/opcua/trust/forget")
+    def ua_trust_forget(body: UaTrustIn, request: Request):
+        try:
+            trust.forget(body.key)
+        except KeyError:
+            raise HTTPException(404, "no pinned certificate at that address")
+        audit.write(client_of(request), who(request), "opcua.cert.forget", body.key)
+        return trust.list()
 
     @app.post("/api/opcua/disconnect")
     async def ua_disconnect(body: UaNodeIn):

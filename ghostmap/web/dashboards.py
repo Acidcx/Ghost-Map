@@ -151,6 +151,7 @@ class LiveValues:
 
     def __init__(self, resolve_url: Callable[[str], Awaitable[str]]):
         self.resolve_url = resolve_url
+        self.trust = None  # ua_trust.CertTrust: each gateway's certificate is checked against its pin
         self._s: dict[str, dict] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         # One session per gateway: {"browser", "lock" (held while connecting), "gen" (bumped on each new session)}.
@@ -394,6 +395,8 @@ class LiveValues:
             h["history_lag_s"] = round(feed_lag_s(dash), 2)
         c = self._conns.get(s["key"])
         h["connected"] = bool(c and c["browser"] is not None and s["gen"] == c["gen"])
+        changed = self.trust.warning(c["url"]) if self.trust is not None and c else None
+        h["cert_changed"] = {k: changed.get(k) for k in ("sha256", "first_seen", "subject")} if changed else None
         h["shared_with"] = sum(1 for o in self._s.values() if o is not s and o["key"] == s["key"])
         return h
 
@@ -417,12 +420,14 @@ class LiveValues:
                 if c["browser"] is None:
                     browser = UaBrowser(await self.resolve_url(dash["endpoint"]))
                     try:
-                        await asyncio.wait_for(browser.connect(), timeout=15)
+                        await asyncio.wait_for(browser.connect(trust=self.trust), timeout=15)
                     except BaseException:
                         await browser.disconnect()
                         raise
                     c.update(browser=browser, gen=c["gen"] + 1, url=browser.url)
                     log.info("gateway session %d open to %s", c["gen"], browser.url)
+                    if browser.cert_warning:
+                        log.warning("gateway %s: %s", browser.url, browser.cert_warning)
         # This dashboard's view of it: first connection, or a new session after a drop.
         if s["gen"] != c["gen"]:
             if s["gen"] is None:
@@ -430,6 +435,8 @@ class LiveValues:
             else:
                 s["health"]["reconnects"] += 1
                 self._event(s, dash["id"], "reconnected")
+            if c["browser"].cert_warning:
+                self._event(s, dash["id"], "certificate", c["browser"].cert_warning)
             s["gen"] = c["gen"]
             s["health"]["connected_at"] = time.time()
         return c["browser"]

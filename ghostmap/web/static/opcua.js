@@ -73,7 +73,9 @@ uaForm.addEventListener("submit", async (ev) => {
     uaRemember(r.url);
     uaStatus(`<span class="chip okchip">connected</span> <span class="mono">${esc(r.url)}</span> &middot; ${esc(r.server || "OPC UA server")}
       &middot; security ${esc(r.security)}${r.security !== "None" ? ` (${esc(r.mode)})` : ""} &middot; ${esc(r.user)}
-      ${r.server_cert_sha1 ? `&middot; <span class="small">server cert SHA-1 <span class="mono">${esc(r.server_cert_sha1)}</span></span>` : ""}`, "");
+      ${r.server_cert_sha1 ? `&middot; <span class="small">server cert SHA-1 <span class="mono">${esc(r.server_cert_sha1)}</span></span>` : ""}
+      ${r.cert_warning ? `<div class="mbanner warn">${esc(r.cert_warning)}</div>` : ""}`, "");
+    uaTrustLoad();
     $("#uaMain").classList.remove("hidden");
     $("#uaEpList").classList.add("hidden");
     $("#uaConnect").classList.add("hidden");
@@ -84,10 +86,52 @@ uaForm.addEventListener("submit", async (ev) => {
     uaSchedule();
   } catch (e) {
     uaStatus(`Could not connect: ${esc(e.message)}`, "errtext");
+    uaTrustLoad();
   } finally {
     $("#uaConnect").disabled = false;
   }
 });
+
+// ------------------------------------------------------------------ pinned server certificates
+const certName = (c) => (/(?:^|,)CN=([^,]+)/.exec(c.subject || "") || [])[1] || c.application_uri || "certificate";
+const certFp = (sha) => (sha || "").slice(0, 32).replace(/(..)(?!$)/g, "$1:");
+const certDay = (t) => (t ? new Date(t * 1000).toLocaleDateString() : "");
+
+async function uaTrustLoad() {
+  const box = $("#uaTrust");
+  let rows;
+  try { rows = await api("api/opcua/trust"); } catch (e) { box.innerHTML = `<p class="small errtext">${esc(e.message)}</p>`; return; }
+  if (!rows.length) {
+    box.innerHTML = `<p class="small muted">None yet: a server's certificate is pinned the first time Ghost Map connects to it.</p>`;
+    return;
+  }
+  const cert = (c, when) => `${esc(certName(c))}${c.not_after ? ` <span class="small muted">valid to ${esc(certDay(c.not_after))}</span>` : ""}
+    <br><span class="mono small" title="SHA-256 ${esc(c.sha256)}">${esc(certFp(c.sha256))}...</span>
+    <br><span class="small muted">${when}</span>`;
+  box.innerHTML = `<div class="tablewrap"><table class="small"><thead><tr><th>Server</th><th>Pinned certificate</th><th>Different certificate seen</th><th></th></tr></thead><tbody>` +
+    rows.map((r) => `<tr>
+      <td class="mono">${esc(r.key)}</td>
+      <td>${r.pinned ? cert(r.pinned, `${esc(r.pinned.pinned_by || "")}, ${esc(certDay(r.pinned.pinned_at))}`) : "-"}</td>
+      <td>${r.changed ? `<span class="warntext">${cert(r.changed, `first seen ${esc(certDay(r.changed.first_seen))}`)}</span>` : `<span class="muted">none</span>`}</td>
+      <td class="admin-only">${r.changed ? `<button class="btn small" data-accept="${esc(r.key)}" data-sha="${esc(r.changed.sha256)}">Accept new</button> ` : ""}<button class="btn ghost small" data-forget="${esc(r.key)}">Forget</button></td>
+    </tr>`).join("") + `</tbody></table></div>`;
+}
+
+$("#uaTrust").addEventListener("click", async (ev) => {
+  const a = ev.target.closest("[data-accept]"), f = ev.target.closest("[data-forget]");
+  if (!a && !f) return;
+  const key = (a || f).dataset[a ? "accept" : "forget"];
+  const ask = a ? `Trust the new certificate at ${key} from now on?\n\nSHA-256 ${a.dataset.sha}\n\nOnly if you know the gateway was reinstalled or its certificate renewed.`
+    : `Forget the pinned certificate for ${key}? The next certificate seen there is trusted as if for the first time.`;
+  if (!confirm(ask)) return;
+  try {
+    await api(`api/opcua/trust/${a ? "accept" : "forget"}`, { method: "POST", body: JSON.stringify({ key, sha256: a ? a.dataset.sha : null }) });
+  } catch (e) {
+    alert(e.message);
+  }
+  uaTrustLoad();
+});
+document.addEventListener("gm:tab", (e) => { if (e.detail === "opcua") uaTrustLoad(); });
 
 async function uaDisconnect(quiet) {
   clearTimeout(ua.timer);

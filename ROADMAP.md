@@ -67,7 +67,7 @@ Then the service:
 ## Phase 4: machine data, OEE and maintenance (OPC UA)
 
 - [x] OPC UA Tag Browser (UaExpert-style): endpoints, browse, attributes, live watch, tag-list CSV export; Security None or signed/encrypted with a self-signed client certificate
-- [ ] Server certificate trust list (accept once, then pin)
+- [x] Server certificate trust list (accept once, then pin): Tags (OPC UA) > Gateway certificates
 - [x] Background OPC UA subscriptions for the resident service (full reads once a second as the fallback; changes replayed into the alarm history in order)
 - [ ] **L5X import**: read the Studio 5000 project export for fault UDTs, member descriptions and fault message text, so no fault tables are typed by hand
 - [ ] **Machine profiles** (see below), with automatic profile and variant detection from the OPC UA browse

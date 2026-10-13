@@ -335,6 +335,11 @@
           <div id="uaAttrs" class="muted small">Select a node.</div>
         </div>
       </div>
+      <div class="panel" id="uaTrustBox">
+        <h3>Gateway certificates</h3>
+        <p class="small muted">The first certificate each OPC UA server shows is pinned to its address. If a different one turns up later, a signed or encrypted session is refused, and a Security None session keeps reading with a warning, until an admin accepts the new certificate here. Accept only if you know the gateway was reinstalled or its certificate renewed.</p>
+        <div id="uaTrust"></div>
+      </div>
     </section>
   </main>
 

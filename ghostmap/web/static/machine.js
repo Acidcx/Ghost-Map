@@ -266,6 +266,9 @@ function machineRender() {
   } else if (vals?.ok && vals.bad.length) {
     html0 = `<div class="mbanner warn">${vals.bad.length} of ${Object.keys(vals.values).length} tags aren't readable right now, so their alarms show grey (no data), not OK.
       <a href="#" data-view="health">Which ones</a></div>`;
+  } else if (H?.cert_changed) {
+    html0 = `<div class="mbanner warn">The gateway's certificate changed since Ghost Map pinned it. If it was reinstalled or its certificate
+      renewed, an admin can accept the new one in Tags (OPC UA) &gt; Gateway certificates; if not, find out what is answering at that address.</div>`;
   }
   if (view.startsWith("sec:") && !sections.some((x) => `sec:${x.name}` === view)) view = "overview";
   if (view === "drives" && !axesTotal) view = "overview";
@@ -379,7 +382,8 @@ function commsState(vals) {
     title: `${H.good} of ${H.total} tags read Good; last ${H.mode === "subscription" ? "check" : "read"} ${fmtMs(H.latency_ms)}${H.slow ? " (slow)" : ""}` };
 }
 
-const EVENT_LABEL = { connected: "Connected", drop: "Dropped", reconnected: "Reconnected", error: "Error", coverage: "Tags", subscribe: "Subscription" };
+const EVENT_LABEL = { connected: "Connected", drop: "Dropped", reconnected: "Reconnected", error: "Error", coverage: "Tags", subscribe: "Subscription",
+  certificate: "Certificate" };
 
 // ------------------------------------------------------------------ alarm history (recorded by the server)
 const HIST_REFRESH_MS = 10000;

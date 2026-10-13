@@ -254,9 +254,13 @@ class UaBrowser:
         self.url = normalize_endpoint(url)
         self.client = Client(self.url, timeout=timeout)
         self.server_cert_sha1: Optional[str] = None
+        self.cert_warning: Optional[str] = None  # the server's certificate is not the pinned one (Security None)
 
     async def connect(self, security: str = "None", mode: str = "SignAndEncrypt", username: str = "",
-                      password: str = "", pki_dir: Optional[Path] = None) -> dict:
+                      password: str = "", pki_dir: Optional[Path] = None, trust=None) -> dict:
+        """Open the session. ``trust`` (a ``ua_trust.CertTrust``) checks the server's certificate against the
+        one pinned for this address while the session is created; a secure session to a server whose
+        certificate changed is refused there (``CertificateChanged``)."""
         if security not in SECURITY_POLICIES:
             raise ValueError(f"security must be one of {', '.join(SECURITY_POLICIES)}")
         if security != "None":
@@ -269,6 +273,13 @@ class UaBrowser:
         if username:
             self.client.set_user(username)
             self.client.set_password(password)
+        if trust is not None:
+            async def check(cert, _server) -> None:
+                from cryptography.hazmat.primitives.serialization import Encoding
+
+                self.cert_warning = trust.check(self.url, cert.public_bytes(Encoding.DER), secure=security != "None")
+
+            self.client.certificate_validator = check
         await self.client.connect()
         info = {"url": self.url, "security": security if security != "None" else "None",
                 "mode": mode if security != "None" else "None", "user": username or "anonymous"}
@@ -287,6 +298,8 @@ class UaBrowser:
         if cert:
             self.server_cert_sha1 = hashlib.sha1(cert).hexdigest()
             info["server_cert_sha1"] = self.server_cert_sha1
+            info["server_cert_sha256"] = hashlib.sha256(cert).hexdigest()
+        info["cert_warning"] = self.cert_warning
         return info
 
     async def disconnect(self) -> None:
