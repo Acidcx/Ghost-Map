@@ -26,6 +26,7 @@ STOP_LONG_S = 10 * 60             # a stop this long is worth telling someone ab
 COMMS_DOWN_S = 60                 # no good read for this long
 SWITCH_UNREACHABLE_POLLS = 3      # failed polls in a row (by time) before a switch counts as unreachable
 RECENT_NETWORK_S = 24 * 3600      # how long a passive event (new device, IP conflict) stays on the list
+RECENT_REFUSED_S = 3600           # how long a refused web client stays on the list
 NETWORK_CODES = {"passive.arp_unknown": WARNING, "passive.ip_conflict": ERROR, "passive.bootp_known": ERROR,
                  "passive.bootp": WARNING, "passive.restart": WARNING}
 # Linx is how Ghost Map and the HMI reach the PLCs: those services stopped is an error, the rest a warning.
@@ -188,6 +189,25 @@ def network_alerts(events: list[dict], now: float) -> list[dict]:
         out[key] = alert(key, e["code"].replace("passive.", "network."), sev, "network", e["text"], "",
                          e.get("hint") or "Network > Live shows what was heard and when.", {"tab": "live"}, e["at"])
     return list(out.values())
+
+
+# -------------------------------------------------------------------------------------------- web access
+def access_alerts(refused: list[dict], now: float) -> list[dict]:
+    """Addresses the ``--allow`` list turned away in the last hour: usually the IXrouter or IXON's VPN arriving
+    from an address that wasn't expected, sometimes someone else on the network trying the UI."""
+    out = []
+    for r in refused:
+        if now - r["last"] > RECENT_REFUSED_S:
+            continue
+        times = "once" if r["count"] == 1 else f"{r['count']} times"
+        out.append(alert(f"web.refused:{r['ip']}", "web.refused", WARNING, "hmi",
+                         f"Refused web access from {r['ip']}",
+                         f"Turned away {times}, last for {r.get('path') or '/'}. Only localhost and --allow may connect.",
+                         f"If {r['ip']} is the IXrouter or IXON's VPN, add it: GhostMap.exe service install with "
+                         f"--allow {r['ip']} (plus the --host and --allow already in use), and allow it in the Windows "
+                         "Firewall rule for port 8470. If not, find out who is trying to open Ghost Map.",
+                         {"tab": "hostpc"}, r["first"]))
+    return out
 
 
 # --------------------------------------------------------------------------------------- maintenance / TSC

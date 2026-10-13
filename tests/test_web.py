@@ -3,6 +3,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+from ghostmap.analysis import alerts as alert_rules
 from ghostmap.web import auth
 from ghostmap.web.app import create_app
 from ghostmap.web.auth import UserStore, client_allowed, parse_allow
@@ -168,6 +169,21 @@ def test_client_allow_list(tmp_path):
         parse_allow(["not-an-ip"])
     with TestClient(create_app(data_dir=str(tmp_path), allow=allow)) as c:  # TestClient's peer is "testclient"
         assert c.get("/api/scans").status_code == 403
+
+
+def test_refused_clients_are_recorded(tmp_path):
+    """Seen on site: IXON's web access arrived from its own address, not the IXrouter's LAN IP, and the only
+    sign was a "Forbidden" page. The refused address goes to the audit log (once per 10 minutes) and the alerts."""
+    app = create_app(data_dir=str(tmp_path), allow=parse_allow(["172.16.0.200"]), demo_opcua=False, collect=False)
+    with TestClient(app, client=("10.9.8.7", 50000)) as c:
+        assert c.get("/").status_code == 403 and c.get("/api/info").status_code == 403
+    lines = (tmp_path / "audit.log").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1 and "\t10.9.8.7\t" in lines[0] and "access.refused" in lines[0]
+    r = app.state.refused["10.9.8.7"]
+    assert r["count"] == 2 and r["path"] == "/api/info"
+    got = alert_rules.access_alerts(list(app.state.refused.values()), r["last"] + 60)
+    assert [a["code"] for a in got] == ["web.refused"] and "--allow 10.9.8.7" in got[0]["hint"]
+    assert alert_rules.access_alerts(list(app.state.refused.values()), r["last"] + 7200) == []  # an hour later: gone
 
 
 def test_first_admin_setup_from_ui(tmp_path):

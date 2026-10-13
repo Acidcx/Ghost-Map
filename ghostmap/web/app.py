@@ -58,6 +58,7 @@ DEMO_UA_PORT = 4899    # not 4990, so the demo never collides with a real FT Lin
 
 CLIENT_LOG_PER_MIN = 30  # browser error reports accepted per client per minute
 log = logging.getLogger("ghostmap.web")
+REFUSED_LOG_S = 600  # how often one refused address is written to the audit log
 
 STATIC = Path(__file__).parent / "static"
 SESSION_COOKIE = "gm_session"
@@ -413,6 +414,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         "network": lambda now: alert_rules.network_alerts(list(passive.events), now),
         "maintenance": maintenance_alerts,
         "production": lambda now: alert_rules.tsc_alerts(tsc.status(), now),
+        "access": lambda now: alert_rules.access_alerts(list(refused.values()), now),
     })
     tasks: set[asyncio.Task] = set()
     app.state.demo_ua, app.state.live, app.state.ua_sessions = demo_ua, live, ua_sessions  # for tests
@@ -422,10 +424,26 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     def client_of(request: Request) -> str:
         return request.client.host if request.client else ""
 
+    refused: dict[str, dict] = {}  # addresses the allow-list turned away, for the audit log and the alert list
+
+    def note_refused(client: str, path: str) -> None:
+        now = time.time()
+        r = refused.get(client)
+        if r is None or now - r["logged"] > REFUSED_LOG_S:  # once per address per 10 minutes, not per request
+            audit.write(client, None, "access.refused", path)
+            log.warning("refused a connection from %s (not in --allow)", client)
+            if r is None and len(refused) >= 100:
+                refused.pop(min(refused, key=lambda k: refused[k]["last"]))
+            r = refused[client] = {"ip": client, "first": now, "count": 0, "logged": now}
+        r.update(last=now, count=r["count"] + 1, path=path)
+
+    app.state.refused = refused
+
     @app.middleware("http")
     async def access_control(request: Request, call_next):
         client = client_of(request)
         if allow is not None and not client_allowed(client, allow):
+            note_refused(client, request.url.path)
             return PlainTextResponse("Forbidden", status_code=403, headers=SECURITY_HEADERS)
         if request.method not in ("GET", "HEAD") and not request.headers.get(CSRF_HEADER):
             return JSONResponse({"detail": "missing X-Ghostmap header"}, status_code=403, headers=SECURITY_HEADERS)

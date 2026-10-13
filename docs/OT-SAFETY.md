@@ -45,7 +45,7 @@ Once the UI is reachable through the IXON IXrouter it is an outward-facing servi
   GhostMap.exe user add maint --role admin
   GhostMap.exe web --host 0.0.0.0 --allow 192.168.1.1
   ```
-  Localhost (the HMI screen) can always connect. Every other address gets `403`.
+  Localhost (the HMI screen) can always connect. Every other address gets `403`, and is written to the audit log (`access.refused`, once per address per 10 minutes) and shown on the alert list for an hour.
 - **First login.** The top bar shows **No login** while none exist. **Set up login** creates the first admin from the UI, but only for a browser on the machine itself.
 - **Logins.** As soon as any user exists, every page and API call needs a login. Roles: `viewer` can look at the machine, production, maintenance and network pages; `admin` can also start scans, probe devices, load the demo and delete scans (anything that sends traffic or changes data), and see users, connection settings, gateway certificates, tag lists, exports and the debug log. Manage users with `ghostmap user add|remove|list`. Passwords are stored as PBKDF2-SHA256 hashes in `users.json` in the data directory and need at least 10 characters.
 - **Lockout.** 5 failed logins from one address or for one user name lock it out for 5 minutes.
