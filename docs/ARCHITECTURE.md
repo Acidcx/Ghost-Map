@@ -10,6 +10,7 @@ ghostmap/
   scanner.py   orchestrates a scan -> ScanResult
   store.py     JSON scan history + CSV export
   history.py   alarm history with first-out (SQLite), fed by web/collector.py
+  prodhistory.py  production totals per line and hour copied from TSC (production.db), read by day and week
   secret.py    saved passwords sealed with Windows DPAPI (a local key file elsewhere)
   ua_trust.py  OPC UA server certificates pinned per gateway address (opcua-trust.json)
   winservice.py  Windows service: install/upgrade with sc.exe, data in ProgramData, the service process (ctypes)

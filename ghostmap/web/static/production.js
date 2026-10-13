@@ -37,16 +37,22 @@ async function prodLoadLines() {
 $("#pLine").addEventListener("change", (e) => {
   prod.line = Number(e.target.value);
   prod.data = null;
+  phist.data = null;
   try { localStorage.setItem("gm.tscline", prod.line); } catch (_) { /* ignore */ }
   prodRender();
   prodPoll();
+  histRender();
+  histPoll();
 });
 
 async function prodPoll() {
   clearTimeout(prod.timer);
   if (document.hidden || $("#tab-production").classList.contains("hidden")) return;
   try {
-    if (!prod.lines) await prodLoadLines();
+    if (!prod.lines) {
+      await prodLoadLines();
+      if (prod.line != null && !phist.data) histPoll();
+    }
     if (prod.lines && prod.line != null) {
       const line = prod.line;
       const d = await api(`api/tsc/production?line=${encodeURIComponent(line)}`, { timeout: 60000 });
@@ -163,24 +169,86 @@ function heldHtml(d) {
     `<div class="small">Order <b>${esc(p.order)}</b>, bundle ${esc(p.bundle || "-")}: ${partSpec(p, d.unit)}, ${pNum(p.quantity)} pieces <span class="chip warnchip">${esc(p.status || "Hold")}</span></div>`).join("")}</div>`;
 }
 
-function hourlySvg(hours) {
-  const W = 600, H = 190, top = 18, bottom = 22, n = hours.length, slot = W / n;
-  const max = Math.max(1, ...hours.map((h) => h.feet));
-  const bars = hours.map((h, i) => {
+// Feet per period as bars, the last one (the period in progress) lighter. label(item) names a bar.
+function feetBars(items, label, aria, short = false, W = 600) {
+  const H = 190, top = 18, bottom = 22, n = items.length, slot = W / n;
+  const max = Math.max(1, ...items.map((h) => h.feet));
+  const val = (v) => (short && v >= 10000 ? `${Math.round(v / 1000)}k` : pNum(v));
+  const bars = items.map((h, i) => {
     const bh = Math.round((h.feet / max) * (H - top - bottom));
     const x = i * slot + slot * 0.15, y = H - bottom - bh, w = slot * 0.7;
-    const label = new Date(h.start * 1000).toLocaleTimeString([], { hour: "2-digit" });
-    return `<g><title>${esc(label)}: ${esc(pNum(h.feet))} ft, ${esc(pNum(h.pieces))} pieces, ${esc(h.parts)} parts</title>
+    const name = label(h);
+    return `<g><title>${esc(name)}: ${esc(pNum(h.feet))} ft, ${esc(pNum(h.pieces))} pieces, ${esc(h.parts)} parts</title>
       <rect class="pbar${i === n - 1 ? " now" : ""}" x="${x}" y="${y}" width="${w}" height="${Math.max(bh, h.feet ? 1 : 0)}" rx="2"></rect>
-      ${h.feet ? `<text class="pval" x="${x + w / 2}" y="${y - 4}" text-anchor="middle">${esc(pNum(h.feet))}</text>` : ""}
-      <text class="plab" x="${x + w / 2}" y="${H - 6}" text-anchor="middle">${esc(label)}</text></g>`;
+      ${h.feet ? `<text class="pval" x="${x + w / 2}" y="${y - 4}" text-anchor="middle">${esc(val(h.feet))}</text>` : ""}
+      <text class="plab" x="${x + w / 2}" y="${H - 6}" text-anchor="middle">${esc(name)}</text></g>`;
   }).join("");
-  return `<svg class="pchart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Feet produced per hour">
+  return `<svg class="pchart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(aria)}">
     <defs><linearGradient id="gmBarGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--accent)"></stop>
       <stop offset="1" style="stop-color:var(--accent-2);stop-opacity:.55"></stop></linearGradient></defs>
-    <line class="paxis" x1="0" x2="${W}" y1="${H - bottom}" y2="${H - bottom}"></line>${bars}</svg>
-    <p class="small muted">Last 12 hours by clock hour; the last bar is the hour in progress.</p>`;
+    <line class="paxis" x1="0" x2="${W}" y1="${H - bottom}" y2="${H - bottom}"></line>${bars}</svg>`;
 }
+
+function hourlySvg(hours) {
+  return feetBars(hours, (h) => new Date(h.start * 1000).toLocaleTimeString([], { hour: "2-digit" }), "Feet produced per hour")
+    + `<p class="small muted">Last 12 hours by clock hour; the last bar is the hour in progress.</p>`;
+}
+
+// ------------------------------------------------------------------ history (Ghost Map's own copy, by day or week)
+const HIST_POLL_MS = 300000;
+const HIST_COUNT = { day: 14, week: 12 };
+const phist = { by: "day", data: null, timer: null, line: null };
+try { phist.by = localStorage.getItem("gm.prodhist.by") === "week" ? "week" : "day"; } catch (_) { /* ignore */ }
+
+async function histPoll() {
+  clearTimeout(phist.timer);
+  if (document.hidden || $("#tab-production").classList.contains("hidden") || prod.line == null) return;
+  const line = prod.line, by = phist.by;
+  try {
+    const d = await api(`api/tsc/history?line=${encodeURIComponent(line)}&by=${by}&count=${HIST_COUNT[by]}`, { timeout: 180000 });
+    if (line === prod.line && by === phist.by) phist.data = d;
+  } catch (e) { phist.data = { ok: false, error: e.message }; }
+  histRender();
+  phist.timer = setTimeout(histPoll, HIST_POLL_MS);
+}
+
+function histRender() {
+  const d = phist.data, el = $("#pHist");
+  if (prod.error || prod.line == null) { el.innerHTML = ""; return; }
+  const by = phist.by;
+  const nav = `<span class="mnav" style="margin:0">${["day", "week"].map((b) =>
+    `<button class="${b === by ? "active" : ""}" data-histby="${b}">By ${b}</button>`).join("")}</span>`;
+  const csv = `api/tsc/history.csv?line=${encodeURIComponent(prod.line)}&by=${by}&count=${by === "day" ? 90 : 52}`;
+  const head = `<div class="toolbar"><h3 class="grow">History</h3>${nav}<a class="btn ghost small" href="${csv}" download>Download CSV</a></div>`;
+  if (!d || d.line !== prod.line) { el.innerHTML = `<div class="panel">${head}<p class="small muted">Reading...</p></div>`; return; }
+  if (!d.ok) { el.innerHTML = `<div class="panel">${head}<p class="errtext small">Can't show the history: ${esc(d.error)}</p></div>`; return; }
+  const rows = d.rows;
+  const short = (r) => (by === "day" ? new Date(r.start * 1000).toLocaleDateString([], { weekday: "short", day: "numeric" })
+    : new Date(r.start * 1000).toLocaleDateString([], { month: "short", day: "numeric" }));
+  const table = rows.slice().reverse().map((r) => `<tr><td class="nowrap">${esc(r.label)}${r.now ? ` <span class="chip okchip">so far</span>` : ""}${
+    r.partial ? ` <span class="chip" title="Began before Ghost Map's history did">partial</span>` : ""}</td>
+    <td class="num">${pNum(r.parts)}</td><td class="num">${pNum(r.pieces)}</td><td class="num">${pNum(r.feet)}</td>
+    <td class="num">${pNum(r.scrap_pieces)}</td><td class="num">${pNum(r.prod_hours, 1)}</td></tr>`).join("");
+  const ds = String(d.day_start).padStart(2, "0");
+  el.innerHTML = `<div class="panel">${head}
+    ${feetBars(rows, short, `Feet produced per ${by}`, true, 900)}
+    <div class="tablewrap"><table class="ptable"><thead><tr><th>${by === "day" ? "Day" : "Week"}</th><th class="num">Parts</th><th class="num">Pieces</th>
+      <th class="num">Feet</th><th class="num">Scrap pieces</th><th class="num">Production hours</th></tr></thead><tbody>${table}</tbody></table></div>
+    <p class="small muted">Kept by Ghost Map: copied from TSC's finished parts every 5 minutes${d.synced_at ? ` (last ${esc(fmtHm(d.synced_at))})` : ""},
+      so it stays when TSC clears old parts or can't be reached. Days start at ${ds}:00, the start of the first shift${by === "week" ? "; weeks on Monday" : ""}.
+      A part counts in the hour it finished. Production hours are start to end of each part.${d.sync_error ? ` <span class="errtext">Last copy failed: ${esc(d.sync_error)}</span>` : ""}</p></div>`;
+}
+
+$("#pHist").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-histby]");
+  if (!b) return;
+  phist.by = b.dataset.histby;
+  try { localStorage.setItem("gm.prodhist.by", phist.by); } catch (_) { /* ignore */ }
+  phist.data = null;
+  histRender();
+  histPoll();
+});
+document.addEventListener("gm:tab", (e) => { if (e.detail === "production") histPoll(); else clearTimeout(phist.timer); });
 
 function downtimeHtml(d) {
   const D = d.downtime;

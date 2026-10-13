@@ -211,6 +211,17 @@ class SqlTsc:
             f"MIN(EndTime) AS FirstEnd FROM {self.done_view} WHERE LineID = %s AND EndTime >= %s", (int(line_id), since))
         return rows[0] if rows else {}
 
+    def hourly(self, line_id: int, since: datetime) -> list[dict]:
+        """Finished parts since a time, summed by the clock hour they ended in (for Ghost Map's own history)."""
+        hour = "DATEADD(hour, DATEDIFF(hour, 0, EndTime), 0)"
+        return self._query(
+            f"SELECT {hour} AS Hour, COUNT(*) AS Parts, SUM(CAST(ActualQuantity AS bigint)) AS Pieces, "
+            "SUM(CAST(Length AS float) * ActualQuantity) AS LengthTotal, "
+            "SUM(CASE WHEN IsScrap = 1 THEN CAST(ActualQuantity AS bigint) ELSE 0 END) AS ScrapPieces, "
+            "SUM(CASE WHEN StartTime > '19010101' AND EndTime > StartTime THEN CAST(DATEDIFF(second, StartTime, EndTime) AS bigint) ELSE 0 END) AS RunSeconds "
+            f"FROM {self.done_view} WHERE LineID = %s AND EndTime >= %s GROUP BY {hour} ORDER BY Hour",
+            (int(line_id), since), "hourly")
+
     def totals_windows(self, line_id: int, sinces: dict) -> dict:
         """``totals`` for several start times in one pass over the completed parts: {name: row}."""
         names = list(sinces)

@@ -12,6 +12,8 @@ requests, and an audit log.
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import contextlib
 import logging
 import re
@@ -37,6 +39,7 @@ from ghostmap.store import ScanStore, inventory_csv
 from ghostmap.ua_trust import CertificateChanged, CertTrust
 from ghostmap.web.auth import AuditLog, Lockout, Sessions, UserStore, client_allowed
 from ghostmap.history import RETENTION_DAYS, History
+from ghostmap.prodhistory import ProductionHistory
 from ghostmap.collectors.passive import PassiveMonitor
 from ghostmap.collectors.host import HostMonitor
 from ghostmap.analysis import alerts as alert_rules
@@ -304,12 +307,14 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
             netmon.start()
             hostmon.start()
             alerts.start()
+            tsc.start_history()
         if listen:
             await passive.start()
         yield
         await passive.stop()
         await alerts.stop()
         await hostmon.stop()
+        await tsc.stop_history()
         await collector.stop()
         await netmon.stop()
         for b, *_ in list(ua_sessions.values()):
@@ -317,6 +322,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
                 await b.disconnect()
         await live.close()
         history.close()
+        prodhist.close()
         if "server" in demo_ua:
             await demo_ua["server"].stop()
 
@@ -337,7 +343,8 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     live.trust = trust
     history = History(store.root)
     collector = Collector(dashboards, live, history)
-    tsc = TscService(store.root, demo=demo)
+    prodhist = ProductionHistory(store.root)
+    tsc = TscService(store.root, demo=demo, history=prodhist)
     def scan_device_names() -> dict[str, str]:
         """MAC -> device name from the newest scan, so the traffic monitor can say what is on each port."""
         scans = sorted(store.list(), key=lambda x: x.get("started") or "", reverse=True)
@@ -1100,6 +1107,37 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
             return {"ok": False, "configured": False, "error": str(exc)}
         except Exception as exc:
             return {"ok": False, "configured": True, "error": tsc_error(exc)}
+
+    @app.get("/api/tsc/history")
+    async def tsc_history(line: int, by: str = "day", count: int = 14):
+        """A line's totals per hour, production day or week, from Ghost Map's own copy (prodhistory.py)."""
+        try:
+            return {"ok": True, **await tsc.history(line, by, count)}
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except LookupError as exc:
+            return {"ok": False, "configured": False, "error": str(exc)}
+        except Exception as exc:
+            return {"ok": False, "configured": True, "error": tsc_error(exc)}
+
+    @app.get("/api/tsc/history.csv")
+    async def tsc_history_csv(line: int, by: str = "day", count: int = 14):
+        try:
+            h = await tsc.history(line, by, count)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        except Exception as exc:
+            raise HTTPException(503, tsc_error(exc))
+        out = io.StringIO()
+        w = csv.writer(out)
+        w.writerow([by, "start", "parts", "pieces", "feet", "scrap_pieces", "production_hours", "in_progress", "partial"])
+        for r in h["rows"]:
+            w.writerow([r["label"], time.strftime("%Y-%m-%d %H:%M", time.localtime(r["start"])), r["parts"], r["pieces"],
+                        r["feet"], r["scrap_pieces"], r["prod_hours"], int(r["now"]), int(r["partial"])])
+        name = f"ghostmap-line{line}-by-{by}.csv"
+        return PlainTextResponse(out.getvalue(), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
     # ------------------------------------------------------------- traffic monitor (switch counters over SNMP)
     @app.get("/api/netmon/config")

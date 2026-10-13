@@ -382,6 +382,9 @@ def test_real_sql_server_read_only_login(tmp_path):
             len(mine), sum(r["Quantity"] for r in mine), len({r["BundleID"] for r in mine}))
         t = src.totals(1, since)
         assert (t["Parts"], t["Pieces"]) == (len(want), sum(r["ActualQuantity"] for r in want))
+        hours = src.hourly(1, since)  # Ghost Map's own history: the same parts, by the hour they ended in
+        assert sum(h["Parts"] for h in hours) == t["Parts"] and sum(h["Pieces"] for h in hours) == t["Pieces"]
+        assert all(h["Hour"].minute == 0 for h in hours) and [h["Hour"] for h in hours] == sorted(h["Hour"] for h in hours)
 
         # Only DataView granted: the optional reads say so and the page still works.
         svc = TscService(tmp_path)
