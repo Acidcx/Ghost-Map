@@ -812,7 +812,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         layout = build_layout(rows, name=dash["name"])
         known = {r["node_id"] for r in rows}
         old = dash["layout"].get("machine") or {}
-        keep = {k: old[k] for k in ("mode", "freshness", "max_read_ms") if k in old}
+        keep = {k: old[k] for k in ("mode", "freshness", "max_read_ms", "read_mode", "sample_ms") if k in old}
         for k in ("running", "heartbeat"):
             if old.get(k) and all(n in known for n in old[k]):
                 keep[k] = old[k]

@@ -68,7 +68,7 @@ Then the service:
 
 - [x] OPC UA Tag Browser (UaExpert-style): endpoints, browse, attributes, live watch, tag-list CSV export; Security None or signed/encrypted with a self-signed client certificate
 - [ ] Server certificate trust list (accept once, then pin)
-- [ ] Background OPC UA subscriptions for the resident service
+- [x] Background OPC UA subscriptions for the resident service (full reads once a second as the fallback; changes replayed into the alarm history in order)
 - [ ] **L5X import**: read the Studio 5000 project export for fault UDTs, member descriptions and fault message text, so no fault tables are typed by hand
 - [ ] **Machine profiles** (see below), with automatic profile and variant detection from the OPC UA browse
 - [ ] OEE: availability × performance × quality per shift, day and week
@@ -145,7 +145,7 @@ variants:
 ```
 
 Rules that keep this reliable:
-- **Counters, not pulse bits.** A one-scan "fire" bit is invisible to any polling tool. A DINT counter in the PLC can't be missed. Machines that only have the bit need a one-line counter added.
+- **Counters, not pulse bits.** A one-scan "fire" bit is invisible to any polling tool, and to a subscription too (the gateway samples every 250 ms at best). A DINT counter in the PLC can't be missed. Machines that only have the bit need a one-line counter added.
 - Profiles live in this repo, versioned, and ship with each release. The same profile on every machine of a type means the same dashboards everywhere.
 
 ## Updating machines

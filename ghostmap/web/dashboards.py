@@ -5,11 +5,18 @@ plus the endpoint to read from and the user's overrides (areas flipped to
 "on = healthy", hidden tags). Saved as ``<data_dir>/dashboards/<id>.json``.
 
 Live values: the server keeps one anonymous OPC UA session per gateway, shared
-by every dashboard on that gateway, and caches each dashboard's read for
-``CACHE_S``, so several people watching the same machine cost the gateway one
-read per second, not one each. Sessions nothing has read for ``IDLE_S`` are
-closed (the background collector reads every dashboard, so in normal running
-they stay open).
+by every dashboard on that gateway. By default each dashboard holds one OPC UA
+subscription on its tags: the gateway samples them and sends only what changed,
+so a second of nothing happening costs nothing, and short changes are queued
+rather than missed between reads. Every ``CHECK_S`` a one-value read proves the
+session is alive, and every ``FULL_READ_S`` a full read checks the subscription
+missed nothing. If the gateway refuses a subscription, or a dashboard is set to
+"poll", its tags are read in full once a second instead, as before.
+
+Either way each dashboard's answer is cached for ``CACHE_S``, so several people
+watching the same machine cost the gateway nothing extra. Sessions nothing has
+read for ``IDLE_S`` are closed (the background collector reads every dashboard,
+so in normal running they stay open).
 """
 
 from __future__ import annotations
@@ -23,9 +30,9 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Optional
 
-from ghostmap.analysis.dashboard import DEFAULT_MAX_READ_MS, HEARTBEAT_STALE_S
+from ghostmap.analysis.dashboard import DEFAULT_MAX_READ_MS, DEFAULT_SAMPLE_MS, HEARTBEAT_STALE_S
 
 CACHE_S = 1.0
 IDLE_S = 300
@@ -33,6 +40,10 @@ READS_IN_FLIGHT = 4  # read requests sent to the gateway at once (a whole contro
 EVENTS_KEPT = 200   # connection history kept per dashboard
 BAD_KEPT = 50       # unreadable tags listed per dashboard (with their status)
 FAIL_HOLD_S = 5.0   # after a failed connect or read, answer waiting requests with that failure for this long
+CHECK_S = 5.0       # subscription mode: a one-value read this often proves the session is alive
+FULL_READ_S = 60.0  # subscription mode: a full read this often checks that no change was missed
+PUBLISH_STALE_S = 30.0  # no publish answer (data or keep-alive) for this long: the subscription is rebuilt
+SUB_RETRY_S = 600.0     # after the gateway refuses a subscription, poll for this long before asking again
 log = logging.getLogger("ghostmap.live")
 _ID_RE = re.compile(r"^[a-z0-9-]{1,64}$")
 
@@ -191,7 +202,7 @@ class LiveValues:
             if s.get("fail") and now - s["fail_at"] < FAIL_HOLD_S:
                 return {**s["fail"], "health": self._health(dash, s)}
             try:
-                values, bad, latency = await self._read_with_retry(dash, s, node_ids)
+                values, bad, latency = await self._fetch(dash, s, node_ids)
             except Exception as exc:
                 h = s["health"]
                 h["failed"] += 1
@@ -218,17 +229,95 @@ class LiveValues:
             s.update(at=now, result=result)
             return result
 
-    async def _read_with_retry(self, dash: dict, s: dict, node_ids: list[str]) -> tuple[dict, dict, float]:
-        from ghostmap.collectors.opcua import is_connection_error
+    async def _fetch(self, dash: dict, s: dict, node_ids: list[str]) -> tuple[dict, dict, Optional[float]]:
+        """The dashboard's values: from its subscription when it has one, else a full read."""
+        from ghostmap.collectors.opcua import SubscriptionRefused
+
+        if read_mode(dash) == "subscribe" and time.time() >= s.get("sub_retry_at", 0):
+            try:
+                return await self._with_session(dash, s, lambda b: self._from_feed(dash, s, b, node_ids))
+            except SubscriptionRefused as exc:
+                s["sub_retry_at"] = time.time() + SUB_RETRY_S
+                s["sub_error"] = str(exc)
+                self._event(s, dash["id"], "subscribe", f"subscription refused, reading every second instead: {exc}")
+        elif s.get("feed") is not None:  # switched to polling: let the gateway drop the subscription
+            await self._drop_feed(s)
+        return await self._with_session(dash, s, lambda b: self._timed_read(b, node_ids))
+
+    async def _timed_read(self, browser, node_ids: list[str]) -> tuple[dict, dict, float]:
+        t0 = time.perf_counter()
+        values, bad = await self._read_all(browser, node_ids)
+        return values, bad, (time.perf_counter() - t0) * 1000
+
+    async def _from_feed(self, dash: dict, s: dict, browser, node_ids: list[str]) -> tuple[dict, dict, Optional[float]]:
+        from ghostmap.collectors.opcua import SERVER_STATE
+
+        if not browser.connected():  # the socket closed under us: treat it as a drop now, not at the next check
+            raise ConnectionError("the gateway closed the connection")
+        feed = s.get("feed")
+        stale = feed is not None and (feed.publish_age() or 0) > PUBLISH_STALE_S
+        if feed is not None and (s.get("feed_gen") != s["gen"] or feed.dead or stale or feed.ids != list(dict.fromkeys(node_ids))):
+            why = feed.dead or ("no answer from the gateway's publish for a while" if stale else "")
+            if why:
+                self._event(s, dash["id"], "subscribe", f"re-subscribing: {why}")
+            await self._drop_feed(s)
+            feed = None
+        now = time.time()
+        if feed is None:
+            sample, publish = feed_timing(dash)
+            t0 = time.perf_counter()
+            feed = await browser.subscribe(node_ids, sample_ms=sample, publish_ms=publish)
+            feed.seed(await self._read_rows(browser, node_ids))
+            latency = (time.perf_counter() - t0) * 1000
+            feed.last_check = feed.last_full = now
+            s.update(feed=feed, feed_gen=s["gen"], sub_error=None)
+            s["health"]["subscribed_at"] = now
+            self._event(s, dash["id"], "subscribe", f"subscribed to {len(feed.ids)} tags, sampled every {sample} ms"
+                        + (f"; the gateway would not monitor {len(feed.refused)}" if feed.refused else ""))
+        elif now - feed.last_full >= FULL_READ_S:
+            t0 = time.perf_counter()
+            rows = await self._read_rows(browser, node_ids)
+            latency = (time.perf_counter() - t0) * 1000
+            n = feed.reconcile(rows, now)
+            s["health"]["reconciled"] = s["health"].get("reconciled", 0) + n
+            feed.last_full = feed.last_check = now
+        elif now - feed.last_check >= CHECK_S:
+            t0 = time.perf_counter()
+            await asyncio.wait_for(browser.read([SERVER_STATE]), timeout=15)
+            latency = (time.perf_counter() - t0) * 1000
+            feed.last_check = now
+        else:
+            latency = None  # nothing was asked of the gateway: the subscription delivered the values
+        return dict(feed.values), dict(feed.bad), latency
+
+    async def _drop_feed(self, s: dict) -> None:
+        feed = s.pop("feed", None)
+        if feed is not None:
+            s["dropped_changes"] = s.get("dropped_changes", 0) + feed.dropped
+            await feed.close()
+
+    def subscribed(self, did: str) -> bool:
+        s = self._s.get(did)
+        return bool(s and s.get("feed") is not None)
+
+    def take_changes(self, did: str) -> list[tuple]:
+        """Every value change the subscription saw since the last call, oldest first (for the alarm history)."""
+        s = self._s.get(did)
+        feed = s.get("feed") if s else None
+        return feed.drain() if feed is not None else []
+
+    async def _with_session(self, dash: dict, s: dict, op):
+        """Run ``op(browser)`` on the gateway's session, re-opening it once if it dropped."""
+        from ghostmap.collectors.opcua import SubscriptionRefused, is_connection_error
 
         did = dash["id"]
         for attempt in (1, 2):
             browser = None
             try:
                 browser = await self._ensure(dash, s)
-                t0 = time.perf_counter()
-                values, bad = await self._read_all(browser, node_ids)
-                return values, bad, (time.perf_counter() - t0) * 1000
+                return await op(browser)
+            except SubscriptionRefused:
+                raise
             except Exception as exc:
                 reason = error_text(exc)
                 was_up = browser is not None
@@ -236,6 +325,7 @@ class LiveValues:
                     # The gateway refused the request, but the session is fine: keep it, don't count a drop.
                     self._event(s, did, "error", f"read refused: {reason}")
                     raise
+                s.pop("feed", None)  # a subscription dies with its session
                 await self._close_browser(s, browser)
                 if was_up:
                     s["health"]["drops"] += 1
@@ -253,9 +343,10 @@ class LiveValues:
         h["cycles"] += 1
         h["last_ok"] = now
         h["last_error"] = None
-        h["latency_ms"] = round(latency, 1)
-        h["latency_max_ms"] = round(max(h["latency_max_ms"], latency), 1)
-        h["latency_avg_ms"] = round(latency if h["latency_avg_ms"] is None else 0.9 * h["latency_avg_ms"] + 0.1 * latency, 1)
+        if latency is not None:  # None: served from the subscription, nothing was timed
+            h["latency_ms"] = round(latency, 1)
+            h["latency_max_ms"] = round(max(h["latency_max_ms"], latency), 1)
+            h["latency_avg_ms"] = round(latency if h["latency_avg_ms"] is None else 0.9 * h["latency_avg_ms"] + 0.1 * latency, 1)
         h["total"], h["good"] = len(values), len(values) - len(bad)
         by_plc: dict[str, int] = {}
         for nid in bad:
@@ -291,6 +382,16 @@ class LiveValues:
         else:
             h["heartbeat"] = {"node_id": hb[0] if hb else None, "frozen": False}
         h["started"] = s["started"]
+        feed = s.get("feed")
+        h["mode"] = "subscription" if feed is not None else "polling"
+        h["read_mode"] = read_mode(dash)
+        h["sub_error"] = s.get("sub_error")
+        if feed is not None:
+            h["notifications"] = feed.notifications
+            h["not_monitored"] = len(feed.refused)
+            h["changes_dropped"] = s.get("dropped_changes", 0) + feed.dropped
+            h["sample_ms"] = int(m.get("sample_ms") or DEFAULT_SAMPLE_MS)
+            h["history_lag_s"] = round(feed_lag_s(dash), 2)
         c = self._conns.get(s["key"])
         h["connected"] = bool(c and c["browser"] is not None and s["gen"] == c["gen"])
         h["shared_with"] = sum(1 for o in self._s.values() if o is not s and o["key"] == s["key"])
@@ -402,6 +503,7 @@ class LiveValues:
             lock = self._locks.get(did)
             if did != keep and now - s.get("used", 0) > IDLE_S and not (lock and lock.locked()):
                 self._s.pop(did, None)
+                await self._drop_feed(s)
         await self._close_unused()
 
     async def _close_unused(self) -> None:
@@ -414,7 +516,9 @@ class LiveValues:
                     await c["browser"].disconnect()
 
     async def forget(self, dash_id: str) -> None:
-        self._s.pop(dash_id, None)
+        s = self._s.pop(dash_id, None)
+        if s is not None:
+            await self._drop_feed(s)
         self._locks.pop(dash_id, None)
         await self._close_unused()
 
@@ -436,6 +540,25 @@ class LiveValues:
             h["events"] = list(s["events"])
             out[did] = h
         return out
+
+
+def read_mode(dash: dict) -> str:
+    """"subscribe" (the default) or "poll", from the dashboard's machine settings."""
+    m = (dash.get("layout") or {}).get("machine") or {}
+    return "poll" if m.get("read_mode") == "poll" else "subscribe"
+
+
+def feed_timing(dash: dict) -> tuple[int, int]:
+    """(sampling, publishing) interval in ms for the dashboard's subscription."""
+    m = (dash.get("layout") or {}).get("machine") or {}
+    sample = int(m.get("sample_ms") or DEFAULT_SAMPLE_MS)
+    return sample, max(1000, sample)
+
+
+def feed_lag_s(dash: dict) -> float:
+    """How long after a change its notification is sure to have arrived: one sample, one publish and a margin."""
+    sample, publish = feed_timing(dash)
+    return (sample + publish) / 1000 + 0.5
 
 
 def visible_node_ids(dash: dict, all_ids: list[str]) -> list[str]:
