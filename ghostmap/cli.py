@@ -34,13 +34,34 @@ def print_scan(scan: ScanResult) -> None:
     for sw in scan.switches:
         print(f"\n== Switch {sw.sys_name or sw.ip} ({sw.ip})  {sw.model}  IOS {sw.software_version}  "
               f"S/N {sw.serial}  up {sw.uptime_seconds // 86400}d")
+        h = sw.health
+        parts = []
+        if h.cpu_5m is not None:
+            parts.append(f"CPU {h.cpu_5s}% / {h.cpu_1m}% / {h.cpu_5m}% (5s/1m/5m)")
+        if h.memory_percent is not None:
+            parts.append(f"memory {h.memory_percent:.0f}%")
+        parts += [f"{t.name} {t.celsius:.0f}C" for t in h.temperatures if t.celsius is not None]
+        parts += [f"{s.name} {s.state}" for s in h.power_supplies + h.fans if s.state != "normal"]
+        parts += [f"STP{f' VLAN {st.vlan}' if st.vlan is not None else ''} changed {st.seconds_since_change // 60} min ago"
+                  for st in h.stp if st.seconds_since_change is not None and st.seconds_since_change < 86400]
+        if parts:
+            print("   " + "  |  ".join(parts))
         for err in sw.errors:
             print(f"   ! could not read {err}")
+        def mbps(v):
+            return "" if v is None else f"{v / 1e6:.1f}"
+
+        def pps(v):
+            return "" if v is None else f"{v:.0f}"
+
         rows = [(p.name, p.alias, p.oper_status, f"{p.speed_mbps}M" if p.speed_mbps else "", p.duplex, p.vlan,
-                 len(p.macs), p.fcs_errors + p.alignment_errors, "uplink" if p.is_uplink else "",
-                 ", ".join(n.remote_name for n in p.neighbors))
+                 len(p.macs), p.fcs_errors + p.alignment_errors,
+                 mbps(p.traffic and p.traffic.in_bps), mbps(p.traffic and p.traffic.out_bps),
+                 pps(p.traffic and p.traffic.in_bcast_pps), pps(p.traffic and p.traffic.in_mcast_pps),
+                 "uplink" if p.is_uplink else "", ", ".join(n.remote_name for n in p.neighbors))
                 for p in sw.ports if p.is_physical]
-        print(table(rows, ("port", "description", "link", "speed", "duplex", "vlan", "macs", "crc", "", "neighbor")))
+        print(table(rows, ("port", "description", "link", "speed", "duplex", "vlan", "macs", "crc", "in Mbps", "out Mbps",
+                           "bcast/s", "mcast/s", "", "neighbor")))
     print("\n== Devices")
     rows = []
     for d in scan.devices:
@@ -78,6 +99,8 @@ def _add_snmp_args(p: argparse.ArgumentParser) -> None:
     g.add_argument("--v3-priv-key", help="or env GHOSTMAP_V3_PRIV_KEY; prompted if omitted")
     g.add_argument("--snmp-timeout", type=float, default=2.0)
     g.add_argument("--snmp-port", type=int, default=161)
+    g.add_argument("--traffic-window", type=float, default=10.0,
+                   help="seconds between two counter readings for port bandwidth and broadcast rates (0 = skip)")
 
 
 def _snmp_creds(args) -> Optional[SnmpCredentials]:
@@ -133,6 +156,7 @@ def cmd_discover(args) -> int:
 
 
 def cmd_switch(args) -> int:
+    from ghostmap.collectors.portstats import sample_traffic
     from ghostmap.collectors.stratix import collect_switch
     from ghostmap.protocols.snmp import PySnmpClient
 
@@ -143,7 +167,7 @@ def cmd_switch(args) -> int:
     async def run():
         client = PySnmpClient(args.ip, creds)
         try:
-            return await collect_switch(args.ip, client)
+            return await sample_traffic(args.ip, client, lambda: collect_switch(args.ip, client), args.traffic_window)
         finally:
             await client.close()
 
@@ -162,7 +186,7 @@ def cmd_scan(args) -> int:
     req = ScanRequest(
         targets=args.targets, broadcast=args.broadcast, switches=args.switch, snmp=_snmp_creds(args),
         auto_switches=not args.no_auto_switches, timeout=args.timeout, rate=args.rate, enip_port=args.enip_port,
-        baseline_path=args.baseline, label=args.label or "",
+        baseline_path=args.baseline, label=args.label or "", traffic_window=args.traffic_window,
     )
     if not (req.targets or req.broadcast or req.switches):
         raise SystemExit("nothing to scan: give targets, --broadcast or --switch")

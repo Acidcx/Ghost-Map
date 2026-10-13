@@ -7,7 +7,7 @@ Ghost Map runs on live control networks, so it is deliberately conservative.
 | Traffic | Purpose | Notes |
 |---|---|---|
 | EtherNet/IP `ListIdentity` (UDP 44818) | Discovery, identity, firmware, status | Unconnected and session-less. It is the same request RSLinx / FactoryTalk Linx browsing sends, and it opens no I/O or explicit connection. |
-| SNMP GET / GETBULK (UDP 161) | Switch inventory, ports, MAC/ARP tables, neighbours | Read-only. The code has no `set` method. |
+| SNMP GET / GETBULK (UDP 161) | Switch inventory, CPU, memory, temperature, power, spanning tree, ports, traffic counters, MAC/ARP tables, neighbours | Read-only. The code has no `set` method. |
 | TCP connect (Probe only) | Port reachability and response time | Connects and closes immediately; no payload is sent. Runs only when an admin inspects a single device: one connect to each of 15 common industrial and IT ports, then 10 timed connects (100 ms apart) to the first open one. **Live trace** times one connect a second to that port while it is on, and the server refuses more than four a second per browser. |
 | EtherNet/IP `ListServices` (TCP 44818, Probe only) | Which CIP transports the device offers | One sessionless encapsulation request, like ListIdentity; no session is registered and no connection is opened. |
 | SNMP GET of the six `system` scalars (UDP 161, Probe only) | Name, description, uptime of a non-switch device | Only when a community is typed into Probe. That community is used for that one request and is never saved or logged. |
@@ -25,6 +25,8 @@ It never sends CIP writes, OPC UA writes or method calls, SQL INSERT / UPDATE / 
 - Each target gets exactly one request; there are no retries.
 - Ranges larger than 4096 hosts are refused unless the code limit is raised.
 - SNMP walks are sequential per switch, use GETBULK with 25 repetitions, have a 2 s timeout, and retry once.
+- A scan reads each switch's port counters twice, 10 s apart by default, for bandwidth and broadcast rates (about a dozen small walks each time; `--traffic-window 0` skips it).
+- The traffic monitor (Network > Traffic), once an admin sets it up, reads the same counters plus CPU every poll interval (30 s by default, 10 s minimum) and every 10 minutes the port list and LLDP/CDP neighbours. Nothing else, and only from the switches listed.
 
 ## Recommendations
 

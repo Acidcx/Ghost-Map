@@ -9,7 +9,7 @@ from typing import Any, Callable, Optional
 
 from ghostmap.analysis.diagnostics import Thresholds, load_baseline, run_diagnostics
 from ghostmap.analysis.topology import build_inventory
-from ghostmap.collectors import arp, discovery, stratix
+from ghostmap.collectors import arp, discovery, portstats, stratix
 from ghostmap.models import ScanResult, SwitchInfo
 from ghostmap.protocols.cip_tables import DEVICE_TYPE_MANAGED_SWITCH
 from ghostmap.protocols.enip import ENIP_PORT
@@ -27,6 +27,7 @@ class ScanRequest:
     auto_switches: bool = True  # also SNMP any discovered CIP "Managed Ethernet Switch"
     timeout: float = 2.0
     rate: float = 200.0
+    traffic_window: float = 10.0  # seconds between the two counter readings for port rates; 0 = skip
     enip_port: int = ENIP_PORT
     use_local_arp: bool = True
     baseline_path: Optional[str] = None
@@ -42,6 +43,7 @@ class ScanRequest:
             "auto_switches": self.auto_switches,
             "timeout": self.timeout,
             "rate": self.rate,
+            "traffic_window": self.traffic_window,
             "baseline": self.baseline_path,
         }
 
@@ -106,7 +108,7 @@ async def run_scan(
         client = snmp_factory(ip, req.snmp)
         try:
             say(f"SNMP: reading switch {ip}")
-            sw = await stratix.collect_switch(ip, client)
+            sw = await portstats.sample_traffic(ip, client, lambda: stratix.collect_switch(ip, client), req.traffic_window)
             say(f"  {ip}: {sw.sys_name or '?'} {sw.model} IOS {sw.software_version} - {len(sw.ports)} interfaces"
                 + (f", {len(sw.errors)} section errors" if sw.errors else ""))
             return sw

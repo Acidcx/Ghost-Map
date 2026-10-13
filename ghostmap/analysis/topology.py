@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from ghostmap.models import Device, DiscoveredIdentity, Port, SwitchInfo
+from ghostmap.models import Device, DiscoveredIdentity, Port, SwitchInfo, short_port
 from ghostmap.protocols.oui import mac_vendor
 
 
@@ -41,13 +41,21 @@ def mark_inter_switch_links(switches: list[SwitchInfo]) -> None:
         other_names = {_short(o.sys_name) for o in others if o.sys_name}
         other_ips = {o.ip for o in others}
         other_macs = {p.mac for o in others for p in o.ports if p.mac}
+        by_name = {_short(o.sys_name): o for o in others if o.sys_name}
+        by_ip = {o.ip: o for o in others}
+        by_mac = {p.mac: o for o in others for p in o.ports if p.mac}
         for port in sw.ports:
-            if port.is_uplink:
+            peer = next((n for n in port.neighbors if _short(n.remote_name) in other_names or n.remote_address in other_ips), None)
+            if peer is not None:
+                port.is_uplink = True
+                o = by_name.get(_short(peer.remote_name)) or by_ip.get(peer.remote_address)
+                port.link_to = f"{o.sys_name or o.ip} {short_port(peer.remote_port)}".strip()
                 continue
-            if any(_short(n.remote_name) in other_names or n.remote_address in other_ips for n in port.neighbors):
+            seen = other_macs.intersection(port.macs)
+            if seen:
                 port.is_uplink = True
-            elif other_macs.intersection(port.macs):
-                port.is_uplink = True
+                o = by_mac[sorted(seen)[0]]
+                port.link_to = port.link_to or (o.sys_name or o.ip)
 
 
 def locate_macs(switches: list[SwitchInfo]) -> dict[str, tuple[SwitchInfo, Port]]:

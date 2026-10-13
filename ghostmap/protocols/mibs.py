@@ -25,6 +25,20 @@ IF_NAME = "1.3.6.1.2.1.31.1.1.1.1"
 IF_HIGH_SPEED = "1.3.6.1.2.1.31.1.1.1.15"
 IF_ALIAS = "1.3.6.1.2.1.31.1.1.1.18"
 
+# Traffic counters (index: ifIndex). ifXTable 64-bit counters first; the 32-bit ones are the fallback.
+IF_IN_OCTETS = "1.3.6.1.2.1.2.2.1.10"
+IF_OUT_OCTETS = "1.3.6.1.2.1.2.2.1.16"
+IF_IN_MCAST = "1.3.6.1.2.1.31.1.1.1.2"
+IF_IN_BCAST = "1.3.6.1.2.1.31.1.1.1.3"
+IF_OUT_MCAST = "1.3.6.1.2.1.31.1.1.1.4"
+IF_OUT_BCAST = "1.3.6.1.2.1.31.1.1.1.5"
+IF_HC_IN_OCTETS = "1.3.6.1.2.1.31.1.1.1.6"
+IF_HC_IN_MCAST = "1.3.6.1.2.1.31.1.1.1.8"
+IF_HC_IN_BCAST = "1.3.6.1.2.1.31.1.1.1.9"
+IF_HC_OUT_OCTETS = "1.3.6.1.2.1.31.1.1.1.10"
+IF_HC_OUT_MCAST = "1.3.6.1.2.1.31.1.1.1.12"
+IF_HC_OUT_BCAST = "1.3.6.1.2.1.31.1.1.1.13"
+
 # EtherLike-MIB dot3StatsTable (index: ifIndex)
 DOT3_ALIGNMENT_ERRORS = "1.3.6.1.2.1.10.7.2.1.2"
 DOT3_FCS_ERRORS = "1.3.6.1.2.1.10.7.2.1.3"
@@ -70,6 +84,47 @@ CDP_CACHE_ADDRESS = "1.3.6.1.4.1.9.9.23.1.2.1.1.4"
 CDP_CACHE_DEVICE_ID = "1.3.6.1.4.1.9.9.23.1.2.1.1.6"
 CDP_CACHE_DEVICE_PORT = "1.3.6.1.4.1.9.9.23.1.2.1.1.7"
 CDP_CACHE_PLATFORM = "1.3.6.1.4.1.9.9.23.1.2.1.1.8"
+
+# CISCO-PROCESS-MIB cpmCPUTotalTable (index: cpmCPUTotalIndex, one row per CPU)
+CPM_CPU_5SEC_REV = "1.3.6.1.4.1.9.9.109.1.1.1.1.6"  # percent, last 5 seconds
+CPM_CPU_1MIN_REV = "1.3.6.1.4.1.9.9.109.1.1.1.1.7"
+CPM_CPU_5MIN_REV = "1.3.6.1.4.1.9.9.109.1.1.1.1.8"
+CPM_CPU_5SEC = "1.3.6.1.4.1.9.9.109.1.1.1.1.3"  # older IOS (deprecated columns, same meaning)
+CPM_CPU_1MIN = "1.3.6.1.4.1.9.9.109.1.1.1.1.4"
+CPM_CPU_5MIN = "1.3.6.1.4.1.9.9.109.1.1.1.1.5"
+CPM_CPU_MEM_USED = "1.3.6.1.4.1.9.9.109.1.1.1.1.12"  # kilobytes (IOS XE)
+CPM_CPU_MEM_FREE = "1.3.6.1.4.1.9.9.109.1.1.1.1.13"
+
+# CISCO-MEMORY-POOL-MIB ciscoMemoryPoolTable (index: pool type; 1 = Processor)
+MEM_POOL_NAME = "1.3.6.1.4.1.9.9.48.1.1.1.2"
+MEM_POOL_USED = "1.3.6.1.4.1.9.9.48.1.1.1.5"  # bytes
+MEM_POOL_FREE = "1.3.6.1.4.1.9.9.48.1.1.1.6"
+
+# CISCO-ENVMON-MIB (index: sensor / fan / supply index)
+ENV_TEMP_DESCR = "1.3.6.1.4.1.9.9.13.1.3.1.2"
+ENV_TEMP_VALUE = "1.3.6.1.4.1.9.9.13.1.3.1.3"  # degrees Celsius
+ENV_TEMP_THRESHOLD = "1.3.6.1.4.1.9.9.13.1.3.1.4"
+ENV_TEMP_STATE = "1.3.6.1.4.1.9.9.13.1.3.1.6"
+ENV_FAN_DESCR = "1.3.6.1.4.1.9.9.13.1.4.1.2"
+ENV_FAN_STATE = "1.3.6.1.4.1.9.9.13.1.4.1.3"
+ENV_SUPPLY_DESCR = "1.3.6.1.4.1.9.9.13.1.5.1.2"
+ENV_SUPPLY_STATE = "1.3.6.1.4.1.9.9.13.1.5.1.3"
+ENV_STATE = {1: "normal", 2: "warning", 3: "critical", 4: "shutdown", 5: "notPresent", 6: "notFunctioning"}
+
+# ENTITY-SENSOR-MIB entPhySensorTable (index: entPhysicalIndex), used when ENVMON has no temperatures
+ENT_PHYSICAL_NAME = "1.3.6.1.2.1.47.1.1.1.1.7"
+ENT_SENSOR_TYPE = "1.3.6.1.2.1.99.1.1.1.1"  # 8 = celsius
+ENT_SENSOR_SCALE = "1.3.6.1.2.1.99.1.1.1.2"  # 9 = units; each step is a factor of 1000
+ENT_SENSOR_PRECISION = "1.3.6.1.2.1.99.1.1.1.3"
+ENT_SENSOR_VALUE = "1.3.6.1.2.1.99.1.1.1.4"
+ENT_SENSOR_STATUS = "1.3.6.1.2.1.99.1.1.1.5"  # 1 ok, 2 unavailable, 3 nonoperational
+ENT_SENSOR_CELSIUS = 8
+ENT_SENSOR_STATUS_NAMES = {1: "normal", 2: "unavailable", 3: "notFunctioning"}
+
+# BRIDGE-MIB dot1dStp scalars (on IOS per VLAN: community@vlan / context vlan-N)
+STP_TIME_SINCE_CHANGE = "1.3.6.1.2.1.17.2.3"  # .0, hundredths of a second
+STP_TOP_CHANGES = "1.3.6.1.2.1.17.2.4"  # .0, count since the switch started
+STP_DESIGNATED_ROOT = "1.3.6.1.2.1.17.2.5"  # .0, 8 bytes: priority (2) + MAC (6)
 
 IF_STATUS = {1: "up", 2: "down", 3: "testing", 4: "unknown", 5: "dormant", 6: "notPresent", 7: "lowerLayerDown"}
 DUPLEX = {1: "unknown", 2: "half", 3: "full"}
