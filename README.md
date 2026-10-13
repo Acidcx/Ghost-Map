@@ -209,6 +209,8 @@ ghostmap web --host 0.0.0.0 --allow 192.168.1.1
 
 Ghost Map refuses to serve beyond localhost without `--allow` and at least one login. Logins and actions are written to `~/.ghostmap/audit.log`. The UI uses relative links, so it works under the path prefix IXON's proxy adds. Details are in [docs/OT-SAFETY.md](docs/OT-SAFETY.md#web-ui-access).
 
+**HTTPS.** Add `--https` (to `web` or `service install`) so logins and session cookies don't cross the machine network in the clear. Ghost Map makes a self-signed certificate on first start (`tls\ghostmap.crt` in its data folder, valid 5 years, renewed automatically on a start in its last 30 days or after the PC is renamed) and prints its SHA-256 fingerprint. Browsers warn until the certificate is trusted: compare the fingerprint, or import `ghostmap.crt` into the browsing PC's Trusted Root Certification Authorities. To use a certificate from the plant's CA instead: `--https --cert ghostmap.pem --key ghostmap.key`. With HTTPS on, plain `http://` to the same port gets no answer, so set the IXON HTTP service to HTTPS on port 8470. Upgrading a service to HTTPS is `GhostMap.exe service install --https` (plus the same `--host`/`--allow` as before).
+
 ## Preparing a Stratix switch
 
 Ghost Map needs read-only SNMP. These are example IOS / IOS-XE settings (Stratix 5200/5400/5410/5700/5800, or the equivalent in Device Manager / the WebUI):

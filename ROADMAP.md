@@ -45,7 +45,7 @@ Web face first, because it's the biggest risk:
 - [x] Logins with roles (viewer / admin), hashed passwords, session cookies, login lockout
 - [x] Audit log of logins and actions (scans started, scans deleted)
 - [x] Security headers; state-changing requests protected against cross-site requests
-- [ ] HTTPS between the IXrouter and the HMI (self-signed certificate or plant CA)
+- [x] HTTPS between the IXrouter and the HMI (self-signed certificate or plant CA): `--https`, `--cert`/`--key`
 
 Then the service:
 - [x] `GhostMap.exe service install|uninstall|start|stop|status` to run as a Windows service at boot (LocalSystem, data in `C:\ProgramData\GhostMap`, restarted after a failure; install again to upgrade)

@@ -255,7 +255,8 @@ def _needs_admin(request: Request) -> bool:
 
 def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=None,
                allow: Optional[list] = None, demo_opcua: Optional[bool] = None,
-               demo_opcua_port: int = DEMO_UA_PORT, collect: bool = True, listen: bool = False) -> FastAPI:
+               demo_opcua_port: int = DEMO_UA_PORT, collect: bool = True, listen: bool = False,
+               tls: Optional[dict] = None) -> FastAPI:
     """``allow``: client networks besides loopback that may connect. ``None`` disables the check (tests).
 
     ``listen``: run the passive listeners (``collectors/passive.py``) for Network > Live. In the demo they are
@@ -494,7 +495,8 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
             raise HTTPException(401, "wrong user name or password")
         lockout.clear(client, f"user:{body.user}")
         token = sessions.create(body.user, role)
-        response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="strict", path="/")
+        response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="strict", path="/",
+                            secure=request.url.scheme == "https")
         audit.write(client, body.user, "login.ok", role)
         return {"user": body.user, "role": role}
 
@@ -513,7 +515,8 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         auth = users.has_users()
         return {"version": __version__, "build": BUILD, "data_dir": str(store.root), "auth": auth,
                 "user": s.user if s else None, "role": s.role if s else ("admin" if not auth else None),
-                "local": _is_loopback(client_of(request)),
+                "local": _is_loopback(client_of(request)), "https": request.url.scheme == "https",
+                "tls": {k: tls[k] for k in ("sha256", "not_after", "self_signed")} if tls else None,
                 "demo_opcua": demo_ua["server"].endpoint if "server" in demo_ua else None}
 
     # ------------------------------------------------------------- users
@@ -530,7 +533,8 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         except ValueError as exc:
             raise HTTPException(400, str(exc))
         token = sessions.create(body.name, "admin")
-        response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="strict", path="/")
+        response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="strict", path="/",
+                            secure=request.url.scheme == "https")
         audit.write(client, body.name, "user.setup", "admin")
         return {"user": body.name, "role": "admin"}
 
@@ -682,8 +686,9 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         return {"sid": sid, **info}
 
     @app.get("/api/opcua/trust")
-    def ua_trust_list():
-        """The gateway certificates Ghost Map has pinned, and any that changed since."""
+    def ua_trust_list(request: Request):
+        """The gateway certificates Ghost Map has pinned, and any that changed since (Tags page, admins)."""
+        require_admin(request)
         return trust.list()
 
     @app.post("/api/opcua/trust/accept")
@@ -1342,6 +1347,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
                 "dashboards": [{k: d[k] for k in ("id", "name", "endpoint", "summary")} for d in dashboards.list()],
                 "comms": live.snapshot(), "gateway_sessions": live.sessions(),
                 "host": hostmon.snapshot(), "alerts": alerts.list(),
+                "tls": {k: v for k, v in tls.items() if k != "key"} if tls else None,
                 "opcua_sessions": [{"url": e[3]["url"], "open": e[0] is not None, "idle_s": int(time.time() - e[1]),
                                     "security": e[3]["security"]} for e in ua_sessions.values()]}
 

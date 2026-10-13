@@ -98,13 +98,22 @@ jobs:
             }
           }
           if (-not $back) { throw "the service was not restarted after its process was killed" }
+          if (-not [System.Diagnostics.EventLog]::SourceExists("GhostMap")) { throw "the GhostMap event log source was not registered" }
+          # Upgrade in place to HTTPS: the self-signed certificate is made in ProgramData and the service serves it.
+          .\dist\GhostMap.exe service install --https
+          if ($LASTEXITCODE -ne 0) { throw "service install --https failed ($LASTEXITCODE)" }
+          $tlsInfo = Invoke-RestMethod https://127.0.0.1:8470/api/info -SkipCertificateCheck
+          $cert = [System.Security.Cryptography.X509Certificates.X509Certificate2]::new("C:\ProgramData\GhostMap\tls\ghostmap.crt")
+          $want = ($cert.GetCertHashString([System.Security.Cryptography.HashAlgorithmName]::SHA256) -split '(..)' -ne '') -join ':'
+          if (-not $tlsInfo.https -or $tlsInfo.tls.sha256 -ne $want) { throw "the service does not serve its certificate ($($tlsInfo.tls.sha256) vs $want)" }
+          Write-Host "HTTPS: $($cert.Subject), SHA-256 $want"
           .\dist\GhostMap.exe service status
           .\dist\GhostMap.exe service stop
           if ($LASTEXITCODE -ne 0) { throw "service stop failed" }
           .\dist\GhostMap.exe service uninstall
           if (Get-Service GhostMap -ErrorAction SilentlyContinue) { throw "the service is still registered" }
           if (-not (Test-Path "C:\ProgramData\GhostMap\history.db")) { throw "uninstall should keep the data" }
-          Write-Host "Windows service: install, data carried over, restart after a crash, stop and uninstall OK"
+          Write-Host "Windows service: install, data carried over, restart after a crash, HTTPS upgrade, stop and uninstall OK"
 
       - uses: actions/upload-artifact@v4
         with:

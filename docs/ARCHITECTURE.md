@@ -13,6 +13,7 @@ ghostmap/
   prodhistory.py  production totals per line and hour copied from TSC (production.db), read by day and week
   secret.py    saved passwords sealed with Windows DPAPI (a local key file elsewhere)
   ua_trust.py  OPC UA server certificates pinned per gateway address (opcua-trust.json)
+  tls.py       HTTPS for the web UI: the self-signed certificate (made and renewed in <data>/tls) or the plant's
   winservice.py  Windows service: install/upgrade with sc.exe, data in ProgramData, the service process (ctypes)
   winevent.py  alerts in the Windows Application event log (source GhostMap, ctypes ReportEventW)
   web/         FastAPI app + static single-page UI (no external assets); tsc.py = TSC settings and cache;

@@ -58,13 +58,29 @@ def installed_data_dir() -> Optional[Path]:
     return d if os.path.exists(d / MARKER) else None  # os.path.exists: False, not an error, when access is denied
 
 
-def service_args(data_dir: Path, host: str, port: int, allow: Sequence[str] = (), no_listen: bool = False) -> list[str]:
+def installed_info() -> Optional[dict]:
+    """What ``service install`` recorded (host, port, https, ...), when the service is installed and visible."""
+    d = installed_data_dir()
+    if d is None:
+        return None
+    try:
+        return json.loads((d / MARKER).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def service_args(data_dir: Path, host: str, port: int, allow: Sequence[str] = (), no_listen: bool = False,
+                 https: bool = False, cert: Optional[str] = None, key: Optional[str] = None) -> list[str]:
     """The arguments the service is started with."""
     args = ["--data-dir", str(data_dir), "service", "run", "--host", host, "--port", str(port)]
     for a in allow:
         args += ["--allow", str(a)]
     if no_listen:
         args.append("--no-listen")
+    if https:
+        args.append("--https")
+        if cert and key:
+            args += ["--cert", str(Path(cert).resolve()), "--key", str(Path(key).resolve())]
     return args
 
 
@@ -175,7 +191,7 @@ def program() -> list[str]:
 
 
 def install(host: str, port: int, allow: Sequence[str], no_listen: bool, check_exposure: Callable[[Path], Optional[str]],
-            out=print) -> int:  # pragma: no cover - Windows only (run by the Windows CI job)
+            out=print, https: bool = False, cert: Optional[str] = None, key: Optional[str] = None) -> int:  # pragma: no cover - Windows only (run by the Windows CI job)
     _need_windows()
     if not is_admin():
         out("error: installing a service needs an elevated prompt: right-click Command Prompt, Run as administrator")
@@ -215,7 +231,16 @@ def install(host: str, port: int, allow: Sequence[str], no_listen: bool, check_e
         prog = [str(target)]
     else:
         out(f"note: the service will run this Python ({sys.executable}). Install GhostMap.exe for a plant PC.")
-    binpath = bin_path(prog, service_args(data, host, port, allow, no_listen))
+    tls_info = None
+    if https:  # made now (as an administrator) so the fingerprint can be shown; the service reuses it
+        from ghostmap import tls
+
+        try:
+            tls_info = tls.ensure(data, cert, key)
+        except ValueError as exc:
+            out(f"error: {exc}")
+            return 2
+    binpath = bin_path(prog, service_args(data, host, port, allow, no_listen, https, cert, key))
     for cmd in sc_commands(binpath, exists=current is not None):
         _sc(*cmd)
     _sc(*acl_command(data))
@@ -223,17 +248,19 @@ def install(host: str, port: int, allow: Sequence[str], no_listen: bool, check_e
 
     winevent.register()  # alerts in the Application event log under "GhostMap"
     write_marker(data, {"installed_at": time.strftime("%Y-%m-%d %H:%M:%S"), "program": prog, "bin_path": binpath,
-                        "host": host, "port": port, "allow": list(allow), "copied_from_home": copied})
+                        "host": host, "port": port, "allow": list(allow), "https": https, "copied_from_home": copied})
     _sc("sc.exe", "start", SERVICE_NAME)
     if not wait_for_state("RUNNING", 60):
         out("error: the service did not start; see the System event log and " + str(data / "logs" / "ghostmap.log"))
         return 1
-    url = f"http://127.0.0.1:{port}"
-    up = _wait_http(f"{url}/api/info", 60)
+    url = f"{'https' if https else 'http'}://127.0.0.1:{port}"
+    up = _wait_http(f"{url}/api/info", 60, tls_info["cert"] if tls_info else None)
     if copied:
         out(f"Copied {', '.join(copied)} from {home} (the originals are left as they were).")
     out(f"Ghost Map is {'running' if up else 'starting'} as the Windows service '{SERVICE_NAME}' at {url}")
     out(f"Data: {data}   Program: {prog[0]}")
+    if tls_info:
+        out(f"HTTPS certificate: {tls_info['cert']}\n  SHA-256 {tls_info['sha256']} (check it against what the browser shows)")
     out("It starts with Windows and is restarted if it stops unexpectedly. "
         "Stop or remove it with: GhostMap.exe service stop | service uninstall")
     return 0 if up else 1
@@ -299,13 +326,19 @@ def _port_busy(port: int) -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
-def _wait_http(url: str, timeout: float) -> bool:  # pragma: no cover - Windows only
+def _wait_http(url: str, timeout: float, cafile: Optional[str] = None) -> bool:  # pragma: no cover - Windows only
+    import ssl
     import urllib.request
 
+    ctx = None
+    if cafile:  # trust exactly the certificate the service was given (it may not name 127.0.0.1)
+        ctx = ssl.create_default_context(cafile=cafile)
+        ctx.check_hostname = False
+        ctx.verify_flags |= getattr(ssl, "VERIFY_X509_PARTIAL_CHAIN", 0)
     end = time.time() + timeout
     while time.time() < end:
         try:
-            with urllib.request.urlopen(url, timeout=2) as r:
+            with urllib.request.urlopen(url, timeout=2, context=ctx) as r:
                 if r.status == 200:
                     return True
         except Exception:
