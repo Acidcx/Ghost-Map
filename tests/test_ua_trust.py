@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from ghostmap.ua_trust import CertificateChanged, CertTrust, server_key
 from ghostmap.web.app import create_app
-from tests.test_opcua import H, free_port, leveler_dashboard, wait_for
+from test_opcua import H, free_port, leveler_dashboard, wait_for  # tests/ is on sys.path (no __init__.py)
 
 URL = "opc.tcp://Gateway01:4990"
 
