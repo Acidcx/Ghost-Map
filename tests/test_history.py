@@ -120,3 +120,23 @@ def test_restart_closes_open_rows_and_old_rows_age_out(tmp_path):
     assert h.stops("lev", 0, 2000)[0]["end_uncertain"] == 1
     h._prune(1005 + h.retention_s + 1)
     assert h.events("lev", 0, 10 ** 10) == [] and h.stops("lev", 0, 10 ** 10) == []
+
+
+def test_hour_meters_count_running_and_online_time(tmp_path):
+    h = History(tmp_path)
+    d = dash()
+    t0 = 1_791_000_000.0
+    h.observe(d, read(running=False), now=t0)
+    for i in range(1, 7):                                   # 6 s stopped, then 6 s running, one read a second
+        h.observe(d, read(running=False), now=t0 + i)
+    for i in range(7, 13):
+        h.observe(d, read(running=True), now=t0 + i)
+    h.observe(d, read(ok=False), now=t0 + 14)              # a comms gap is neither online nor running
+    h.observe(d, read(running=True), now=t0 + 40)
+    h.observe(d, read(running=True), now=t0 + 41)
+    m = h.meters("lev")
+    assert m["online_s"]["value"] == 13 and m["run_s"]["value"] == 6  # t0+7..12 and t0+40..41 while running
+    h.close()
+    h = History(tmp_path)                                   # lifetime totals survive a restart
+    assert h.meters("lev")["run_s"]["value"] == 6 and h.counts()["meters"] == 2
+    assert h.meter_window("lev", "run_s", 36500) == 6

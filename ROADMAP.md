@@ -30,6 +30,7 @@ It can't see traffic between other devices (e.g. PLC ↔ drive I/O). Per-port er
 
 - [x] EtherNet/IP discovery, Stratix / IOS-XE switch reading, port mapping, diagnostics, scan diff
 - [x] Multiple switches per machine; non-EtherNet/IP hosts listed with MAC vendor; RSLinx PCs labelled
+- [x] Device inspector (Probe): open ports, connect-time latency and jitter with a live trace, ListServices, switch port path, history across scans, verdict with hints
 - [ ] SNMP identification of non-CIP hosts (sysDescr: model / firmware of Moxa, Netgear, IT switches)
 - [ ] Device-side Ethernet diagnostics (CIP Ethernet Link object: speed, duplex, error counters)
 - [ ] Fill in the scanner PC's own MAC address
@@ -56,6 +57,7 @@ Then the service:
 
 ## Phase 3: passive detection
 
+- [x] Listen-only start without packet capture (Network > Live): this PC's ARP table (new devices, an IP that changes MAC), BOOTP/DHCP requests (UDP 67, never answered), switch syslog (UDP 514) and SNMP traps (UDP 162)
 - [ ] Capture with pktmon (built into Windows), with filters for ARP, LLDP/CDP, DHCP/BOOTP, ListIdentity and name broadcasts
 - [ ] Live device list from passive traffic: new, missing and changed devices without sending anything
 - [ ] IP conflict and duplicate-MAC detection from ARP
@@ -75,6 +77,8 @@ Then the service:
   - Quality from good/reject counts, where the PLC has them
 - [ ] Downtime tracking: first-out fault, duration, Pareto by fault
 - [ ] Maintenance counters: blade / die / cylinder life by stroke count, runtime hours, and "due soon" warnings
+  - [x] First version: service items (strokes per station and tool, pieces, feet, production hours from TSC; run and powered-on hours measured from the PLC's running tag; days), due soon / overdue, service log; Counters page
+  - [ ] Counters read straight from PLC counter tags (shear and press fire counts) as well as TSC
 - [ ] Machine dashboard: an andon-style status screen on the HMI, plus the same page via IXON
   - [x] First version: layout generated from a tag export (areas, alarms with severity and category, timers, fault words, counters, run state), live values, per-area "on = healthy" flip and hidden tags
   - [x] Editing: rename, remove, re-point items to other discovered tags, add tags and areas; motion axes as one item; whole-controller builds trimmed (I/O module tags, arrays, long status lists)
@@ -87,6 +91,8 @@ Then the service:
 
 - [x] Read-only link to the TSC part schedule view (`DataView.vPartScheduleCommon`): SELECT-only, read-only intent, bundled driver, DPAPI-sealed password, Test button and status
 - [x] Production page per line: shift totals, running part, queue, holds, feet per hour, orders, recent parts
+- [x] Queue in TSC's run order (QueueIndex) with status codes; orders, bundles and pieces counted as TSC counts them
+- [x] Stations (paired stations shown together), TSC shift calendar, stops and reasons; optional grants listed on the Connection page
 - [ ] Completed-parts history beyond 12 hours (day / week reports)
 - [ ] Combine with the machine dashboard: feet per hour against run time and stops (OEE performance)
 

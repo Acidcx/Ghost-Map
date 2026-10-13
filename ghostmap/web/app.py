@@ -35,9 +35,12 @@ from ghostmap.scanner import ScanRequest, run_scan
 from ghostmap.store import ScanStore, inventory_csv
 from ghostmap.web.auth import AuditLog, Lockout, Sessions, UserStore, client_allowed
 from ghostmap.history import RETENTION_DAYS, History
+from ghostmap.collectors.passive import PassiveMonitor
+from ghostmap.protocols.oui import mac_vendor
 from ghostmap.web.collector import Collector
 from ghostmap.web.dashboards import DashboardStore, LiveValues, visible_node_ids
 from ghostmap.netmon import DEMO_SWITCHES, NetMonitor
+from ghostmap.web.maintenance import KINDS as MAINT_KINDS, METER_OF, MaintenanceStore, view as maint_view
 from ghostmap.web.tsc import TscService, error_text as tsc_error
 
 UA_IDLE_S = 600        # close OPC UA sessions nobody has used for 10 minutes (re-opened on next use)
@@ -130,6 +133,8 @@ class TscConfigIn(BaseModel):
     trust_cert: bool = True
     cafile: str = Field("", max_length=500)
     view: str = Field("DataView.vPartScheduleCommon", max_length=260)
+    queue_view: str = Field("DataView.vHmiPartScheduleQueueOrInProgress", max_length=260)
+    done_view: str = Field("DataView.vPartScheduleCompleted", max_length=260)
     length_unit: str = Field("in", pattern="^(in|ft|mm)$")
     shifts: str = Field("06:00,18:00", max_length=100)
     cache_s: int = Field(30, ge=5, le=3600)
@@ -147,6 +152,39 @@ class NetmonIn(BaseModel):
     priv_key: str = Field("", max_length=256)
     port: int = Field(161, ge=1, le=65535)
     timeout: float = Field(2.0, ge=0.5, le=10)
+class LiveListenerIn(BaseModel):
+    enabled: bool
+
+
+class InspectIn(BaseModel):
+    ip: str = Field(..., max_length=64)
+    community: str = Field("", max_length=128)  # optional SNMP v2c community; used once, never stored or logged
+
+
+class MaintItemIn(BaseModel):
+    name: str = Field(..., max_length=120)
+    kind: str = Field(..., max_length=20)
+    interval: float = Field(..., gt=0, le=1e12)
+    warn_pct: float = Field(90, ge=1, le=100)
+    line: Optional[int] = None
+    station: Optional[int] = None
+    tool: str = Field("", max_length=60)
+    dash: str = Field("", max_length=64)
+    notes: str = Field("", max_length=1000)
+    offset: float = Field(0, ge=0, le=1e12)          # already used before Ghost Map started counting
+    last_service: Optional[float] = None              # when it was last done (default: now)
+
+
+class MaintEditIn(BaseModel):
+    name: Optional[str] = Field(None, max_length=120)
+    interval: Optional[float] = Field(None, gt=0, le=1e12)
+    warn_pct: Optional[float] = Field(None, ge=1, le=100)
+    tool: Optional[str] = Field(None, max_length=60)
+    notes: Optional[str] = Field(None, max_length=1000)
+
+
+class MaintServiceIn(BaseModel):
+    note: str = Field("", max_length=1000)
 
 
 class ImportIn(BaseModel):
@@ -204,8 +242,11 @@ def _needs_admin(request: Request) -> bool:
 
 def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=None,
                allow: Optional[list] = None, demo_opcua: Optional[bool] = None,
-               demo_opcua_port: int = DEMO_UA_PORT, collect: bool = True) -> FastAPI:
+               demo_opcua_port: int = DEMO_UA_PORT, collect: bool = True, listen: bool = False) -> FastAPI:
     """``allow``: client networks besides loopback that may connect. ``None`` disables the check (tests).
+
+    ``listen``: run the passive listeners (``collectors/passive.py``) for Network > Live. In the demo they are
+    simulated and open no socket.
 
     ``collect``: read every dashboard in the background and record alarm history (``ghostmap/history.py``).
 
@@ -250,7 +291,10 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         if collect:
             collector.start()
             netmon.start()
+        if listen:
+            await passive.start()
         yield
+        await passive.stop()
         await collector.stop()
         await netmon.stop()
         for b, *_ in list(ua_sessions.values()):
@@ -287,9 +331,36 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
                 for d in scan.devices if d.mac}
 
     netmon = NetMonitor(store.root, demo=demo, snmp_factory=snmp_factory, devices=scan_device_names)
+    maint = MaintenanceStore(store.root)
+    known_cache: dict = {}
+
+    def known_devices() -> tuple[dict, dict, dict]:
+        """MAC -> label, MAC -> IP and IP -> name from the newest scan, for the passive listeners' events."""
+        metas = store.list()
+        sid = metas[0]["id"] if metas else None
+        if known_cache.get("id") != sid:
+            labels, ips, names = {}, {}, {}
+            try:
+                scan = store.load(sid) if sid else None
+            except (KeyError, OSError, ValueError):
+                scan = None
+            for d in scan.devices if scan else []:
+                if d.mac:
+                    name = d.identity.product_name if d.identity else mac_vendor(d.mac) or "Device"
+                    labels[d.mac] = name + (f" ({d.ip})" if d.ip else "")
+                    ips[d.mac] = d.ip or ""
+                if d.ip:
+                    names[d.ip] = d.identity.product_name if d.identity else d.ip
+            for sw in scan.switches if scan else []:
+                names[sw.ip] = sw.sys_name or sw.ip
+            known_cache.update(id=sid, labels=labels, ips=ips, names=names)
+        return known_cache["labels"], known_cache["ips"], known_cache["names"]
+
+    passive = PassiveMonitor(store.root, known_devices, simulate=demo)
     tasks: set[asyncio.Task] = set()
     app.state.demo_ua, app.state.live, app.state.ua_sessions = demo_ua, live, ua_sessions  # for tests
-    app.state.history, app.state.collector, app.state.tsc, app.state.netmon = history, collector, tsc, netmon
+    app.state.history, app.state.collector, app.state.tsc, app.state.passive = history, collector, tsc, passive
+    app.state.netmon = netmon
 
     def client_of(request: Request) -> str:
         return request.client.host if request.client else ""
@@ -338,6 +409,11 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
 
     if demo:
         load_demo()
+        if not maint.list():
+            from ghostmap.sim.tsc import demo_service_items
+
+            for data in demo_service_items():
+                maint.add(data, "demo")
 
     @app.get("/")
     def index():
@@ -1027,6 +1103,106 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         name = f"ghostmap-network-events-{time.strftime('%Y%m%d-%H%M')}.csv"
         return PlainTextResponse(netmon.store.events_csv(time.time() - min(max(hours, 0.1), 24 * 90) * 3600),
                                  media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="{name}"'})
+    # ------------------------------------------------------------- maintenance (service items and counters)
+    def meter_hours(dash_id: str, kind: str) -> float:
+        return float((history.meters(dash_id).get(METER_OF[kind]) or {}).get("value", 0.0)) / 3600
+
+    async def maint_value(it: dict) -> tuple[Optional[float], Optional[str]]:
+        """The item's count since its last service, or an error saying why it can't be read."""
+        kind = it["kind"]
+        try:
+            if kind == "days":
+                return (time.time() - it["last_service"]) / 86400, None
+            if kind in METER_OF:
+                if it["dash"] not in {d["id"] for d in dashboards.list()}:
+                    return None, "the machine dashboard was deleted"
+                return meter_hours(it["dash"], kind) - float(it.get("baseline") or 0), None
+            v = await tsc.values_since(int(it["line"]), it["last_service"])
+            if kind == "strokes":
+                return float(sum(n for (sid, tool), n in v["strokes"].items()
+                                 if sid == int(it["station"]) and (not it.get("tool") or tool == it["tool"]))), None
+            return float(v[kind]), None
+        except LookupError as exc:
+            return None, str(exc)
+        except Exception as exc:
+            return None, tsc_error(exc)
+
+    def maint_baseline(kind: str, dash: str) -> float:
+        return meter_hours(dash, kind) if kind in METER_OF and dash else 0.0
+
+    def maint_item(item_id: str) -> dict:
+        try:
+            return maint.get(item_id)
+        except KeyError:
+            raise HTTPException(404, "service item not found")
+
+    @app.get("/api/maintenance")
+    async def maint_list():
+        items = maint.list()
+        vals = await asyncio.gather(*(maint_value(it) for it in items))
+        return {"kinds": MAINT_KINDS, "items": [maint_view(it, v, e) for it, (v, e) in zip(items, vals)]}
+
+    @app.post("/api/maintenance/items")
+    def maint_add(body: MaintItemIn, request: Request):
+        data = body.model_dump()
+        if data["kind"] in METER_OF and data["dash"]:
+            load_dashboard(data["dash"])
+        try:
+            it = maint.add(data, who(request), maint_baseline(data["kind"], data["dash"]))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        audit.write(client_of(request), who(request), "maint.add", f"{it['id']} {it['name']}")
+        return it
+
+    @app.post("/api/maintenance/items/{item_id}")
+    def maint_edit(item_id: str, body: MaintEditIn, request: Request):
+        maint_item(item_id)
+        try:
+            it = maint.update(item_id, body.model_dump())
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        audit.write(client_of(request), who(request), "maint.edit", f"{item_id} {it['name']}")
+        return it
+
+    @app.post("/api/maintenance/items/{item_id}/service")
+    async def maint_service(item_id: str, body: MaintServiceIn, request: Request):
+        it = maint_item(item_id)
+        reading, _ = await maint_value(it)
+        if reading is not None:
+            reading = round(reading + float(it.get("offset") or 0), 1)
+        it = maint.service(item_id, who(request), body.note, reading, maint_baseline(it["kind"], it["dash"]))
+        audit.write(client_of(request), who(request), "maint.service", f"{item_id} {it['name']} at {reading}")
+        return it
+
+    @app.delete("/api/maintenance/items/{item_id}")
+    def maint_delete(item_id: str, request: Request):
+        it = maint_item(item_id)
+        maint.delete(item_id)
+        audit.write(client_of(request), who(request), "maint.delete", f"{item_id} {it['name']}")
+        return {"ok": True}
+
+    @app.get("/api/maintenance/counters")
+    async def maint_counters(line: Optional[int] = None):
+        """Production counters for a TSC line (when one is set up) and the PLC hour meters of every dashboard."""
+        machines = []
+        for d in dashboards.list():
+            m = history.meters(d["id"])
+            run, online = m.get("run_s") or {}, m.get("online_s") or {}
+            machines.append({"id": d["id"], "name": d["name"], "first": online.get("first") or run.get("first"),
+                             "run_h": round(float(run.get("value", 0)) / 3600, 1),
+                             "online_h": round(float(online.get("value", 0)) / 3600, 1),
+                             "run_7d": round(history.meter_window(d["id"], "run_s", 7) / 3600, 1),
+                             "online_7d": round(history.meter_window(d["id"], "online_s", 7) / 3600, 1),
+                             "recording": collector.status(d["id"])["recording"]})
+        out: dict = {"machines": machines, "tsc": None}
+        if line is not None:
+            try:
+                out["tsc"] = {"ok": True, **await tsc.counters(line)}
+            except LookupError as exc:
+                out["tsc"] = {"ok": False, "configured": False, "error": str(exc)}
+            except Exception as exc:
+                out["tsc"] = {"ok": False, "configured": True, "error": tsc_error(exc)}
+        return out
 
     # ------------------------------------------------------------- debug log
     client_log_seen: dict[str, list[float]] = {}
@@ -1153,21 +1329,78 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
             raise HTTPException(404, "job not found")
         return job.__dict__
 
-    @app.get("/api/probe/{ip}")
-    async def probe(ip: str, request: Request):
+    # ------------------------------------------------------------- device inspector (the Probe page)
+    from ghostmap.analysis.inspect import context as inspect_context, verdict as inspect_verdict
+    from ghostmap.collectors import inspect as inspector
+
+    def check_ip(ip: str) -> str:
         try:
             discovery.expand_targets([ip], max_hosts=1)
         except ValueError:
             raise HTTPException(400, "bad ip")
-        audit.write(client_of(request), who(request), "probe", ip)
-        ident = await discovery.probe(ip)
-        port_list = (44818, 80, 443, 502, 102, 22, 23)
-        open_ = await asyncio.gather(*(discovery.tcp_port_open(ip, p) for p in port_list))
-        return {
-            "ip": ip,
-            "identity": to_dict(ident.identity) if ident else None,
-            "tcp": dict(zip(map(str, port_list), open_)),
-        }
+        return ip.strip()
+
+    def recent_scans(n: int = 20) -> list:
+        out = []
+        for meta in store.list()[:n]:
+            try:
+                out.append(store.load(meta["id"]))
+            except (KeyError, OSError, ValueError):
+                continue
+        return out
+
+    def simulated_target(ctx: dict) -> bool:
+        """In the demo, addresses of the simulated machine answer from the simulator (nothing is sent)."""
+        return demo and ctx.get("scan") is not None and str(ctx["scan"]["id"]).startswith("demo")
+
+    @app.post("/api/inspect")
+    async def inspect_device(body: InspectIn, request: Request):
+        """A close look at one device: ports, latency, CIP identity and services, where it is plugged in, what
+        changed since earlier scans, and a verdict. Read-only (see collectors/inspect.py)."""
+        ip = check_ip(body.ip)
+        audit.write(client_of(request), who(request), "inspect", ip)
+        ctx = await asyncio.to_thread(inspect_context, ip, recent_scans())
+        if simulated_target(ctx):
+            r = inspector.simulated(ip, ctx["device"], ctx["port"])
+        else:
+            creds = SnmpCredentials(community=body.community) if body.community else None
+            kwargs = {"snmp_factory": snmp_factory} if snmp_factory else {}
+            r = await inspector.inspect(ip, creds, **kwargs)
+        return {**r, "context": ctx, "checks": inspect_verdict(r, ctx)}
+
+    # ------------------------------------------------------------- passive listeners (Network > Live)
+    @app.get("/api/live")
+    async def live_view(since: int = 0):
+        """What the passive listeners have heard: their state, the devices heard, and events newer than ``since``."""
+        return {**passive.snapshot(since), "listen": listen}
+
+    @app.post("/api/live/listeners/{name}")
+    async def live_listener(name: str, body: LiveListenerIn, request: Request):
+        try:
+            await passive.set_enabled(name, body.enabled)
+        except KeyError:
+            raise HTTPException(404, "no such listener")
+        audit.write(client_of(request), who(request), "listener", f"{name} {'on' if body.enabled else 'off'}")
+        return passive.snapshot(passive.seq)
+
+    ping_last: dict[str, float] = {}
+
+    @app.get("/api/probe/{ip}/ping")
+    async def probe_ping(ip: str, request: Request, port: int = 44818):
+        """One TCP connect, timed (the live latency trace on the Probe page). At most four a second per browser."""
+        ip = check_ip(ip)
+        if not 1 <= port <= 65535:
+            raise HTTPException(400, "bad port")
+        key = client_of(request)
+        now = time.monotonic()
+        if now - ping_last.get(key, 0) < 0.25:
+            raise HTTPException(429, "too fast")
+        ping_last[key] = now
+        if demo:
+            ctx = inspect_context(ip, recent_scans(2))
+            if simulated_target(ctx):
+                return {"ip": ip, "port": port, "ms": inspector.simulated_rtt(ip, ctx["port"]), "at": time.time()}
+        return {"ip": ip, "port": port, "ms": await inspector.tcp_rtt(ip, port), "at": time.time()}
 
     return app
 

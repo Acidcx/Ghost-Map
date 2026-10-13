@@ -11,7 +11,8 @@ ghostmap/
   store.py     JSON scan history + CSV export
   history.py   alarm history with first-out (SQLite), fed by web/collector.py
   secret.py    saved passwords sealed with Windows DPAPI (a local key file elsewhere)
-  web/         FastAPI app + static single-page UI (no external assets); tsc.py = TSC settings and cache
+  web/         FastAPI app + static single-page UI (no external assets); tsc.py = TSC settings and cache;
+               maintenance.py = service items
   sim/         simulated machine cell, ListIdentity responder, OPC UA gateway, TSC schedule, demo data
   cli.py       argparse CLI
   models.py    dataclasses shared by everything (+ JSON (de)serialisation)
@@ -35,8 +36,16 @@ ghostmap/
 
 `FakeSnmpClient` and the ListIdentity responder let the whole pipeline run with no hardware. `build_demo_scan()` runs the real collector, correlation and diagnostics against the simulated "Packaging Line 1" cell. It is used by the tests and by `ghostmap web --demo`.
 
-The TSC schedule (`sim/tsc.py`) stands in for the SQL view in the demo and tests. `tests/test_production.py` also has a test against a real SQL Server, skipped unless `GHOSTMAP_TEST_SQL="host,port;admin;password"` points at a scratch server (for example the `mcr.microsoft.com/mssql/server` docker image): it builds a made-up TSC database and a SELECT-only login and reads it the way Ghost Map does.
+The TSC schedule (`sim/tsc.py`) stands in for the SQL view in the demo and tests. `tests/test_production.py` also has a test against a real SQL Server, skipped unless `GHOSTMAP_TEST_SQL="host,port;admin;password"` points at a scratch server (for example the `mcr.microsoft.com/mssql/server` docker image): it builds a made-up TSC database (the views, stations, shifts, downtime and pattern tables) and a SELECT-only login, reads it the way Ghost Map does with only DataView granted and again with the optional tables granted, and checks the punch stroke SQL against the simulator's count.
 
 ## Upgrades
 
 Everything a user sets up lives in the data folder and survives an upgrade. `history.db` carries a schema number (`PRAGMA user_version`); a change to its tables bumps it and migrates the existing rows in `History.__init__`. `tsc.json` and export files carry a format number, and an import refuses a file from a newer format.
+
+## Device inspector (Probe)
+
+`collectors/inspect.py` does the network part of Probe for one IP (TCP connects to a fixed port list, timed connects, ListIdentity, ListServices from `protocols/enip.py`, optional SNMP system scalars) and has a `simulated()` twin for the demo machine. `analysis/inspect.py` is pure: `context()` finds the device in the saved scans (switch port, findings, what each scan saw at that address) and `verdict()` turns an inspection plus its context into `inspect.*` checks, each with a hint. `POST /api/inspect` joins them; `GET /api/probe/{ip}/ping` is the live trace's single timed connect.
+
+## Passive listeners (Network > Live)
+
+`protocols/passive.py` decodes BOOTP/DHCP, syslog and SNMP v1/v2c traps (and encodes them for the simulator and tests). `analysis/passive.py` turns what was heard into `passive.*` events with hints. `collectors/passive.py` (`PassiveMonitor`) runs the UDP listeners and the ARP table poll in the web server, keeps the devices heard and the last 500 events in memory, and limits each sender to 60 events a minute. `sim/passive.py` feeds it made-up packets in the demo. `GET /api/live?since=` returns what is new; `POST /api/live/listeners/{name}` switches one on or off (saved in `live.json`).
