@@ -12,7 +12,8 @@
 
 Running ``service install`` again from a newer exe upgrades in place: the service is stopped, the exe replaced
 and the service started again, with the data left as it is. ``service uninstall`` removes the service and
-leaves the data. The service itself is ``GhostMap.exe --data-dir C:\\ProgramData\\GhostMap service run ...``,
+leaves the data; ``service uninstall --purge`` also deletes the data (logins, saved passwords, certificates,
+history), the installing user's ``~/.ghostmap``, the event log source and any firewall rule for the installed exe. The service itself is ``GhostMap.exe --data-dir C:\\ProgramData\\GhostMap service run ...``,
 which hands the process to the service manager (``run_as_service``).
 
 The helpers that only build commands or copy files work on any OS (and are tested everywhere); the rest needs
@@ -266,30 +267,86 @@ def install(host: str, port: int, allow: Sequence[str], no_listen: bool, check_e
     return 0 if up else 1
 
 
-def uninstall(out=print) -> int:  # pragma: no cover - Windows only
+def purge_targets(home: Path) -> list[Path]:
+    """The data folders ``uninstall --purge`` deletes: the shared one and the installing user's own (install copies
+    it and leaves the original)."""
+    targets = []
+    for p in (shared_data_dir(), home):
+        if p.is_dir() and all(p.resolve() != t.resolve() for t in targets):
+            targets.append(p)
+    return targets
+
+
+def firewall_delete_command(exe: Path) -> list[str]:
+    """Delete every Windows Firewall rule for this program, whatever it was named (the IXON setup guide adds one)."""
+    return ["netsh", "advfirewall", "firewall", "delete", "rule", "name=all", f"program={exe}"]
+
+
+def remove_tree(path: Path, tries: int = 20) -> bool:
+    """Delete a folder, clearing read-only flags, and retrying while a just-stopped service lets go of its files."""
+    def unlock(func, p, _exc):
+        os.chmod(p, 0o700)
+        func(p)
+
+    handler = {"onexc": unlock} if sys.version_info >= (3, 12) else {"onerror": unlock}
+    for i in range(tries):
+        try:
+            shutil.rmtree(path, **handler)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            if i == tries - 1:
+                return False
+            time.sleep(0.5)
+    return False
+
+
+def uninstall(out=print, purge: bool = False) -> int:  # pragma: no cover - Windows only
     _need_windows()
     if not is_admin():
         out("error: removing a service needs an elevated prompt: right-click Command Prompt, Run as administrator")
         return 2
-    if state() is None:
+    installed = state() is not None
+    if installed:
+        _sc("sc.exe", "stop", SERVICE_NAME, check=False)
+        wait_for_state("STOPPED", 60)
+        _sc("sc.exe", "delete", SERVICE_NAME)
+    elif not purge:
         out(f"The service '{SERVICE_NAME}' is not installed.")
         return 0
-    _sc("sc.exe", "stop", SERVICE_NAME, check=False)
-    wait_for_state("STOPPED", 60)
-    _sc("sc.exe", "delete", SERVICE_NAME)
     data = shared_data_dir()
-    try:
-        (data / MARKER).unlink()
-    except OSError:
-        pass
     exe = install_dir() / EXE_NAME
+    if purge:
+        _sc(*firewall_delete_command(exe), check=False)
+        from ghostmap import winevent
+
+        winevent.unregister()
+        home = Path(os.environ.get("GHOSTMAP_DATA") or Path.home() / ".ghostmap")
+        failed = [str(p) for p in purge_targets(home) if not remove_tree(p)]
+    else:
+        try:
+            (data / MARKER).unlink()
+        except OSError:
+            pass
     if exe.exists() and Path(sys.executable).resolve() != exe.resolve():
         try:
             exe.unlink()
             exe.parent.rmdir()
         except OSError:
             pass
-    out(f"Removed the service. The data is still in {data} (use --data-dir to open it from a window).")
+    if not purge:
+        out(f"Removed the service. The data is still in {data} (use --data-dir to open it from a window).")
+        return 0
+    out(("Removed the service. " if installed else "")
+        + "Deleted the data, logins, saved passwords and certificates, the event log source and the firewall rules "
+          "for Ghost Map.")
+    if exe.exists():
+        out(f"Delete {exe.parent} yourself: this exe is running from there.")
+    out("Also delete the GhostMap.exe you ran this from, and any copy in Downloads or on the desktop.")
+    if failed:
+        out("error: could not delete " + ", ".join(failed) + " (still in use?). Restart Windows and run this again.")
+        return 1
     return 0
 
 
