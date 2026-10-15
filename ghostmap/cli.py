@@ -386,7 +386,7 @@ def cmd_service(args) -> int:
         return ws.install(args.host, args.port, args.allow, args.no_listen, check, https=args.https,
                           cert=args.cert, key=args.key)
     if args.action == "uninstall":
-        return ws.uninstall()
+        return ws.uninstall(purge=args.purge)
     return ws.control(args.action)
 
 
@@ -527,7 +527,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("service", help="run Ghost Map as a Windows service (install needs an elevated prompt)",
                        description="install: copy the exe to Program Files, the data to ProgramData, register the "
                                    "service (starts with Windows, restarted if it stops) and start it. Run install "
-                                   "again from a newer exe to upgrade. uninstall keeps the data.")
+                                   "again from a newer exe to upgrade. uninstall keeps the data; uninstall --purge "
+                                   "deletes it too, with the logins, saved passwords and certificates.")
     s.add_argument("action", choices=("install", "uninstall", "start", "stop", "status", "run"),
                    help="run is what Windows starts; you don't need it yourself")
     s.add_argument("--host", default="127.0.0.1")
@@ -535,6 +536,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--allow", action="append", default=[], metavar="IP[/BITS]",
                    help="client address or subnet that may connect besides localhost (see web --allow)")
     s.add_argument("--no-listen", action="store_true", help="don't run the passive listeners")
+    s.add_argument("--purge", action="store_true",
+                   help="with uninstall: also delete all data, logins, saved passwords and certificates, the event "
+                        "log source and the firewall rules for Ghost Map")
     _https_args(s)
     s.set_defaults(func=cmd_service)
 

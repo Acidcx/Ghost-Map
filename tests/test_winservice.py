@@ -91,3 +91,33 @@ def test_service_outside_windows_says_so():
 
     with pytest.raises(SystemExit, match="only available on Windows"):
         main(["service", "status"])
+
+
+def test_purge_deletes_the_shared_data_and_the_original_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("ProgramData", str(tmp_path / "pd"))
+    home = tmp_path / "home" / ".ghostmap"
+    (home / "pki").mkdir(parents=True)
+    (home / "users.json").write_text("{}")
+    data = tmp_path / "pd" / "GhostMap"
+    (data / "tls").mkdir(parents=True)
+    key = data / "tls" / "ghostmap.key"
+    key.write_text("secret")
+    key.chmod(0o400)  # read-only files don't stop it
+    targets = ws.purge_targets(home)
+    assert targets == [data, home]
+    assert all(ws.remove_tree(p) for p in targets)
+    assert not data.exists() and not home.exists()
+    assert ws.purge_targets(home) == []  # nothing left, and running it again is fine
+
+
+def test_purge_removes_the_firewall_rules_for_the_installed_exe():
+    exe = r"C:\Program Files\GhostMap\GhostMap.exe"
+    cmd = ws.firewall_delete_command(exe)
+    assert cmd[:5] == ["netsh", "advfirewall", "firewall", "delete", "rule"]
+    assert "name=all" in cmd and f"program={exe}" in cmd
+
+
+def test_uninstall_purge_is_an_option():
+    from ghostmap.cli import build_parser
+
+    assert build_parser().parse_args(["service", "uninstall", "--purge"]).purge

@@ -48,7 +48,7 @@ Web face first, because it's the biggest risk:
 - [x] HTTPS between the IXrouter and the HMI (self-signed certificate or plant CA): `--https`, `--cert`/`--key`
 
 Then the service:
-- [x] `GhostMap.exe service install|uninstall|start|stop|status` to run as a Windows service at boot (LocalSystem, data in `C:\ProgramData\GhostMap`, restarted after a failure; install again to upgrade)
+- [x] `GhostMap.exe service install|uninstall|start|stop|status` to run as a Windows service at boot (LocalSystem, data in `C:\ProgramData\GhostMap`, restarted after a failure; install again to upgrade; `uninstall --purge` removes everything it left)
 - [ ] Scheduled background scans and polling, with history in SQLite (switch traffic, CPU and storm events: done, Network > Traffic)
   - [x] Background reading of every machine dashboard (resident collector), one OPC UA session per gateway, alarm history in SQLite (90 days)
 - [ ] Change timeline: device added or removed, firmware changed, port down, new MAC on a port
