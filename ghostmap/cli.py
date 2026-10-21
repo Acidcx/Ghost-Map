@@ -274,7 +274,7 @@ def _exposure(host: str, allow_args, data_dir, user_cmd: str = "ghostmap user ad
         # Reachable from the network (e.g. the IXON IXrouter): require an allow-list and logins.
         if not allow:
             return allow, ("error: serving beyond localhost needs --allow with the addresses that may connect, "
-                           "e.g. --allow <IXrouter LAN IP>")
+                           "or --ixon for IXON web access (service install)")
         if not UserStore(data_dir).has_users():
             return allow, f"error: serving beyond localhost needs at least one login. Create one first:\n  {user_cmd}"
     return allow, None
@@ -368,6 +368,14 @@ def cmd_service(args) -> int:
     from ghostmap import winservice as ws
     from ghostmap.store import default_data_dir
 
+    if args.action == "install" and args.host is None and not args.allow and not args.ixon and not args.https:
+        prev = ws.installed_info()  # an upgrade with no options keeps how the service was opened up
+        if prev and prev.get("host"):
+            args.host, args.port = prev["host"], prev.get("port", args.port)
+            args.allow, args.https = list(prev.get("allow") or []), bool(prev.get("https"))
+            print(f"Keeping the current settings: --host {args.host} --port {args.port}"
+                  + "".join(f" --allow {a}" for a in args.allow) + (" --https" if args.https else ""), file=sys.stderr)
+    args.host = args.host or "127.0.0.1"
     if args.action == "run":
         allow, problem = _exposure(args.host, args.allow, args.data_dir or default_data_dir())
         if problem:
@@ -375,6 +383,13 @@ def cmd_service(args) -> int:
             return 2
         return ws.run_as_service(lambda: _server(args, allow, _tls(args)))
     if args.action == "install":
+        if args.ixon:
+            from ghostmap.web.auth import IXON_RANGE
+
+            if args.host in LOCAL_HOSTS:
+                args.host = "0.0.0.0"
+            if IXON_RANGE not in args.allow:
+                args.allow.append(IXON_RANGE)
         def check(data_dir):
             exe = "GhostMap.exe" if getattr(sys, "frozen", False) else "ghostmap"
             return _exposure(args.host, args.allow, data_dir,
@@ -531,11 +546,16 @@ def build_parser() -> argparse.ArgumentParser:
                                    "deletes it too, with the logins, saved passwords and certificates.")
     s.add_argument("action", choices=("install", "uninstall", "start", "stop", "status", "run"),
                    help="run is what Windows starts; you don't need it yourself")
-    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--host", default=None,
+                   help="default 127.0.0.1; install with no --host, --allow, --ixon or --https keeps the current ones")
     s.add_argument("--port", type=int, default=8470)
     s.add_argument("--allow", action="append", default=[], metavar="IP[/BITS]",
                    help="client address or subnet that may connect besides localhost (see web --allow)")
     s.add_argument("--no-listen", action="store_true", help="don't run the passive listeners")
+    s.add_argument("--ixon", action="store_true",
+                   help="with install: open Ghost Map to IXON web access: --host 0.0.0.0 and --allow for IXON's whole "
+                        "VPN range (its address changes when the IXrouter restarts). Install also keeps the Windows "
+                        "Firewall rule in line with --allow.")
     s.add_argument("--purge", action="store_true",
                    help="with uninstall: also delete all data, logins, saved passwords and certificates, the event "
                         "log source and the firewall rules for Ghost Map")

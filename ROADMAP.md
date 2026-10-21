@@ -41,6 +41,7 @@ It can't see traffic between other devices (e.g. PLC ↔ drive I/O). Per-port er
 
 Web face first, because it's the biggest risk:
 - [x] Relative URLs in the web UI so it works behind the IXON HTTP proxy
+- [x] `service install --ixon`: allows IXON's whole VPN range (its address changes when the IXrouter restarts), keeps the Windows Firewall rule in line with `--allow`, and an upgrade with no options keeps the current settings
 - [x] Client allow-list: only `localhost` and listed IPs/subnets (the IXrouter) can connect
 - [x] Logins with roles (viewer / admin), hashed passwords, session cookies, login lockout
 - [x] Audit log of logins and actions (scans started, scans deleted)

@@ -244,6 +244,14 @@ def install(host: str, port: int, allow: Sequence[str], no_listen: bool, check_e
     binpath = bin_path(prog, service_args(data, host, port, allow, no_listen, https, cert, key))
     for cmd in sc_commands(binpath, exists=current is not None):
         _sc(*cmd)
+    if getattr(sys, "frozen", False):
+        delete, *add = firewall_commands(Path(prog[0]), port, host, allow)
+        _sc(*delete, check=False)  # fails harmlessly when there is no rule yet
+        if add and _sc(*add[0], check=False).returncode != 0:
+            out("warning: could not add the Windows Firewall rule; add an inbound rule for TCP "
+                f"{port} from {', '.join(map(str, allow))} by hand")
+        elif add:
+            out(f"Windows Firewall: TCP {port} open to {', '.join(map(str, allow))} (rule '{FIREWALL_RULE}')")
     _sc(*acl_command(data))
     from ghostmap import winevent
 
@@ -280,6 +288,21 @@ def purge_targets(home: Path) -> list[Path]:
 def firewall_delete_command(exe: Path) -> list[str]:
     """Delete every Windows Firewall rule for this program, whatever it was named (the IXON setup guide adds one)."""
     return ["netsh", "advfirewall", "firewall", "delete", "rule", "name=all", f"program={exe}"]
+
+
+FIREWALL_RULE = "Ghost Map"
+
+
+def firewall_commands(exe: Path, port: int, host: str, allow: Sequence[str]) -> list[list[str]]:
+    """Make the inbound firewall rule match what Ghost Map serves: every earlier rule for the exe goes (including one
+    added by hand), and one rule for ``port`` from the ``--allow`` addresses comes back when it listens beyond this
+    PC. A service gets no firewall prompt, so without the rule remote clients just time out."""
+    cmds = [firewall_delete_command(exe)]
+    if host not in ("127.0.0.1", "localhost", "::1") and allow:
+        cmds.append(["netsh", "advfirewall", "firewall", "add", "rule", f"name={FIREWALL_RULE}", "dir=in",
+                     "action=allow", "protocol=TCP", f"localport={port}", f"remoteip={','.join(map(str, allow))}",
+                     f"program={exe}", "enable=yes"])
+    return cmds
 
 
 def remove_tree(path: Path, tries: int = 20) -> bool:

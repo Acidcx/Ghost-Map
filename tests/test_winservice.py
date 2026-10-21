@@ -121,3 +121,41 @@ def test_uninstall_purge_is_an_option():
     from ghostmap.cli import build_parser
 
     assert build_parser().parse_args(["service", "uninstall", "--purge"]).purge
+
+
+def test_install_keeps_the_firewall_rule_in_line_with_allow():
+    exe = r"C:\Program Files\GhostMap\GhostMap.exe"
+    delete, add = ws.firewall_commands(exe, 8470, "0.0.0.0", ["10.187.0.0/16", "172.17.255.200"])
+    assert delete == ws.firewall_delete_command(exe)  # replaces any earlier rule, one added by hand included
+    assert "remoteip=10.187.0.0/16,172.17.255.200" in add and "localport=8470" in add and f"program={exe}" in add
+    assert ws.firewall_commands(exe, 8470, "127.0.0.1", []) == [delete]  # local only: no rule left open
+
+
+def test_ixon_option_allows_the_whole_vpn_range(monkeypatch):
+    """IXON's web access came from 10.187.202.89, then 10.187.78.28 after an IXrouter reboot (Test HMI, 2026-10)."""
+    from ghostmap import cli
+    from ghostmap.web.auth import client_allowed, parse_allow
+
+    seen = {}
+    monkeypatch.setattr(ws, "install", lambda host, port, allow, *a, **k: seen.update(host=host, allow=list(allow)) or 0)
+    assert cli.main(["service", "install", "--ixon", "--allow", "172.17.255.200"]) == 0
+    assert seen["host"] == "0.0.0.0" and seen["allow"] == ["172.17.255.200", "10.187.0.0/16"]
+    nets = parse_allow(seen["allow"])
+    assert client_allowed("10.187.202.89", nets) and client_allowed("10.187.78.28", nets)
+    assert not client_allowed("10.188.0.1", nets)
+
+
+def test_upgrade_with_no_options_keeps_ixon_access(tmp_path, monkeypatch):
+    """Running install from a newer exe used to fall back to localhost only, cutting off IXON until someone noticed."""
+    from ghostmap import cli
+
+    monkeypatch.setenv("ProgramData", str(tmp_path))
+    (tmp_path / "GhostMap").mkdir()
+    ws.write_marker(tmp_path / "GhostMap", {"host": "0.0.0.0", "port": 8470, "allow": ["10.187.0.0/16"], "https": True})
+    seen = {}
+    monkeypatch.setattr(ws, "install", lambda host, port, allow, *a, **k: seen.update(host=host, allow=list(allow),
+                                                                                       https=k["https"]) or 0)
+    assert cli.main(["service", "install"]) == 0
+    assert seen == {"host": "0.0.0.0", "allow": ["10.187.0.0/16"], "https": True}
+    assert cli.main(["service", "install", "--host", "127.0.0.1"]) == 0  # asked for local only: gets it
+    assert seen["host"] == "127.0.0.1" and seen["allow"] == []

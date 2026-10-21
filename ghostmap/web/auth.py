@@ -38,6 +38,18 @@ LOCKOUT_S = 300
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,32}$")
 
 
+# Where IXON's web access reaches the HMI from: its VPN addresses, not the IXrouter's LAN IP, and a different one
+# after each IXrouter reboot (10.187.202.89, then 10.187.78.28 on the Test HMI). ``--ixon`` allows the whole range.
+IXON_RANGE = "10.187.0.0/16"
+
+
+def is_ixon(host: Optional[str]) -> bool:
+    try:
+        return ipaddress.ip_address(host or "") in ipaddress.ip_network(IXON_RANGE)
+    except ValueError:
+        return False
+
+
 def parse_allow(specs: Iterable[str]) -> list[ipaddress._BaseNetwork]:
     """Parse ``--allow`` values (single IPs or CIDR subnets)."""
     nets = []

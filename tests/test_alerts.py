@@ -213,3 +213,11 @@ def test_reading_this_windows_pc(tmp_path):
     assert isinstance(snap["services"], list) and snap["events"]["window_h"] == 24
     assert snap["disks"] and snap["memory"]["total"] > 0 and snap["uptime_s"] > 0
     assert all(isinstance(g["count"], int) and g["source"] for g in snap["events"]["top"])
+
+
+def test_refused_ixon_address_points_at_the_ixon_option():
+    now = 1000.0
+    ixon, other = rules.access_alerts([{"ip": "10.187.78.28", "count": 2, "first": now, "last": now, "path": "/"},
+                                       {"ip": "172.17.255.50", "count": 1, "first": now, "last": now}], now)
+    assert "service install --ixon" in ixon["hint"] and "IXON's VPN range" in ixon["hint"]
+    assert "--allow 172.17.255.50" in other["hint"] and "VPN range" not in other["hint"]

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from ghostmap.web.auth import is_ixon
+
 ERROR, WARNING = "error", "warning"
 GB = 1024 ** 3
 
@@ -200,12 +202,18 @@ def access_alerts(refused: list[dict], now: float) -> list[dict]:
         if now - r["last"] > RECENT_REFUSED_S:
             continue
         times = "once" if r["count"] == 1 else f"{r['count']} times"
+        if is_ixon(r["ip"]):
+            hint = (f"{r['ip']} is in IXON's VPN range, which changes when the IXrouter restarts. Allow the whole range "
+                    "(and its firewall rule): GhostMap.exe service install --ixon, from an elevated prompt, plus "
+                    "--https if it is in use.")
+        else:
+            hint = (f"If {r['ip']} should reach Ghost Map, add it: GhostMap.exe service install with --allow {r['ip']} "
+                    "(plus the --host, --allow and --ixon already in use); install updates the firewall rule too. "
+                    "If not, find out who is trying to open Ghost Map.")
         out.append(alert(f"web.refused:{r['ip']}", "web.refused", WARNING, "hmi",
                          f"Refused web access from {r['ip']}",
                          f"Turned away {times}, last for {r.get('path') or '/'}. Only localhost and --allow may connect.",
-                         f"If {r['ip']} is the IXrouter or IXON's VPN, add it: GhostMap.exe service install with "
-                         f"--allow {r['ip']} (plus the --host and --allow already in use), and allow it in the Windows "
-                         "Firewall rule for port 8470. If not, find out who is trying to open Ghost Map.",
+                         hint,
                          {"tab": "hostpc"}, r["first"]))
     return out
 
