@@ -258,8 +258,37 @@ details.small summary { cursor: pointer; }
 /* Debug log and machine health */
 .logbox { max-height: 55vh; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
   padding: 8px; font-size: 11px; white-space: pre-wrap; word-break: break-word; }
-.logbox.tall { max-height: 70vh; }
-.logbox .bad { color: var(--err); font-weight: 600; }
+/* TSC event logs */
+.lglevels { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.lglevels button { cursor: pointer; font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line);
+  background: var(--panel-2); color: var(--text); }
+.lglevels button.off { opacity: .45; text-decoration: line-through; }
+.lgwrap { max-height: 70vh; overflow: auto; border: 1px solid var(--line); border-radius: 6px; }
+table.lgt { font-size: 12px; width: 100%; }
+#tab-tsclogs select { max-width: 100%; }
+table.lgt th { position: sticky; top: 0; background: var(--panel); text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); z-index: 1; }
+table.lgt td { padding: 3px 8px; border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent); vertical-align: top; }
+table.lgt td.t, table.lgt td.m, table.lgt td.s { font-family: var(--mono); white-space: nowrap; }
+table.lgt td.t { color: var(--muted); }
+table.lgt td.msg { font-family: var(--mono); word-break: break-word; }
+table.lgt tr.lv-err td { background: color-mix(in srgb, var(--err) 7%, transparent); }
+table.lgt tr.lv-warn td { background: color-mix(in srgb, var(--warn) 7%, transparent); }
+table.lgt tr.lv-err td.msg { color: var(--err); }
+table.lgt details summary { cursor: pointer; }
+table.lgt details pre { margin: 4px 0 2px; padding: 6px 8px; background: var(--bg); border-radius: 4px; white-space: pre-wrap; color: var(--text); }
+table.lgt tr.daybreak td { background: var(--panel-2); color: var(--muted); font-weight: 600; }
+.lv { display: inline-block; min-width: 54px; text-align: center; border-radius: 4px; padding: 0 6px; font-size: 11px; font-weight: 600;
+  border: 1px solid currentColor; }
+.lv-err .lv, .lv.err { color: var(--err); }
+.lv-warn .lv, .lv.warn { color: var(--warn); }
+.lv-info .lv, .lv.info { color: var(--info); }
+.lv-dbg .lv, .lv.dbg { color: var(--muted); }
+.lgtop { margin: 0 0 10px; }
+.lgtop summary { cursor: pointer; font-weight: 600; margin-bottom: 4px; }
+.lgtop table td { padding: 2px 8px; font-size: 12px; vertical-align: top; }
+.lgtop tr { cursor: pointer; }
+.lgtop tr:hover td { background: var(--panel-2); }
+.lgtop .n { font-weight: 700; text-align: right; white-space: nowrap; }
 .mhealth { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px 16px; margin-bottom: 8px; }
 .mhealth .k { color: var(--muted); font-size: 12px; }
 .mhealth .v { font-weight: 600; }
@@ -603,3 +632,4 @@ dialog::backdrop { backdrop-filter: blur(3px); }
 #alertsList { max-height: 60vh; overflow: auto; }
 .finding.alert .hint + .hint { margin-top: -2px; }
 #tab-hostpc .tile .pbarwrap { margin: 6px 0 4px; }
+@media (max-width: 700px) { #tab-tsclogs .toolbar label { width: 100%; } #tab-tsclogs .toolbar select { width: 100%; min-width: 0; } }

@@ -255,18 +255,25 @@
       <div class="panel">
         <div class="toolbar">
           <h2 class="grow">TSC event logs</h2>
+          <button type="button" class="btn ghost" id="lgOlder" title="The day before">&#9664; Older</button>
+          <input type="date" id="lgDate" title="Open the log for a day">
+          <button type="button" class="btn ghost" id="lgNewer" title="The day after">Newer &#9654;</button>
           <label>File <select id="lgFile"></select></label>
-          <input type="search" id="lgQuery" placeholder="Search this file" maxlength="200">
-          <label class="small"><input type="checkbox" id="lgProblems"> Errors only</label>
-          <label>Show <select id="lgLines"><option value="200">last 200 lines</option><option value="1000" selected>last 1000</option>
-            <option value="5000">last 5000</option></select></label>
           <button type="button" class="btn ghost" id="lgRefresh">Refresh</button>
           <a class="btn hidden" id="lgDownload" download>Download</a>
         </div>
-        <p class="small muted">TSC's own log files on this PC, newest first: <span class="mono">C:\Bradbury EventLogs</span> and the legacy
-          <span class="mono">Bradbury\Event Logs</span> folder in each user's AppData. Ghost Map only reads them.
-          <span id="lgStat"></span></p>
-        <pre id="lgText" class="logbox tall"></pre>
+        <div class="toolbar">
+          <span id="lgLevels" class="lglevels"></span>
+          <label>Source <select id="lgSource"><option value="">All</option></select></label>
+          <input type="search" id="lgQuery" placeholder="Search this day" maxlength="200">
+          <label>Show <select id="lgLines"><option value="200">last 200</option><option value="1000" selected>last 1000</option>
+            <option value="5000">last 5000</option></select></label>
+          <label class="small"><input type="checkbox" id="lgExpand"> Expand details</label>
+        </div>
+        <p class="small muted">TSC's own log files on this PC, one per day: <span class="mono">C:\Bradbury EventLogs</span> and the legacy
+          <span class="mono">Bradbury\Event Logs</span> folder in each user's AppData. Ghost Map only reads them. <span id="lgStat"></span></p>
+        <div id="lgTop"></div>
+        <div id="lgText" class="lgwrap"></div>
       </div>
     </section>
 

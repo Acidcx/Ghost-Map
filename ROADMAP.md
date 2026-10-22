@@ -96,7 +96,7 @@ Then the service:
 - [x] Production page per line: shift totals, running part, queue, holds, feet per hour, orders, recent parts
 - [x] Queue in TSC's run order (QueueIndex) with status codes; orders, bundles and pieces counted as TSC counts them
 - [x] Stations (paired stations shown together), TSC shift calendar, stops and reasons; optional grants listed on the Connection page
-- [x] TSC's own event logs (new and legacy folders) on Production > Event logs: read-only, search, errors only, download
+- [x] TSC's own event logs (new and legacy folders) on Production > Event logs: read-only, per day, entries colored by level with folded multi-line details, level/source filters, search, most repeated, download
 - [x] Completed-parts history beyond 12 hours: Ghost Map's own hourly copy (`production.db`), shown by day and week with CSV
 - [ ] Shift report (waits on planned stop codes and target speeds)
 - [ ] Combine with the machine dashboard: feet per hour against run time and stops (OEE performance)

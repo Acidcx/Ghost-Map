@@ -1405,10 +1405,12 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         return tsclogs.list_files(log_folders)
 
     @app.get("/api/tsclogs/file")
-    def tsc_log_file(request: Request, id: str = "", lines: int = 500, q: str = "", problems: bool = False):
+    def tsc_log_file(request: Request, id: str = "", lines: int = 500, q: str = "", problems: bool = False,
+                     hide: str = "", source: str = ""):
         require_admin(request)
         try:
-            return tsclogs.read(tsclogs.resolve(id, log_folders), lines, q[:200], problems)
+            return tsclogs.read(tsclogs.resolve(id, log_folders), lines, q[:200], problems,
+                                hide.split(",")[:20], source[:200])
         except (ValueError, OSError) as exc:
             raise HTTPException(404, str(exc) if isinstance(exc, ValueError) else "could not read the file")
 
