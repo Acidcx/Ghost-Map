@@ -47,6 +47,19 @@ def register() -> bool:  # pragma: no cover - Windows only
         return False
 
 
+def unregister() -> bool:  # pragma: no cover - Windows only
+    """Remove the event source (``service uninstall --purge``). The events already logged stay in the log."""
+    if sys.platform != "win32":
+        return False
+    import winreg
+
+    try:
+        winreg.DeleteKey(winreg.HKEY_LOCAL_MACHINE, KEY)
+        return True
+    except OSError:
+        return False
+
+
 def write(kind: int, eid: int, text: str) -> bool:  # pragma: no cover - Windows only (Windows CI job)
     """One event in the Application log. Returns False when it can't be written (never raises)."""
     if sys.platform != "win32":

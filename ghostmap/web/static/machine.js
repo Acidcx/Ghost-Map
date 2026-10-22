@@ -88,6 +88,29 @@ async function machinePoll() {
   machineSchedule();
 }
 document.addEventListener("gm:tab", (e) => { if (e.detail === "machine") machinePoll(); });
+
+// For the Home page: the open (or last used) dashboard's state, worked out the same way as its own tiles.
+// Returns null when there is no dashboard yet.
+async function machineSummary() {
+  if (!mach.dash) await machineLoadList();
+  if (!mach.dash) return null;
+  const id = mach.dash.id;
+  try {
+    mach.vals = await api(`api/dashboards/${encodeURIComponent(id)}/values`, { timeout: 10000 });
+  } catch (e) {
+    mach.vals = { ok: false, error: e.message, values: {}, since: {}, bad: [], health: mach.vals?.health };
+  }
+  const vals = mach.vals, L = mach.dash.layout, H = vals.health || {};
+  const frozen = !!(vals.ok && H.heartbeat?.frozen);
+  const known = vals.ok && vals.bad.length < Object.keys(vals.values).length && !frozen;
+  const states = L.areas.map((a) => ({ a, s: areaState(a) }));
+  const active = states.flatMap(({ a, s }) => s.active.map((x) => ({ ...x, area: a.title })));
+  const axes = states.reduce((n, { s }) => n + s.axes.length, 0), faultedAxes = states.reduce((n, { s }) => n + s.faultedAxes.length, 0);
+  return { id, name: mach.dash.name, known, run: runningState(L, vals.values || {}, known), comms: commsState(vals),
+    faults: active.filter((x) => x.severity !== "warning").length + faultedAxes, warnings: active.filter((x) => x.severity === "warning").length,
+    estops: active.filter((x) => x.category === "estop").length, axes, faultedAxes,
+    active: active.slice(0, 5).map((x) => ({ label: x.label || x.name, area: x.area, severity: x.severity })) };
+}
 document.addEventListener("visibilitychange", () => { if (!document.hidden) machinePoll(); });
 
 // ------------------------------------------------------------------ state
@@ -764,7 +787,7 @@ document.querySelector("#tab-machine").addEventListener("click", async (e) => {
       mach.dash = await api(`api/dashboards/${encodeURIComponent(mach.dash.id)}/rebuild`, { method: "POST" });
       machineRender();
     } else if (t.debuglog) {
-      $("#debugBtn").click();
+      openLog("ghostmap");
     } else if (t.hbpick || t.hbclear) {
       const L = layoutCopy();
       L.machine = { ...(L.machine || {}), heartbeat: [] };

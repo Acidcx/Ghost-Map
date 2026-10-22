@@ -41,14 +41,16 @@ It can't see traffic between other devices (e.g. PLC ↔ drive I/O). Per-port er
 
 Web face first, because it's the biggest risk:
 - [x] Relative URLs in the web UI so it works behind the IXON HTTP proxy
+- [x] `service install --ixon`: allows IXON's whole VPN range (its address changes when the IXrouter restarts), keeps the Windows Firewall rule in line with `--allow`, and an upgrade with no options keeps the current settings
 - [x] Client allow-list: only `localhost` and listed IPs/subnets (the IXrouter) can connect
 - [x] Logins with roles (viewer / admin), hashed passwords, session cookies, login lockout
 - [x] Audit log of logins and actions (scans started, scans deleted)
 - [x] Security headers; state-changing requests protected against cross-site requests
 - [x] HTTPS between the IXrouter and the HMI (self-signed certificate or plant CA): `--https`, `--cert`/`--key`
+- [x] Home page (machine, production, alerts, service, network and PC health on one screen) and pages regrouped: Machine, Production, Maintenance, Network, and an admin System group (This PC, Logs, TSC database, OPC UA tags, Probe)
 
 Then the service:
-- [x] `GhostMap.exe service install|uninstall|start|stop|status` to run as a Windows service at boot (LocalSystem, data in `C:\ProgramData\GhostMap`, restarted after a failure; install again to upgrade)
+- [x] `GhostMap.exe service install|uninstall|start|stop|status` to run as a Windows service at boot (LocalSystem, data in `C:\ProgramData\GhostMap`, restarted after a failure; install again to upgrade; `uninstall --purge` removes everything it left)
 - [ ] Scheduled background scans and polling, with history in SQLite (switch traffic, CPU and storm events: done, Network > Traffic)
   - [x] Background reading of every machine dashboard (resident collector), one OPC UA session per gateway, alarm history in SQLite (90 days)
 - [ ] Change timeline: device added or removed, firmware changed, port down, new MAC on a port
@@ -95,6 +97,7 @@ Then the service:
 - [x] Production page per line: shift totals, running part, queue, holds, feet per hour, orders, recent parts
 - [x] Queue in TSC's run order (QueueIndex) with status codes; orders, bundles and pieces counted as TSC counts them
 - [x] Stations (paired stations shown together), TSC shift calendar, stops and reasons; optional grants listed on the Connection page
+- [x] TSC's own event logs (new and legacy folders) on System > Logs: read-only, per day, entries colored by level with folded multi-line details, level/source filters, search, most repeated, download
 - [x] Completed-parts history beyond 12 hours: Ghost Map's own hourly copy (`production.db`), shown by day and week with CSV
 - [ ] Shift report (waits on planned stop codes and target speeds)
 - [ ] Combine with the machine dashboard: feet per hour against run time and stops (OEE performance)
