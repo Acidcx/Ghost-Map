@@ -21,7 +21,8 @@ VIEWER_WRITES = {("POST", "/api/login"), ("POST", "/api/logout"), ("POST", "/api
 # What a viewer may not read: user accounts, connection settings, gateway certificates, tag lists and exports,
 # logs, and active probing.
 ADMIN_READS = {"/api/users", "/api/opcua/trust", "/api/opcua/export/{job_id}", "/api/dashboards/{dash_id}/tags", "/api/export",
-               "/api/tsc/config", "/api/netmon/config", "/api/debug/log", "/api/debug/bundle", "/api/probe/{ip}/ping"}
+               "/api/tsc/config", "/api/netmon/config", "/api/debug/log", "/api/debug/bundle", "/api/probe/{ip}/ping",
+               "/api/tsclogs", "/api/tsclogs/file", "/api/tsclogs/download"}
 
 
 @pytest.fixture(autouse=True)

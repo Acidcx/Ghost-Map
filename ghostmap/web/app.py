@@ -29,7 +29,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, Red
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from ghostmap import BUILD, __version__, debuglog
+from ghostmap import BUILD, __version__, debuglog, tsclogs
 from ghostmap.analysis.diff import diff_scans
 from ghostmap.collectors import discovery
 from ghostmap.models import to_dict
@@ -1395,6 +1395,32 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         name = f"ghostmap-debug-{time.strftime('%Y%m%d-%H%M%S')}.zip"
         return Response(debuglog.bundle(store.root, debug_info()), media_type="application/zip",
                         headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+    # ------------------------------------------------------------- TSC's own event logs (files on this PC, read-only)
+    log_folders = tsclogs.demo_folders(store.root) if demo else tsclogs.FOLDERS
+
+    @app.get("/api/tsclogs")
+    def tsc_logs(request: Request):
+        require_admin(request)
+        return tsclogs.list_files(log_folders)
+
+    @app.get("/api/tsclogs/file")
+    def tsc_log_file(request: Request, id: str = "", lines: int = 500, q: str = "", problems: bool = False):
+        require_admin(request)
+        try:
+            return tsclogs.read(tsclogs.resolve(id, log_folders), lines, q[:200], problems)
+        except (ValueError, OSError) as exc:
+            raise HTTPException(404, str(exc) if isinstance(exc, ValueError) else "could not read the file")
+
+    @app.get("/api/tsclogs/download")
+    def tsc_log_download(request: Request, id: str = ""):
+        require_admin(request)
+        try:
+            path = tsclogs.resolve(id, log_folders)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc))
+        audit.write(client_of(request), who(request), "tsclogs.download", path.name)
+        return FileResponse(path, media_type="application/octet-stream", filename=path.name)
 
     @app.get("/api/scans")
     def list_scans():

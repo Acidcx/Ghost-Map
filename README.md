@@ -178,6 +178,8 @@ Set it up under **Production > Connection** (admin):
 
 **Test connection** connects and lists the lines without saving. The password is saved sealed with Windows DPAPI for this PC (`~/.ghostmap/tsc.json`) and is never sent back to a browser, written to the log or included in an export. GhostMap.exe brings its own SQL driver (python-tds), so nothing needs installing on the HMI. Type `demo` as the server to try a simulated schedule.
 
+**Production > Event logs** (admins) shows TSC's own log files from this PC, newest first: `C:\Bradbury EventLogs` and the legacy `Bradbury\Event Logs` folder in each user's AppData. Search a file, show only the lines with errors (in red), or download it. Ghost Map only reads files inside those two folders.
+
 ### Maintenance
 
 **Maintenance > Service** lists service items, overdue first. Each one counts up from when it was last done, against an interval:

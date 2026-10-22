@@ -84,7 +84,7 @@ document.querySelectorAll("#tabs button").forEach((b) =>
   b.addEventListener("click", () => showTab(b.dataset.tab)));
 document.querySelectorAll("#groups button").forEach((b) =>
   b.addEventListener("click", () => showGroup(b.dataset.group)));
-const SCANLESS_TABS = ["opcua", "machine", "production", "tscconn", "service", "counters", "hostpc", "probe", "live", "traffic"];  // tabs that work without any scan loaded
+const SCANLESS_TABS = ["opcua", "machine", "production", "tscconn", "tsclogs", "service", "counters", "hostpc", "probe", "live", "traffic"];  // tabs that work without any scan loaded
 const isViewer = () => document.body.classList.contains("viewer");
 const tabGroup = (name) => document.querySelector(`#tabs button[data-tab="${name}"]`)?.closest(".tabgroup")?.dataset.group;
 function showGroup(group) {

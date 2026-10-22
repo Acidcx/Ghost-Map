@@ -258,6 +258,8 @@ details.small summary { cursor: pointer; }
 /* Debug log and machine health */
 .logbox { max-height: 55vh; overflow: auto; background: var(--bg); border: 1px solid var(--line); border-radius: 6px;
   padding: 8px; font-size: 11px; white-space: pre-wrap; word-break: break-word; }
+.logbox.tall { max-height: 70vh; }
+.logbox .bad { color: var(--err); font-weight: 600; }
 .mhealth { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px 16px; margin-bottom: 8px; }
 .mhealth .k { color: var(--muted); font-size: 12px; }
 .mhealth .v { font-weight: 600; }

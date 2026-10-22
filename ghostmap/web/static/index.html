@@ -42,7 +42,8 @@
       <button data-tab="opcua" class="admin-only">Tags</button></span>
     <span class="tabgroup hidden" data-group="production">
       <button data-tab="production">Line</button>
-      <button data-tab="tscconn" class="admin-only">Connection</button></span>
+      <button data-tab="tscconn" class="admin-only">Connection</button>
+      <button data-tab="tsclogs" class="admin-only">Event logs</button></span>
     <span class="tabgroup hidden" data-group="maintenance">
       <button data-tab="service">Service</button>
       <button data-tab="counters">Counters</button>
@@ -247,6 +248,25 @@
         <h2>Move to another PC</h2>
         <p class="small muted">One file with every machine dashboard (layout, flips, hidden tags and tag lists) and these TSC settings. Passwords and recorded history are not included.</p>
         <p><a class="btn" href="api/export" download>Export everything</a> <button type="button" class="btn" id="tImport">Import...</button></p>
+      </div>
+    </section>
+
+    <section id="tab-tsclogs" class="tab hidden">
+      <div class="panel">
+        <div class="toolbar">
+          <h2 class="grow">TSC event logs</h2>
+          <label>File <select id="lgFile"></select></label>
+          <input type="search" id="lgQuery" placeholder="Search this file" maxlength="200">
+          <label class="small"><input type="checkbox" id="lgProblems"> Errors only</label>
+          <label>Show <select id="lgLines"><option value="200">last 200 lines</option><option value="1000" selected>last 1000</option>
+            <option value="5000">last 5000</option></select></label>
+          <button type="button" class="btn ghost" id="lgRefresh">Refresh</button>
+          <a class="btn hidden" id="lgDownload" download>Download</a>
+        </div>
+        <p class="small muted">TSC's own log files on this PC, newest first: <span class="mono">C:\Bradbury EventLogs</span> and the legacy
+          <span class="mono">Bradbury\Event Logs</span> folder in each user's AppData. Ghost Map only reads them.
+          <span id="lgStat"></span></p>
+        <pre id="lgText" class="logbox tall"></pre>
       </div>
     </section>
 
@@ -572,6 +592,7 @@
   <script src="static/opcua.js"></script>
   <script src="static/machine.js"></script>
   <script src="static/production.js"></script>
+  <script src="static/tsclogs.js"></script>
   <script src="static/traffic.js"></script>
   <script src="static/maintenance.js"></script>
   <script src="static/probe.js"></script>
