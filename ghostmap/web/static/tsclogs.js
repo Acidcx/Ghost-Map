@@ -146,4 +146,23 @@ $("#lgSource").addEventListener("change", lgShow);
 $("#lgExpand").addEventListener("change", () => lg.data && lgRender());
 $("#lgQuery").addEventListener("input", () => { clearTimeout(lg.timer); lg.timer = setTimeout(lgShow, 300); });
 $("#lgRefresh").addEventListener("click", lgList);
-document.addEventListener("gm:tab", (e) => { if (e.detail === "tsclogs") lgList(); });
+// The Logs page shows TSC's event logs or Ghost Map's own log; the choice is remembered.
+function logPick(which) {
+  lg.which = which === "ghostmap" ? "ghostmap" : "tsc";
+  try { localStorage.setItem("gm.log", lg.which); } catch (_) { /* ignore */ }
+  $("#lgPick").querySelectorAll("button").forEach((b) => b.classList.toggle("active", b.dataset.log === lg.which));
+  $("#lgTsc").classList.toggle("hidden", lg.which !== "tsc");
+  $("#lgGm").classList.toggle("hidden", lg.which !== "ghostmap");
+  if (lg.which === "tsc") lgList(); else showDebugLog();
+}
+function openLog(which) {
+  try { localStorage.setItem("gm.log", which); } catch (_) { /* ignore */ }
+  showTab("tsclogs");
+}
+$("#lgPick").addEventListener("click", (e) => { const b = e.target.closest("[data-log]"); if (b) logPick(b.dataset.log); });
+document.addEventListener("gm:tab", (e) => {
+  if (e.detail !== "tsclogs") return;
+  let which = "tsc";
+  try { which = localStorage.getItem("gm.log") || which; } catch (_) { /* ignore */ }
+  logPick(which);
+});

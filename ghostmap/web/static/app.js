@@ -51,7 +51,7 @@ async function api(path, opts = {}) {
   return res.json();
 }
 
-// Uncaught errors on any page go to the server's debug log (Debug log button, or the debug bundle).
+// Uncaught errors on any page go to the server's debug log (System > Logs > Ghost Map log, or the debug bundle).
 function reportError(message, source, line, stack) {
   const page = document.querySelector("#tabs button.active")?.dataset.tab || "";
   fetch("api/clientlog", { method: "POST", headers: { "Content-Type": "application/json", "X-Ghostmap": "1" },
@@ -78,13 +78,13 @@ function findingHtml(f) {
 }
 
 // ------------------------------------------------------------------ tabs
-// Pages are grouped by data source (Machine: OPC UA, Production: SQL, Maintenance: counters from both, Network: TCP/IP); the top row picks the
-// group, the second row the page within it. Each group remembers its last page.
+// Home first, then what people watch (Machine: OPC UA, Production: TSC, Maintenance, Network: TCP/IP), then System (this PC, logs and the
+// setup pages). The top row picks the group, the second row the page within it. Each group remembers its last page.
 document.querySelectorAll("#tabs button").forEach((b) =>
   b.addEventListener("click", () => showTab(b.dataset.tab)));
 document.querySelectorAll("#groups button").forEach((b) =>
   b.addEventListener("click", () => showGroup(b.dataset.group)));
-const SCANLESS_TABS = ["opcua", "machine", "production", "tscconn", "tsclogs", "service", "counters", "hostpc", "probe", "live", "traffic"];  // tabs that work without any scan loaded
+const SCANLESS_TABS = ["home", "opcua", "machine", "production", "tscconn", "tsclogs", "service", "counters", "hostpc", "probe", "live", "traffic"];  // tabs that work without any scan loaded
 const isViewer = () => document.body.classList.contains("viewer");
 const tabGroup = (name) => document.querySelector(`#tabs button[data-tab="${name}"]`)?.closest(".tabgroup")?.dataset.group;
 function showGroup(group) {
@@ -94,12 +94,12 @@ function showGroup(group) {
   if (!usable(document.querySelector(`#tabs button[data-tab="${name}"]`)) || tabGroup(name) !== group) {
     name = [...document.querySelectorAll(`#tabs .tabgroup[data-group="${group}"] button`)].find(usable)?.dataset.tab;
   }
-  showTab(name || "machine");
+  showTab(name || "home");
 }
 function showTab(name) {
   // A tab remembered from an admin login is hidden for a viewer: fall back to the first visible one.
   const btn = document.querySelector(`#tabs button[data-tab="${name}"]`);
-  if (!btn || (btn.classList.contains("admin-only") && isViewer())) name = "machine";
+  if (!btn || (btn.classList.contains("admin-only") && isViewer())) name = "home";
   const group = tabGroup(name);
   const free = SCANLESS_TABS.includes(name);
   document.querySelectorAll("#groups button").forEach((b) => b.classList.toggle("active", b.dataset.group === group));
@@ -127,7 +127,7 @@ async function refreshScans(selectId) {
   $("#empty").classList.toggle("hidden", state.scans.length > 0);
   if (!state.scans.length) {
     state.scan = null;
-    let tab = "overview";
+    let tab = "home";
     try { tab = SCANLESS_TABS.includes(localStorage.getItem("gm.tab")) ? localStorage.getItem("gm.tab") : tab; } catch (_) { /* ignore */ }
     showTab(tab);
     return;
@@ -147,7 +147,7 @@ async function loadScan(id) {
   renderOverview();
   renderDevices();
   renderSwitches();
-  let tab = "overview";
+  let tab = "home";
   try { tab = localStorage.getItem("gm.tab") || tab; } catch (_) { /* ignore */ }
   showTab(tab);
 }
@@ -460,13 +460,13 @@ async function showDebugLog() {
   box.textContent = "Loading...";
   try {
     const res = await fetch("api/debug/log?lines=500", { headers: { "X-Ghostmap": "1" } });
-    box.textContent = res.ok ? (await res.text()) || "The log is empty." : `Could not load the log (${res.status}).`;
+    const text = res.ok ? await res.text() : "";
+    if (!res.ok || !text) box.textContent = res.ok ? "The log is empty." : `Could not load the log (${res.status}).`;
+    else box.innerHTML = text.split("\n").map((l) => (/ (ERROR|CRITICAL) /.test(l) ? `<span class="le">${esc(l)}</span>` : / WARNING /.test(l) ? `<span class="lw">${esc(l)}</span>` : esc(l))).join("\n");
   } catch (e) { box.textContent = e.message; }
   box.scrollTop = box.scrollHeight;
 }
-$("#debugBtn").addEventListener("click", () => { $("#debugDialog").showModal(); showDebugLog(); });
 $("#debugRefresh").addEventListener("click", showDebugLog);
-$("#debugClose").addEventListener("click", () => $("#debugDialog").close());
 $("#usersForm").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const f = ev.target;

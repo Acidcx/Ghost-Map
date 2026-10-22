@@ -18,7 +18,6 @@
         <a id="csvLink" class="btn ghost" href="#" download>Export CSV</a>
       </span>
       <button id="alertsBtn" class="btn ghost" title="Everything that needs attention: this PC, machine comms, switches, the network, service items, TSC">Alerts <span id="alertsCount" class="chip">-</span></button>
-      <button id="debugBtn" class="btn ghost admin-only" title="Ghost Map's own log: errors, OPC UA drops and reconnects">Debug log</button>
       <button id="newScanBtn" class="btn primary admin-only">New scan</button>
       <span id="who" class="who hidden"><span id="whoName"></span>
         <button id="usersBtn" class="btn ghost admin-only">Users</button>
@@ -28,33 +27,38 @@
     </div>
   </header>
 
-  <!-- Pages are grouped by where their data comes from: the PLCs over OPC UA, the TSC database over SQL,
-       and the network itself over TCP/IP. -->
+  <!-- Home answers "is everything OK?" at a glance. The middle groups are what people watch; System holds
+       this PC's health, logs and the setup pages (connections, tags, probing), which are for admins. -->
   <nav class="groups" id="groups">
-    <button data-group="machine">Machine <small>OPC UA</small></button>
-    <button data-group="production">Production <small>SQL</small></button>
-    <button data-group="maintenance">Maintenance <small>counters</small></button>
-    <button data-group="network" class="active">Network <small>TCP/IP</small></button>
+    <button data-group="home" class="active"><span class="gi" aria-hidden="true">&#8962;</span> Home</button>
+    <button data-group="machine"><span class="gi" aria-hidden="true">&#9881;&#xFE0E;</span> Machine <small>OPC UA</small></button>
+    <button data-group="production"><span class="gi" aria-hidden="true">&#9638;</span> Production <small>TSC</small></button>
+    <button data-group="maintenance"><span class="gi" aria-hidden="true">&#10070;</span> Maintenance</button>
+    <button data-group="network"><span class="gi" aria-hidden="true">&#9673;</span> Network <small>TCP/IP</small></button>
+    <button data-group="system" class="sysgroup"><span class="gi" aria-hidden="true">&#9776;</span> System</button>
   </nav>
   <nav class="tabs" id="tabs">
+    <span class="tabgroup" data-group="home">
+      <button data-tab="home" class="active">Overview</button></span>
     <span class="tabgroup hidden" data-group="machine">
-      <button data-tab="machine">Dashboard</button>
-      <button data-tab="opcua" class="admin-only">Tags</button></span>
+      <button data-tab="machine">Dashboard</button></span>
     <span class="tabgroup hidden" data-group="production">
-      <button data-tab="production">Line</button>
-      <button data-tab="tscconn" class="admin-only">Connection</button>
-      <button data-tab="tsclogs" class="admin-only">Event logs</button></span>
+      <button data-tab="production">Line</button></span>
     <span class="tabgroup hidden" data-group="maintenance">
       <button data-tab="service">Service</button>
-      <button data-tab="counters">Counters</button>
-      <button data-tab="hostpc">This PC</button></span>
-    <span class="tabgroup" data-group="network">
+      <button data-tab="counters">Counters</button></span>
+    <span class="tabgroup hidden" data-group="network">
       <button data-tab="live">Live <span class="livedot sm" aria-hidden="true"></span></button>
-      <button data-tab="overview" class="active">Overview</button>
+      <button data-tab="overview">Scan</button>
       <button data-tab="devices">Devices</button>
       <button data-tab="switches">Switches</button>
       <button data-tab="traffic">Traffic</button>
-      <button data-tab="compare">Compare</button>
+      <button data-tab="compare">Compare</button></span>
+    <span class="tabgroup hidden" data-group="system">
+      <button data-tab="hostpc">This PC</button>
+      <button data-tab="tsclogs" class="admin-only">Logs</button>
+      <button data-tab="tscconn" class="admin-only">TSC database</button>
+      <button data-tab="opcua" class="admin-only">OPC UA tags</button>
       <button data-tab="probe" class="admin-only">Probe</button></span>
   </nav>
   <!-- Errors from the alert list, on every page (warnings are only counted on the Alerts button). -->
@@ -66,6 +70,14 @@
       <p>Run a scan of the machine network, or load the simulated demo machine to look around.</p>
       <p><button class="btn primary admin-only" id="emptyScan">New scan</button> <button class="btn admin-only" id="loadDemo">Load demo machine</button></p>
       <p class="muted">Ghost Map is read-only: EtherNet/IP ListIdentity and SNMP GET/WALK only. It never writes to devices.</p>
+    </section>
+
+    <section id="tab-home" class="tab">
+      <div class="hhead">
+        <div><h1 id="hTitle">Everything at a glance</h1><div class="small muted" id="hAt"></div></div>
+        <div id="hBanner" class="hbanner"></div>
+      </div>
+      <div class="hgrid" id="hGrid"></div>
     </section>
 
     <section id="tab-machine" class="tab hidden">
@@ -252,7 +264,21 @@
     </section>
 
     <section id="tab-tsclogs" class="tab hidden">
-      <div class="panel">
+      <div class="seg" id="lgPick" role="tablist">
+        <button type="button" data-log="tsc" class="active">TSC event logs</button>
+        <button type="button" data-log="ghostmap">Ghost Map log</button>
+      </div>
+      <div class="panel hidden" id="lgGm">
+        <div class="toolbar">
+          <h2 class="grow">Ghost Map log</h2>
+          <button type="button" class="btn ghost" id="debugRefresh">Refresh</button>
+          <a class="btn" href="api/debug/bundle" download>Download debug bundle</a>
+        </div>
+        <p class="small muted">Errors, OPC UA drops and reconnects, and errors from this page, newest at the bottom.
+          The bundle zips this log with version and comms details (no tag values; it does include gateway addresses and user names).</p>
+        <pre id="debugText" class="logbox tall"></pre>
+      </div>
+      <div class="panel" id="lgTsc">
         <div class="toolbar">
           <h2 class="grow">TSC event logs</h2>
           <button type="button" class="btn ghost" id="lgOlder" title="The day before">&#9664; Older</button>
@@ -277,7 +303,7 @@
       </div>
     </section>
 
-    <section id="tab-overview" class="tab">
+    <section id="tab-overview" class="tab hidden">
       <div id="liveStrip"></div>
       <div class="tiles" id="tiles"></div>
       <div class="panel">
@@ -526,17 +552,6 @@
     <div class="actions"><button type="button" class="btn" id="alertsClose">Close</button></div>
   </dialog>
 
-  <dialog id="debugDialog" class="wide">
-    <h3>Debug log</h3>
-    <p class="small muted">Errors, OPC UA drops and reconnects, and errors from this page, newest at the bottom.
-      The bundle zips this log with version and comms details (no tag values; it does include gateway addresses and user names).</p>
-    <pre id="debugText" class="logbox"></pre>
-    <div class="actions">
-      <a class="btn" href="api/debug/bundle" download>Download debug bundle</a>
-      <button type="button" class="btn ghost" id="debugRefresh">Refresh</button>
-      <button type="button" class="btn" id="debugClose">Close</button>
-    </div>
-  </dialog>
 
   <dialog id="usersDialog">
     <form id="usersForm" method="dialog">
@@ -599,6 +614,7 @@
   <script src="static/opcua.js"></script>
   <script src="static/machine.js"></script>
   <script src="static/production.js"></script>
+  <script src="static/home.js"></script>
   <script src="static/tsclogs.js"></script>
   <script src="static/traffic.js"></script>
   <script src="static/maintenance.js"></script>

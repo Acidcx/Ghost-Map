@@ -47,6 +47,7 @@ Web face first, because it's the biggest risk:
 - [x] Audit log of logins and actions (scans started, scans deleted)
 - [x] Security headers; state-changing requests protected against cross-site requests
 - [x] HTTPS between the IXrouter and the HMI (self-signed certificate or plant CA): `--https`, `--cert`/`--key`
+- [x] Home page (machine, production, alerts, service, network and PC health on one screen) and pages regrouped: Machine, Production, Maintenance, Network, and an admin System group (This PC, Logs, TSC database, OPC UA tags, Probe)
 
 Then the service:
 - [x] `GhostMap.exe service install|uninstall|start|stop|status` to run as a Windows service at boot (LocalSystem, data in `C:\ProgramData\GhostMap`, restarted after a failure; install again to upgrade; `uninstall --purge` removes everything it left)
@@ -96,7 +97,7 @@ Then the service:
 - [x] Production page per line: shift totals, running part, queue, holds, feet per hour, orders, recent parts
 - [x] Queue in TSC's run order (QueueIndex) with status codes; orders, bundles and pieces counted as TSC counts them
 - [x] Stations (paired stations shown together), TSC shift calendar, stops and reasons; optional grants listed on the Connection page
-- [x] TSC's own event logs (new and legacy folders) on Production > Event logs: read-only, per day, entries colored by level with folded multi-line details, level/source filters, search, most repeated, download
+- [x] TSC's own event logs (new and legacy folders) on System > Logs: read-only, per day, entries colored by level with folded multi-line details, level/source filters, search, most repeated, download
 - [x] Completed-parts history beyond 12 hours: Ghost Map's own hourly copy (`production.db`), shown by day and week with CSV
 - [ ] Shift report (waits on planned stop codes and target speeds)
 - [ ] Combine with the machine dashboard: feet per hour against run time and stops (OEE performance)

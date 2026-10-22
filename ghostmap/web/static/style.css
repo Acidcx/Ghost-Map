@@ -633,3 +633,78 @@ dialog::backdrop { backdrop-filter: blur(3px); }
 .finding.alert .hint + .hint { margin-top: -2px; }
 #tab-hostpc .tile .pbarwrap { margin: 6px 0 4px; }
 @media (max-width: 700px) { #tab-tsclogs .toolbar label { width: 100%; } #tab-tsclogs .toolbar select { width: 100%; min-width: 0; } }
+
+/* ---------------------------------------------------------------- Home: calm cards, color only where it's needed */
+.gi { opacity: .7; margin-right: 2px; }
+.groups button.sysgroup { margin-left: auto; }
+.hhead { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin: 4px 0 14px; }
+.hhead h1 { font-size: 20px; margin: 0; letter-spacing: .2px; }
+.hbanner { padding: 7px 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); font-size: 13px; }
+.hbanner.ok { border-color: color-mix(in srgb, var(--ok) 50%, var(--line)); color: var(--ok); }
+.hbanner.warn { border-color: var(--warn); color: var(--warn); background: color-mix(in srgb, var(--warn) 8%, var(--panel)); }
+.hbanner.err { border-color: var(--err); color: var(--err); background: color-mix(in srgb, var(--err) 9%, var(--panel)); }
+.hgrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-flow: dense; gap: 14px; }
+@media (max-width: 1300px) { .hgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 700px) { .hgrid { grid-template-columns: minmax(0, 1fr); } }
+.hcard { position: relative; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px 12px 18px;
+  box-shadow: var(--shadow); cursor: pointer; overflow: hidden; transition: transform .12s ease, border-color .12s ease; min-height: 150px; }
+.hcard::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 4px; background: var(--line); }
+.hcard.ok::before { background: color-mix(in srgb, var(--ok) 55%, var(--line)); }
+.hcard.warn::before { background: var(--warn); }
+.hcard.err::before { background: var(--err); }
+.hcard.err { border-color: color-mix(in srgb, var(--err) 45%, var(--line)); }
+.hcard:hover, .hcard:focus-visible { transform: translateY(-1px); border-color: var(--accent); outline: none; }
+.hcard.wide { grid-column: span 2; }
+@media (max-width: 700px) { .hcard.wide { grid-column: auto; } }
+.hcard header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.hcard h3 { margin: 0; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .6px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hico { font-size: 15px; opacity: .65; width: 18px; text-align: center; }
+.hpill { margin-left: auto; font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+.hpill.warn { border-color: var(--warn); color: var(--warn); } .hpill.err { border-color: var(--err); color: var(--err); background: color-mix(in srgb, var(--err) 10%, transparent); }
+.hbig { font-size: 30px; font-weight: 700; line-height: 1.15; margin: 2px 0 8px; font-variant-numeric: tabular-nums; }
+.hbig small { display: block; font-size: 12px; font-weight: 400; color: var(--muted); margin-top: 2px; }
+.hbig.ok { color: var(--text); } .hbig.warn { color: var(--warn); } .hbig.err { color: var(--err); } .hbig.dim { color: var(--muted); font-size: 20px; }
+.hkv { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px 14px; margin: 6px 0 0; }
+.hkv div { min-width: 0; }
+.hkv dt { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+.hkv dd { margin: 0; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hkv dd.warn, .hitems .warn { color: var(--warn); } .hkv dd.err, .hitems .err { color: var(--err); }
+.hlist { list-style: none; margin: 8px 0 0; padding: 0; font-size: 13px; }
+.hlist li { padding: 3px 0 3px 14px; position: relative; border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hlist li::before { content: ""; position: absolute; left: 0; top: 50%; width: 7px; height: 7px; margin-top: -3.5px; border-radius: 50%; background: var(--muted); }
+.hlist li.err::before { background: var(--err); } .hlist li.warn::before { background: var(--warn); }
+.hitems { list-style: none; margin: 0; padding: 0; }
+.hitems li { display: grid; grid-template-columns: minmax(0, 1fr) 90px 40px; align-items: center; gap: 10px; padding: 3px 0; font-size: 13px; }
+.hitems .nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hitems li > .small { text-align: right; font-variant-numeric: tabular-nums; }
+.hbar { display: inline-block; width: 100%; height: 7px; border-radius: 4px; background: var(--panel-2); overflow: hidden; vertical-align: middle; }
+.hbar span { display: block; height: 100%; background: color-mix(in srgb, var(--accent) 70%, var(--muted)); border-radius: 4px; }
+.hbar.warn span { background: var(--warn); } .hbar.err span { background: var(--err); }
+.hstations { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; margin-top: 10px; }
+.hstation { background: var(--panel-2); border-radius: 8px; padding: 7px 10px; font-size: 13px; }
+.hprog { display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: center; margin-top: 4px; }
+.hrings { display: flex; gap: 18px; margin: 4px 0 6px; }
+.hrings > div { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.hspark { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.spark polyline { stroke: var(--accent); }
+.hcard.loading { cursor: default; }
+.shimmer { height: 120px; border-radius: 6px; background: linear-gradient(90deg, var(--panel-2) 25%, color-mix(in srgb, var(--panel-2) 40%, var(--panel)) 50%, var(--panel-2) 75%);
+  background-size: 200% 100%; animation: gm-shimmer 1.4s linear infinite; }
+@keyframes gm-shimmer { to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) { .shimmer { animation: none; } .hcard { transition: none; } }
+
+/* Segmented control (System > Logs) */
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; margin-bottom: 12px; background: var(--panel); }
+.seg button { font: inherit; padding: 6px 14px; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button.active { background: color-mix(in srgb, var(--accent) 14%, var(--panel)); color: var(--text); font-weight: 600; }
+
+/* Wide This PC card: gauges on the left, details on the right. */
+.hsplit { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 28px; align-items: start; }
+@media (max-width: 700px) { .hsplit { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 700px) { .groups button small { display: none; } .groups button { padding: 7px 11px; } }
+/* Ghost Map's own log: warnings and errors stand out. */
+#debugText .lw { color: var(--warn); }
+#debugText .le { color: var(--err); font-weight: 600; }
