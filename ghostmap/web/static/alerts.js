@@ -11,10 +11,28 @@ const fmtGb = (n) => (n == null ? "-" : `${(n / GiB).toFixed(n < 10 * GiB ? 1 : 
 const alertClock = (t) => new Date(t * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 const sinceText = (t) => (t ? `since ${alertClock(t)} (${fmtAgo(Math.max(0, Math.round(Date.now() / 1000 - t)))})` : "");
 
-function alertHtml(a, here = false) {  // here: on the page the alert links to
+const muteText = (m) => m.kind === "ack" ? `acknowledged${m.by ? ` by ${m.by}` : ""} ${fmtAgo(Math.max(0, Math.round(Date.now() / 1000 - m.at)))}, until it clears`
+  : `muted${m.target.startsWith("code:") ? ` (every ${m.code})` : ""}${m.by ? ` by ${m.by}` : ""} until ${alertClock(m.until)}`;
+
+// Acknowledge or mute, for admins in the dialog: the alert leaves the banner and the count, not the list.
+function muteControls(a) {
+  if (a.muted) return `<button type="button" class="btn ghost small admin-only" data-unmute="${esc(a.muted.target)}">Unmute</button>`;
+  return `<select class="small admin-only" data-mute="${esc(a.key)}" title="Take it off the banner without fixing it">
+    <option value="">Acknowledge or mute...</option>
+    <option value="ack">Acknowledge (until it clears or gets worse)</option>
+    <option value="8">Mute for 8 hours</option>
+    <option value="24">Mute for 24 hours</option>
+    <option value="168">Mute for 7 days</option>
+    <option value="every:168">Mute every ${esc(a.code)} for 7 days (commissioning)</option>
+  </select>`;
+}
+
+function alertHtml(a, here = false, controls = false) {  // here: on the page the alert links to
   const meta = [`<span class="mono">${esc(a.code)}</span>`, esc(sinceText(a.since)),
-    a.link?.tab && !here ? `<a href="#" data-alertlink="${esc(JSON.stringify(a.link))}">Show</a>` : ""].filter(Boolean).join(" &middot; ");
-  return `<div class="finding alert">
+    a.muted ? `<span class="muted">${esc(muteText(a.muted))}</span>` : "",
+    a.link?.tab && !here ? `<a href="#" data-alertlink="${esc(JSON.stringify(a.link))}">Show</a>` : "",
+    controls ? muteControls(a) : ""].filter(Boolean).join(" &middot; ");
+  return `<div class="finding alert${a.muted ? " muted-alert" : ""}">
     <span class="sev ${esc(a.severity)}">${esc(a.severity)}</span>
     <div><span class="t">${esc(a.title)}</span>${a.detail ? `<div class="small">${esc(a.detail)}</div>` : ""}</div>
     ${a.hint ? `<div class="hint">${esc(a.hint)}</div>` : ""}
@@ -60,8 +78,9 @@ function alertsRender() {
   const count = $("#alertsCount");
   count.textContent = d ? String(n) : "?";
   count.className = `chip ${!d ? "" : errors ? "errchip" : n ? "warnchip" : "okchip"}`;
+  const quiet = d?.counts?.muted ? `, ${d.counts.muted} muted` : "";
   $("#alertsBtn").title = !d ? `Alerts could not be checked${alerts.error ? `: ${alerts.error}` : ""}`
-    : n ? `${errors} error${errors === 1 ? "" : "s"}, ${d.counts.warning} warning${d.counts.warning === 1 ? "" : "s"}` : "Nothing needs attention";
+    : (n ? `${errors} error${errors === 1 ? "" : "s"}, ${d.counts.warning} warning${d.counts.warning === 1 ? "" : "s"}` : "Nothing needs attention") + quiet;
 
   // The line under the tabs: errors only, the worst first.
   const errs = d ? d.alerts.filter((a) => a.severity === "error") : [];
@@ -86,7 +105,14 @@ function alertsDialogRender() {
     return;
   }
   const broken = Object.entries(d.errors || {});
-  $("#alertsList").innerHTML = (d.alerts.length ? d.alerts.map(alertHtml).join("") : `<p class="oktext">Nothing needs attention.</p>`)
+  const muted = d.muted || [];
+  // Mutes for a whole code show even with no alert right now, so they can be lifted before they run out.
+  const idle = (d.mutes || []).filter((m) => !muted.some((a) => a.muted.target === m.target));
+  $("#alertsList").innerHTML = (d.alerts.length ? d.alerts.map((a) => alertHtml(a, false, true)).join("")
+    : `<p class="oktext">Nothing needs attention${muted.length ? " (apart from what is muted below)" : ""}.</p>`)
+    + (muted.length || idle.length ? `<h4 class="small muted">Muted (${muted.length})</h4>` + muted.map((a) => alertHtml(a, false, true)).join("")
+      + idle.map((m) => `<p class="small muted">${esc(m.title)}: ${esc(muteText(m))}, nothing to show right now
+        <button type="button" class="btn ghost small admin-only" data-unmute="${esc(m.target)}">Unmute</button></p>`).join("") : "")
     + (broken.length ? `<p class="small warntext">Not checked this time (the last alerts from these are kept): ${
       broken.map(([k, v]) => `${esc(k)} (${esc(v)})`).join(", ")}</p>` : "");
   const recent = d.recent || [];
@@ -103,6 +129,25 @@ function alertsOpen() {
   alertsPoll();
 }
 $("#alertsBtn").addEventListener("click", alertsOpen);
+$("#alertsList").addEventListener("change", async (e) => {
+  const sel = e.target.closest("[data-mute]");
+  if (!sel || !sel.value) return;
+  const v = sel.value, every = v.startsWith("every:");
+  try {
+    alerts.data = await api("api/alerts/mute", { method: "POST", body: JSON.stringify({ key: sel.dataset.mute,
+      hours: v === "ack" ? null : Number(every ? v.slice(6) : v), every }) });
+    alerts.error = null;
+  } catch (err) { alerts.error = err.message; }
+  alertsRender();
+});
+$("#alertsList").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-unmute]");
+  if (!b) return;
+  try {
+    alerts.data = await api("api/alerts/unmute", { method: "POST", body: JSON.stringify({ target: b.dataset.unmute }) });
+  } catch (err) { alerts.error = err.message; }
+  alertsRender();
+});
 $("#alertsClose").addEventListener("click", () => $("#alertsDialog").close());
 $("#alertBar").addEventListener("click", (e) => {
   if (e.target.id === "alertBarAll") { e.preventDefault(); alertsOpen(); }

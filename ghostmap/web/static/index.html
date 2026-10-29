@@ -548,7 +548,8 @@
     <div id="alertsList"></div>
     <details id="alertsRecentBox" class="hidden"><summary class="small muted">Raised and cleared lately</summary><div id="alertsRecent"></div></details>
     <p class="small muted">Each alert is also written to Ghost Map's log and, on Windows, to the Application event log (source GhostMap), once when it
-      starts and once when it clears.</p>
+      starts and once when it clears. Acknowledging or muting one takes it off the banner and the count until it clears or the
+      time runs out; it still shows here and is still logged.</p>
     <div class="actions"><button type="button" class="btn" id="alertsClose">Close</button></div>
   </dialog>
 

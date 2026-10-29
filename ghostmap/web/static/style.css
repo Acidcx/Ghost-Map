@@ -631,6 +631,8 @@ dialog::backdrop { backdrop-filter: blur(3px); }
 #alertsBtn .chip { margin: 0 0 0 4px; }
 #alertsList { max-height: 60vh; overflow: auto; }
 .finding.alert .hint + .hint { margin-top: -2px; }
+.finding.muted-alert { opacity: .6; }
+.finding.alert select { font-size: 12px; padding: 1px 4px; width: auto; max-width: 100%; }
 #tab-hostpc .tile .pbarwrap { margin: 6px 0 4px; }
 @media (max-width: 700px) { #tab-tsclogs .toolbar label { width: 100%; } #tab-tsclogs .toolbar select { width: 100%; min-width: 0; } }
 

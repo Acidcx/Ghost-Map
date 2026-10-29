@@ -93,7 +93,8 @@ async function cardAlerts() {
   const list = (a.alerts || []).slice(0, 5).map((x) => `<li class="${x.severity === "error" ? "err" : "warn"}">${esc(x.title)}</li>`).join("");
   return card({ title: "Alerts", icon, state: st, go: "@alerts", big: err + warn ? hNum(err + warn) : "All clear", bigCls: err ? "err" : warn ? "warn" : "ok",
     bigSub: err + warn ? (err ? `${err} error${err === 1 ? "" : "s"}, ${warn} warning${warn === 1 ? "" : "s"}` : `warning${warn === 1 ? "" : "s"}`) : "",
-    body: list ? `<ul class="hlist">${list}</ul>` : `<p class="small muted">Nothing needs attention.</p>` });
+    body: (list ? `<ul class="hlist">${list}</ul>` : `<p class="small muted">Nothing needs attention.</p>`)
+      + (a.counts?.muted ? `<p class="small muted">${hNum(a.counts.muted)} muted</p>` : "") });
 }
 
 async function cardService() {

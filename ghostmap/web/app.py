@@ -74,6 +74,16 @@ SECURITY_HEADERS = {
 }
 
 
+class AlertMuteIn(BaseModel):
+    key: str = Field(..., max_length=300)
+    hours: Optional[float] = None   # none: acknowledge (until it clears or gets worse)
+    every: bool = False             # every alert with the same code, not just this one
+
+
+class AlertUnmuteIn(BaseModel):
+    target: str = Field(..., max_length=310)
+
+
 class LoginIn(BaseModel):
     user: str = Field("", max_length=64)
     password: str = Field("", max_length=256)
@@ -415,7 +425,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         "maintenance": maintenance_alerts,
         "production": lambda now: alert_rules.tsc_alerts(tsc.status(), now),
         "access": lambda now: alert_rules.access_alerts(list(refused.values()), now),
-    })
+    }, data_dir=store.root)
     tasks: set[asyncio.Task] = set()
     app.state.demo_ua, app.state.live, app.state.ua_sessions = demo_ua, live, ua_sessions  # for tests
     app.state.history, app.state.collector, app.state.tsc, app.state.passive = history, collector, tsc, passive
@@ -1373,6 +1383,27 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     async def alert_list():
         """Everything that needs attention now, worst first (see analysis/alerts.py)."""
         return await alerts.current()
+
+    @app.post("/api/alerts/mute")
+    async def alert_mute(body: AlertMuteIn, request: Request):
+        """Acknowledge an alert, or mute it (or every alert with its code) for some hours. Admins only."""
+        await alerts.current()
+        try:
+            m = alerts.mute(body.key, body.hours, body.every, who(request))
+        except KeyError:
+            raise HTTPException(404, "that alert has cleared")
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        audit.write(client_of(request), who(request), "alert.ack" if m["kind"] == "ack" else "alert.mute",
+                    m["target"] + (f" {body.hours:g} h" if body.hours else ""))
+        return alerts.view()
+
+    @app.post("/api/alerts/unmute")
+    async def alert_unmute(body: AlertUnmuteIn, request: Request):
+        if not alerts.unmute(body.target):
+            raise HTTPException(404, "not muted")
+        audit.write(client_of(request), who(request), "alert.unmute", body.target)
+        return alerts.view()
 
     @app.get("/api/host")
     async def host_health():
