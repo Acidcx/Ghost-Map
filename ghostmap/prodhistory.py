@@ -8,6 +8,11 @@ from these hours. Rows are never pruned (one per line per hour that made somethi
 
 Times are TSC's own local clock time (naive, like its EndTime column); lengths are in TSC's units, converted to
 feet when read with the unit from the settings.
+
+Daylight saving follows from that, and is accepted rather than corrected: when the clocks go back, the repeated
+hour (1:00 to 2:00 in the US) is one row holding both hours' parts, so its production time can read up to 120
+minutes; when they go forward the skipped hour simply has no row. Day and week totals stay right either way.
+Ghost Map's own alarm and stop history (``history.db``) uses UTC timestamps and isn't affected.
 """
 
 from __future__ import annotations
