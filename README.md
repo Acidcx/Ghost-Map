@@ -267,7 +267,7 @@ The built-in CIP vendor table covers common automation vendors. To add the full 
 ```bash
 pip install -e ".[dev]"
 pytest
-python packaging/build_exe.py      # build dist/GhostMap.exe locally (pip install pyinstaller first)
+python packaging/build_exe.py      # build dist/GhostMap.exe locally (first: pip install -c packaging/exe-constraints.txt . pyinstaller)
 ```
 
 The switch collector, correlation, and diagnostics all run against an in-memory SNMP agent (`FakeSnmpClient`) built from the simulated machine in `ghostmap/sim/machine.py`, so features can be developed without hardware. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

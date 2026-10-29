@@ -17,7 +17,7 @@ pytest -q                          # all tests (fast, no hardware needed)
 python -m pyflakes ghostmap tests  # lint
 python -m ghostmap web --demo      # UI with the simulated machine at http://127.0.0.1:8470
 python -m ghostmap simulate        # fake EtherNet/IP devices on 127.0.10.0/24 (Linux)
-pip install pyinstaller && python packaging/build_exe.py   # dist/GhostMap.exe
+pip install -c packaging/exe-constraints.txt . pyinstaller && python packaging/build_exe.py   # dist/GhostMap.exe, pinned deps
 ```
 
 CI runs the tests on Linux and Windows (Python 3.10 and 3.12) and builds and smoke-tests `GhostMap.exe` on every push.

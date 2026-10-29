@@ -1,6 +1,6 @@
 """Build a single-file Ghost Map executable with PyInstaller.
 
-    pip install . pyinstaller
+    pip install -c packaging/exe-constraints.txt . pyinstaller   # the pinned versions, as the CI build does
     python packaging/build_exe.py
 
 Output: dist/GhostMap.exe on Windows (dist/GhostMap elsewhere).
