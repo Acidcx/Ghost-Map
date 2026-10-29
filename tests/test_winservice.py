@@ -159,3 +159,14 @@ def test_upgrade_with_no_options_keeps_ixon_access(tmp_path, monkeypatch):
     assert seen == {"host": "0.0.0.0", "allow": ["10.187.0.0/16"], "https": True}
     assert cli.main(["service", "install", "--host", "127.0.0.1"]) == 0  # asked for local only: gets it
     assert seen["host"] == "127.0.0.1" and seen["allow"] == []
+
+
+def test_status_names_the_installed_version(monkeypatch):
+    import ghostmap
+
+    monkeypatch.setattr(ghostmap, "BUILD", {"commit": "abc1234567"})
+    same = {"version": ghostmap.__version__, "commit": "abc1234567", "installed_at": "2026-10-29 08:00:00"}
+    assert ws.version_line(same) == f"Version: {ghostmap.__version__} (abc1234567), installed 2026-10-29 08:00:00"
+    older = ws.version_line({**same, "version": "0.4.9", "commit": "0000000"})
+    assert older.startswith("Version: 0.4.9 (0000000)") and f"This exe is {ghostmap.__version__} (abc1234567)" in older
+    assert "before 0.5.0" in ws.version_line({"installed_at": "2026-10-01 08:00:00"})

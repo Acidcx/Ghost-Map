@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ghostmap"
-version = "0.4.0"
+version = "0.5.0"
 description = "Read-only OT network mapper and commissioning/debug tool for EtherNet/IP devices and Stratix switches."
 readme = "README.md"
 requires-python = ">=3.10"
