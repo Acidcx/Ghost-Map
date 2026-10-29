@@ -59,6 +59,7 @@ DEMO_UA_PORT = 4899    # not 4990, so the demo never collides with a real FT Lin
 CLIENT_LOG_PER_MIN = 30  # browser error reports accepted per client per minute
 log = logging.getLogger("ghostmap.web")
 REFUSED_LOG_S = 600  # how often one refused address is written to the audit log
+WARM_S = 5.0         # after starting, fill the caches Home needs, so the first page after a reboot isn't slow
 
 STATIC = Path(__file__).parent / "static"
 SESSION_COOKIE = "gm_session"
@@ -310,6 +311,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
 
     @contextlib.asynccontextmanager
     async def lifespan(_app):
+        warm = None
         if demo_opcua:
             await start_demo_ua()
         if collect and demo and netmon.cfg and set(netmon.cfg.switches) <= set(DEMO_SWITCHES):
@@ -320,9 +322,13 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
             hostmon.start()
             alerts.start()
             tsc.start_history()
+            warm = asyncio.create_task(warm_caches(), name="ghostmap-warm")
         if listen:
             await passive.start()
         yield
+        if warm:
+            warm.cancel()
+            await asyncio.gather(warm, return_exceptions=True)
         await passive.stop()
         await alerts.stop()
         await hostmon.stop()
@@ -427,6 +433,22 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         "access": lambda now: alert_rules.access_alerts(list(refused.values()), now),
     }, data_dir=store.root)
     tasks: set[asyncio.Task] = set()
+
+    async def warm_caches() -> None:
+        """What Home asks for at once (this PC's services and event log, TSC's lines and production, the
+        maintenance counters, the alert list), read once in the background just after starting."""
+        await asyncio.sleep(WARM_S)
+        t0 = time.monotonic()
+        if hostmon.slow.get("at") is None and (demo or sys.platform == "win32"):
+            with contextlib.suppress(Exception):
+                await hostmon.read_windows()
+        with contextlib.suppress(Exception):
+            for ln in await tsc.lines():
+                await tsc.production(ln["id"])
+        with contextlib.suppress(Exception):
+            await alerts.current()  # runs every alert source, the maintenance counters too
+        log.info("caches warmed in %.1f s", time.monotonic() - t0)
+
     app.state.demo_ua, app.state.live, app.state.ua_sessions = demo_ua, live, ua_sessions  # for tests
     app.state.history, app.state.collector, app.state.tsc, app.state.passive = history, collector, tsc, passive
     app.state.netmon, app.state.hostmon, app.state.alerts = netmon, hostmon, alerts

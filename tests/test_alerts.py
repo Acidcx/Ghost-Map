@@ -315,3 +315,19 @@ def test_service_alerts_know_what_normally_runs(tmp_path):
     # A Manual service that hasn't run for over a day is just off.
     assert "RSEventServer" not in {a["key"].split(":", 1)[1] for a in
                                    rules.host_alerts({"services": seen.update(down, NOW + 2 * 86400)}, NOW + 2 * 86400)}
+
+
+def test_caches_are_warmed_after_starting(tmp_path, monkeypatch):
+    """The first page after a reboot shouldn't wait for PowerShell and TSC: they are read just after starting."""
+    import time
+
+    from ghostmap.web import app as webapp
+
+    monkeypatch.setattr(webapp, "WARM_S", 0.0)
+    with TestClient(create_app(str(tmp_path), demo=True)) as c:
+        app = c.app
+        for _ in range(100):
+            if app.state.hostmon.slow.get("at") and app.state.alerts.evaluated_at:
+                break
+            time.sleep(0.05)
+        assert app.state.hostmon.slow.get("at") and app.state.alerts.evaluated_at
