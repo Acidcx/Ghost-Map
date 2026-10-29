@@ -31,8 +31,10 @@ RECENT_NETWORK_S = 24 * 3600      # how long a passive event (new device, IP con
 RECENT_REFUSED_S = 3600           # how long a refused web client stays on the list
 NETWORK_CODES = {"passive.arp_unknown": WARNING, "passive.ip_conflict": ERROR, "passive.bootp_known": ERROR,
                  "passive.bootp": WARNING, "passive.restart": WARNING}
-# Linx is how Ghost Map and the HMI reach the PLCs: those services stopped is an error, the rest a warning.
-CRITICAL_SERVICES = ("linx",)
+# The services the machine can't run without, stopped is an error; the rest a warning. Linx is how Ghost Map and the
+# HMI reach the PLCs, the Tag and Alarm servers feed the HMI screens, SQL Server and TSC hold the part schedule.
+CRITICAL_SERVICES = ("linx", "tag server", "alarm", "sql server (", "tsc", "bradbury")
+NORMALLY_RUNNING_S = 24 * 3600    # a service seen running this recently is expected to run, whatever its start mode
 
 
 def alert(key: str, code: str, severity: str, area: str, title: str, detail: str, hint: str,
@@ -50,7 +52,16 @@ def _pct(v: float) -> str:
 
 
 # ------------------------------------------------------------------------------------------------ this PC
-def host_alerts(snap: dict) -> list[dict]:
+def _expected_running(s: dict, now: Optional[float]) -> bool:
+    mode = (s.get("start_mode") or "").lower()
+    if mode == "auto":
+        return True
+    last = s.get("last_running")
+    return mode != "disabled" and last is not None and now is not None and now - last <= NORMALLY_RUNNING_S
+
+
+def host_alerts(snap: dict, now: Optional[float] = None) -> list[dict]:
+    now = snap.get("windows_read_at") if now is None else now
     out = []
     link = {"tab": "hostpc"}
     for d in snap.get("disks") or []:
@@ -77,13 +88,20 @@ def host_alerts(snap: dict) -> list[dict]:
                          "Open Task Manager > Details and sort by CPU. Antivirus scans and Windows Update are the usual "
                          "suspects; schedule them outside production.", link))
     for s in snap.get("services") or []:
-        if (s.get("start_mode") or "").lower() == "auto" and (s.get("state") or "").lower() != "running":
+        if (s.get("state") or "").lower() != "running" and _expected_running(s, now):
             name = s.get("display") or s.get("name")
-            critical = any(w in name.lower() for w in CRITICAL_SERVICES)
+            low = name.lower()
+            critical = any(w in low for w in CRITICAL_SERVICES)
+            why = ("Set to start automatically, but not running." if (s.get("start_mode") or "").lower() == "auto"
+                   else "Set to start manually, but it was running until recently, so something stopped it.")
+            if "linx" in low:
+                why += " Without it the HMI and Ghost Map can't reach the PLCs."
+            elif critical:
+                why += " The machine's screens or production data depend on it."
+            if (s.get("stops") or 0) > 1:
+                why += f" It has stopped {s['stops']} times in the last 7 days."
             out.append(alert(f"hmi.service_stopped:{s.get('name')}", "hmi.service_stopped", ERROR if critical else WARNING,
-                             "hmi", f"{name} is {(s.get('state') or 'not running').lower()}",
-                             "Set to start automatically, but not running." + (
-                                 " Without it the HMI and Ghost Map can't reach the PLCs." if critical else ""),
+                             "hmi", f"{name} is {(s.get('state') or 'not running').lower()}", why,
                              "Start it in services.msc (Ghost Map only looks; it never starts or stops services). If it "
                              "stops again, the Application event log says why.", link))
     ev = snap.get("events") or {}

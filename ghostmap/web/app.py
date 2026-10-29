@@ -418,7 +418,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         return alert_rules.maintenance_alerts((await maint_list())["items"])
 
     alerts = AlertCenter({
-        "hmi": lambda now: alert_rules.host_alerts(hostmon.snapshot()),
+        "hmi": lambda now: alert_rules.host_alerts(hostmon.snapshot(), now),
         "dashboards": dashboard_alerts,
         "switches": switch_alerts,
         "network": lambda now: alert_rules.network_alerts(list(passive.events), now),

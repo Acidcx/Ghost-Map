@@ -30,8 +30,11 @@ FIRST_SLOW_S = 20.0    # ... the first time this long after starting, so startin
 CPU_KEPT = 15          # one-minute CPU samples kept (the CPU alert looks at the average)
 EVENT_WINDOW_H = 24
 PS_TIMEOUT_S = 90
-# Services whose display name matches are listed (FactoryTalk Linx, Linx Gateway, View SE, Activation, ...).
-SERVICE_MATCH = "FactoryTalk|Rockwell|RSLinx|RSView|FT Linx"
+# Services whose display name matches are listed (FactoryTalk Linx, Linx Gateway, View SE, Activation, ...), plus
+# the SQL Server engine ("SQL Server (SQL2022)", not its Agent or Browser) and TSC, which production data comes from.
+SERVICE_MATCH = r"FactoryTalk|Rockwell|RSLinx|RSView|FT Linx|^SQL Server \(|\bTSC\b|Bradbury"
+SERVICES_FILE = "host-services.json"   # when each service was last seen running, and when it stopped
+RUNNING_KEPT_S = 7 * 86400
 log = logging.getLogger("ghostmap.host")
 
 PS_SCRIPT = r"""
@@ -189,6 +192,42 @@ def run_powershell(script: str, timeout: float = PS_TIMEOUT_S, running: Optional
     return out
 
 
+class ServiceHistory:
+    """When each listed service was last seen running and when it stopped, kept in a small file so a service set to
+    start manually that normally runs (Rockwell Event Server, say) still counts as stopped after Ghost Map restarts."""
+
+    def __init__(self, path: Optional[Path] = None):
+        self.path = path
+        self.data: dict[str, dict] = {}
+        if path:
+            try:
+                self.data = {k: v for k, v in json.loads(Path(path).read_text(encoding="utf-8")).items() if isinstance(v, dict)}
+            except (OSError, ValueError, AttributeError):
+                self.data = {}
+
+    def update(self, services: list[dict], now: float) -> list[dict]:
+        """Each service with ``last_running`` (when last seen running) and ``stops`` (times it stopped, last 7 days)."""
+        out = []
+        for s in services:
+            h = self.data.setdefault(s.get("name") or "", {"last_running": None, "stops": [], "was_running": False})
+            running = (s.get("state") or "").lower() == "running"
+            if running:
+                h["last_running"] = now
+            elif h.get("was_running"):
+                h["stops"].append(now)
+            h["was_running"] = running
+            h["stops"] = [t for t in h["stops"] if now - t <= RUNNING_KEPT_S]
+            out.append({**s, "last_running": h["last_running"], "stops": len(h["stops"])})
+        if self.path:
+            try:
+                tmp = Path(str(self.path) + ".tmp")
+                tmp.write_text(json.dumps(self.data), encoding="utf-8")
+                os.replace(tmp, self.path)
+            except OSError:
+                log.debug("could not save %s", self.path, exc_info=True)
+        return out
+
+
 class HostMonitor:
     def __init__(self, data_dir: Path, demo: bool = False):
         self.data_dir = Path(data_dir)
@@ -199,6 +238,7 @@ class HostMonitor:
         self.slow: dict = {"at": None, "services": None, "events": None, "error": None}
         self._task: Optional[asyncio.Task] = None
         self._running: set = set()  # a PowerShell process while one runs
+        self.seen = ServiceHistory(self.data_dir / SERVICES_FILE)
 
     def start(self) -> None:
         if self._task is None:
@@ -239,13 +279,15 @@ class HostMonitor:
     async def read_windows(self) -> None:
         if self.demo:
             self.slow = {"at": time.time(), "error": None, **_demo_windows()}
+            self.slow["services"] = self.seen.update(self.slow["services"], self.slow["at"])
             return
         if sys.platform != "win32":
             return
         script = PS_SCRIPT.replace("%MATCH%", SERVICE_MATCH).replace("%HOURS%", str(EVENT_WINDOW_H))
         try:
             got = parse_powershell(await asyncio.to_thread(run_powershell, script, PS_TIMEOUT_S, self._running))
-            self.slow = {"at": time.time(), "error": None, "services": got["services"],
+            now = time.time()
+            self.slow = {"at": now, "error": None, "services": self.seen.update(got["services"], now),
                          "events": summarize_events(got["events"])}
         except Exception as exc:  # PowerShell blocked or slow: the rest of the page still works
             self.slow = {**self.slow, "at": time.time(), "error": f"{type(exc).__name__}: {exc}"}
@@ -285,6 +327,9 @@ def _demo_windows() -> dict:
         {"name": "RsDirMux", "display": "Rockwell Directory Multiplexor", "state": "Running", "start_mode": "Auto"},
         {"name": "FTViewSEHistorian", "display": "FactoryTalk View SE Historian", "state": "Stopped", "start_mode": "Manual"},
         {"name": "FTDiagnostics", "display": "FactoryTalk Diagnostics Collector", "state": "Stopped", "start_mode": "Auto"},
+        {"name": "RSEventServer", "display": "Rockwell Event Server", "state": "Running", "start_mode": "Manual"},
+        {"name": "MSSQL$SQL2022", "display": "SQL Server (SQL2022)", "state": "Running", "start_mode": "Auto"},
+        {"name": "TSCService", "display": "Bradbury TSC Service", "state": "Running", "start_mode": "Auto"},
     ]
     events = [{"log": "Application", "source": "FactoryTalk Diagnostics", "id": 3, "level": "error", "at": now - 600 * i,
                "message": "Unable to write to the diagnostics log: the log is full."} for i in range(14)]

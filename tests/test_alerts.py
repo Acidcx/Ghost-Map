@@ -288,3 +288,30 @@ def test_mute_api_in_the_demo(tmp_path):
         target = got["mutes"][0]["target"]
         assert c.post("/api/alerts/unmute", json={"target": target}, headers=H).json()["counts"]["muted"] == 0
         assert c.post("/api/alerts/unmute", json={"target": target}, headers=H).status_code == 404
+
+
+def test_service_alerts_know_what_normally_runs(tmp_path):
+    """SQL Server and TSC count as critical; a Manual service that was running until recently counts as stopped
+    (Rockwell Event Server is Running/Manual on the Test HMI); repeated stops are counted, across a restart."""
+    from ghostmap.collectors.host import ServiceHistory
+
+    seen = ServiceHistory(tmp_path / "host-services.json")
+    up = [{"name": "MSSQL$SQL2022", "display": "SQL Server (SQL2022)", "state": "Running", "start_mode": "Auto"},
+          {"name": "TSCService", "display": "Bradbury TSC Service", "state": "Running", "start_mode": "Auto"},
+          {"name": "RSEventServer", "display": "Rockwell Event Server", "state": "Running", "start_mode": "Manual"},
+          {"name": "FTHist", "display": "FactoryTalk View SE Historian", "state": "Stopped", "start_mode": "Manual"},
+          {"name": "FTOff", "display": "FactoryTalk Old Thing", "state": "Stopped", "start_mode": "Disabled"}]
+    down = [{**s, "state": "Stopped"} for s in up]
+    assert rules.host_alerts({"services": seen.update(up, NOW)}, NOW) == []
+    seen.update(down, NOW + 300)
+    seen.update(up, NOW + 600)
+    seen = ServiceHistory(tmp_path / "host-services.json")  # Ghost Map restarted
+    got = rules.host_alerts({"services": seen.update(down, NOW + 900)}, NOW + 900)
+    by = {a["key"].split(":", 1)[1]: a for a in got}
+    assert sorted(by) == ["MSSQL$SQL2022", "RSEventServer", "TSCService"]  # never-running Manual and Disabled stay quiet
+    assert by["MSSQL$SQL2022"]["severity"] == "error" and by["TSCService"]["severity"] == "error"
+    assert by["RSEventServer"]["severity"] == "warning" and "start manually" in by["RSEventServer"]["detail"]
+    assert "stopped 2 times in the last 7 days" in by["MSSQL$SQL2022"]["detail"]
+    # A Manual service that hasn't run for over a day is just off.
+    assert "RSEventServer" not in {a["key"].split(":", 1)[1] for a in
+                                   rules.host_alerts({"services": seen.update(down, NOW + 2 * 86400)}, NOW + 2 * 86400)}

@@ -141,7 +141,7 @@ async function cardHost() {
   return card({ title: h.host || "This PC", icon, state: st, go: "hostpc", wide: true, pill: stopped.length ? `${stopped.length} service${stopped.length === 1 ? "" : "s"} stopped` : "",
     body: `<div class="hsplit"><div><div class="hrings">${gauges.map(([p, l, c]) => `<div>${ring(p, hPct(p), c === "ok" ? "" : c, 58, 6)}<span class="small muted">${esc(l)}</span></div>`).join("")}</div>
       ${h.cpu?.series?.length > 2 ? `<div class="hspark"><span class="small muted">CPU</span>${spark(h.cpu.series.map((x) => x.pct), "", 100, 160, 26)}</div>` : ""}</div>` +
-      kv([["Up", h.uptime_s != null ? fmtUptime(h.uptime_s) : "-"], h.services ? ["Rockwell services", `${h.services.length - stopped.length}/${h.services.length} running`, stopped.length ? "err" : ""] : null,
+      kv([["Up", h.uptime_s != null ? fmtUptime(h.uptime_s) : "-"], h.services ? ["Services", `${h.services.length - stopped.length}/${h.services.length} running`, stopped.length ? "err" : ""] : null,
         h.events ? ["Event log, 24 h", `${hNum(h.events.errors)} error${h.events.errors === 1 ? "" : "s"}`, h.events.errors ? "warn" : ""] : null]) + "</div>" });
 }
 
