@@ -56,8 +56,11 @@ Then the service:
 - [ ] Change timeline: device added or removed, firmware changed, port down, new MAC on a port
 - [ ] Alerts: thresholds and rate of change (e.g. CRC errors climbing); notifications through the IXON-approved path
   - [x] One alert list from every page (top-bar count, errors as a line under the tabs), each with a hint and a link; written to the Windows Application event log (source GhostMap)
+  - [x] Acknowledge, or mute one alert or a whole code for a while (commissioning); kept across restarts
+  - [ ] Shift-aware `machine.stopped` (planned time from the shift calendar)
   - [ ] Notifications off the HMI (email or IXON push), once the IXON-approved path is decided
 - [x] HMI self-health: disk, memory, CPU, uptime, Windows event-log errors, FactoryTalk Linx / View services running (Maintenance > This PC)
+  - [x] SQL Server and TSC services watched; a Manual service that normally runs counts as stopped; repeated stops counted
 
 ## Phase 3: passive detection
 
@@ -107,6 +110,8 @@ Then the service:
 - [x] Export and import of dashboards and settings (no passwords or history)
 - [x] Build info (commit, CI run) next to the version and in the debug bundle; debug bundle covers the collector, history and TSC link
 - [x] Upgrades keep dashboards, history and settings (schema numbers on history and config)
+- [x] Versioned releases: tags (`v0.5.0`), the exe's dependencies pinned (`packaging/exe-constraints.txt`), `service status` names the installed build, release notes in `CHANGELOG.md`
+- [x] Site trial checklist (`docs/SITE-TRIAL.md`)
 - [ ] Signed installer
 
 ## Phase 5: cross-layer correlation ("the brain")

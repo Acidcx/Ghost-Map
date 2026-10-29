@@ -1,0 +1,40 @@
+# Exact versions bundled into GhostMap.exe, so every build of a tag is the same bytes.
+# build-exe.yml installs with: pip install -c packaging/exe-constraints.txt . pyinstaller
+# Taken from the green exe build of af1762c (2026-10-22, the build tested on the Test HMI), plus click and
+# colorama, which that runner already had. CI's test job still installs the newest versions allowed by
+# pyproject.toml, so an upstream break shows there before anyone bumps a pin here.
+aiosqlite==0.22.1
+altgraph==0.17.5
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+asyncua==2.1.0
+cffi==2.1.1
+click==8.5.0
+colorama==0.4.6
+cryptography==50.0.2
+fastapi==0.159.1
+h11==0.16.0
+idna==3.20
+opentelemetry-api==1.45.1
+pefile==2024.8.26
+pyOpenSSL==26.4.0
+pyasn1==0.6.4
+pycparser==3.12
+pydantic==2.14.1
+pydantic-core==2.50.1
+pyinstaller==6.22.3
+pyinstaller-hooks-contrib==2026.9
+pysnmp==7.1.30
+python-dateutil==3.0.0
+python-tds==1.17.1
+pytz==2026.5
+pywin32-ctypes==0.2.3
+setuptools==84.2.1
+six==1.17.0
+sortedcontainers==2.4.0
+starlette==1.9.0
+typing-extensions==4.16.0
+typing-inspection==0.4.4
+tzdata==2026.5
+uvicorn==0.54.0

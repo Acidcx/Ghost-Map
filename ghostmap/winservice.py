@@ -256,7 +256,10 @@ def install(host: str, port: int, allow: Sequence[str], no_listen: bool, check_e
     from ghostmap import winevent
 
     winevent.register()  # alerts in the Application event log under "GhostMap"
-    write_marker(data, {"installed_at": time.strftime("%Y-%m-%d %H:%M:%S"), "program": prog, "bin_path": binpath,
+    from ghostmap import BUILD, __version__
+
+    write_marker(data, {"installed_at": time.strftime("%Y-%m-%d %H:%M:%S"), "version": __version__,
+                        "commit": BUILD.get("commit"), "program": prog, "bin_path": binpath,
                         "host": host, "port": port, "allow": list(allow), "https": https, "copied_from_home": copied})
     _sc("sc.exe", "start", SERVICE_NAME)
     if not wait_for_state("RUNNING", 60):
@@ -373,6 +376,22 @@ def uninstall(out=print, purge: bool = False) -> int:  # pragma: no cover - Wind
     return 0
 
 
+def version_line(info: dict) -> str:
+    """Which build the service runs, so "which exe is on line 2?" has an answer, and a warning when the exe this
+    was run from is a different one (an upgrade that wasn't installed yet)."""
+    from ghostmap import BUILD, __version__
+
+    ver = info.get("version")
+    line = (f"Version: {ver}" + (f" ({info['commit']})" if info.get("commit") else "") if ver
+            else "Version: before 0.5.0 (installed by an exe that didn't record it)")
+    line += f", installed {info['installed_at']}" if info.get("installed_at") else ""
+    mine = (__version__, BUILD.get("commit"))
+    if ver and (ver, info.get("commit")) != mine and not (ver == __version__ and not BUILD.get("commit")):
+        line += (f". This exe is {__version__}" + (f" ({mine[1]})" if mine[1] else "")
+                 + ": run service install from it to upgrade.")
+    return line
+
+
 def control(action: str, out=print) -> int:  # pragma: no cover - Windows only
     _need_windows()
     if action == "status":
@@ -388,6 +407,7 @@ def control(action: str, out=print) -> int:  # pragma: no cover - Windows only
         out(f"{SERVICE_NAME}: {st}" + (f" at http://127.0.0.1:{info['port']}" if info.get("port") else ""))
         if info:
             out(f"Program: {info.get('program', ['?'])[0]}   Data: {shared_data_dir()}")
+            out(version_line(info))
         return 0 if st == "RUNNING" else 1
     if not is_admin():
         out(f"error: {action}ing the service needs an elevated prompt: right-click Command Prompt, Run as administrator")

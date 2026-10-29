@@ -153,7 +153,7 @@ def test_alert_center_reports_raised_and_cleared():
     assert sorted((k, i) for k, i, _ in logged) == [(winevent.INFO, 101), (winevent.INFO, 301)]
     assert all(t.startswith("Cleared: ") for *_, t in logged)
     view = center.view()
-    assert view["alerts"] == [] and view["counts"] == {"error": 0, "warning": 0} and view["errors"] == {}
+    assert view["alerts"] == [] and view["counts"] == {"error": 0, "warning": 0, "muted": 0} and view["errors"] == {}
     assert [r["event"] for r in view["recent"]][:2] == ["cleared", "cleared"] and len(view["recent"]) == 5
 
     # The event log failing never breaks the list.
@@ -221,3 +221,113 @@ def test_refused_ixon_address_points_at_the_ixon_option():
                                        {"ip": "172.17.255.50", "count": 1, "first": now, "last": now}], now)
     assert "service install --ixon" in ixon["hint"] and "IXON's VPN range" in ixon["hint"]
     assert "--allow 172.17.255.50" in other["hint"] and "VPN range" not in other["hint"]
+
+
+def test_acknowledge_and_mute(tmp_path):
+    """Startup noise can come off the banner: acknowledged until it clears or gets worse, muted for a while, or
+    every alert of one code muted (machine.stopped while the machine is commissioned). Mutes survive a restart."""
+    found = []
+    center = AlertCenter({"a": lambda now: found}, eventlog=lambda *a: None, data_dir=tmp_path)
+    run = lambda now: asyncio.run(center.evaluate(now))  # noqa: E731
+    disk = rules.alert("hmi.disk_low:C:", "hmi.disk_low", "warning", "hmi", "Disk C: is 92% full", "", "free space")
+    stop = rules.alert("machine.stopped:lev", "machine.stopped", "warning", "machine", "Leveler stopped", "", "look")
+    stop2 = {**stop, "key": "machine.stopped:cl2", "title": "CL2 stopped"}
+    found[:] = [disk, stop]
+    run(NOW)
+
+    center.mute("hmi.disk_low:C:", None, by="nelson", now=NOW)  # acknowledge
+    center.mute("machine.stopped:lev", 168, every=True, by="nelson", now=NOW)
+    found.append(stop2)
+    run(NOW + 30)
+    v = center.view(NOW + 30)
+    assert v["alerts"] == [] and v["counts"] == {"error": 0, "warning": 0, "muted": 3}
+    assert {a["key"]: a["muted"]["kind"] for a in v["muted"]} == {
+        "hmi.disk_low:C:": "ack", "machine.stopped:lev": "mute", "machine.stopped:cl2": "mute"}
+
+    # Kept across a restart.
+    again = AlertCenter({"a": lambda now: found}, eventlog=lambda *a: None, data_dir=tmp_path)
+    asyncio.run(again.evaluate(NOW + 60))
+    assert again.view(NOW + 60)["counts"]["muted"] == 3
+
+    # Worse than when it was acknowledged: back on the banner.
+    found[0] = {**disk, "severity": "error"}
+    run(NOW + 90)
+    assert [a["key"] for a in center.view(NOW + 90)["alerts"]] == ["hmi.disk_low:C:"]
+    assert "hmi.disk_low:C:" not in center.mutes
+
+    # An acknowledgement ends once the alert has been gone a while; a code mute ends when its time is up.
+    center.mute("hmi.disk_low:C:", None, now=NOW + 100)
+    found[:] = [stop, stop2]
+    run(NOW + 120)
+    assert "hmi.disk_low:C:" in center.mutes  # gone briefly (a source restarting) is not cleared
+    run(NOW + 120 + 601)
+    assert "hmi.disk_low:C:" not in center.mutes
+    run(NOW + 169 * 3600)
+    assert center.mutes == {} and len(center.view(NOW + 169 * 3600)["alerts"]) == 2
+
+    # Unmute, and the limits.
+    center.mute("machine.stopped:lev", 8, now=NOW + 169 * 3600)
+    assert center.unmute("machine.stopped:lev") and not center.unmute("machine.stopped:lev")
+    with pytest.raises(KeyError):
+        center.mute("nope", 8)
+    with pytest.raises(ValueError):
+        center.mute("machine.stopped:lev", 24 * 31)
+    with pytest.raises(ValueError):
+        center.mute("machine.stopped:lev", None, every=True)
+
+
+def test_mute_api_in_the_demo(tmp_path):
+    with TestClient(create_app(str(tmp_path), demo=True)) as c:
+        first = c.get("/api/alerts").json()
+        assert first["alerts"] and first["counts"]["muted"] == 0
+        key = first["alerts"][0]["key"]
+        got = c.post("/api/alerts/mute", json={"key": key, "hours": 8}, headers=H).json()
+        assert key not in [a["key"] for a in got["alerts"]] and got["counts"]["muted"] == 1
+        assert c.post("/api/alerts/mute", json={"key": "nope", "hours": 8}, headers=H).status_code == 404
+        assert c.post("/api/alerts/mute", json={"key": key, "hours": 9999}, headers=H).status_code == 400
+        target = got["mutes"][0]["target"]
+        assert c.post("/api/alerts/unmute", json={"target": target}, headers=H).json()["counts"]["muted"] == 0
+        assert c.post("/api/alerts/unmute", json={"target": target}, headers=H).status_code == 404
+
+
+def test_service_alerts_know_what_normally_runs(tmp_path):
+    """SQL Server and TSC count as critical; a Manual service that was running until recently counts as stopped
+    (Rockwell Event Server is Running/Manual on the Test HMI); repeated stops are counted, across a restart."""
+    from ghostmap.collectors.host import ServiceHistory
+
+    seen = ServiceHistory(tmp_path / "host-services.json")
+    up = [{"name": "MSSQL$SQL2022", "display": "SQL Server (SQL2022)", "state": "Running", "start_mode": "Auto"},
+          {"name": "TSCService", "display": "Bradbury TSC Service", "state": "Running", "start_mode": "Auto"},
+          {"name": "RSEventServer", "display": "Rockwell Event Server", "state": "Running", "start_mode": "Manual"},
+          {"name": "FTHist", "display": "FactoryTalk View SE Historian", "state": "Stopped", "start_mode": "Manual"},
+          {"name": "FTOff", "display": "FactoryTalk Old Thing", "state": "Stopped", "start_mode": "Disabled"}]
+    down = [{**s, "state": "Stopped"} for s in up]
+    assert rules.host_alerts({"services": seen.update(up, NOW)}, NOW) == []
+    seen.update(down, NOW + 300)
+    seen.update(up, NOW + 600)
+    seen = ServiceHistory(tmp_path / "host-services.json")  # Ghost Map restarted
+    got = rules.host_alerts({"services": seen.update(down, NOW + 900)}, NOW + 900)
+    by = {a["key"].split(":", 1)[1]: a for a in got}
+    assert sorted(by) == ["MSSQL$SQL2022", "RSEventServer", "TSCService"]  # never-running Manual and Disabled stay quiet
+    assert by["MSSQL$SQL2022"]["severity"] == "error" and by["TSCService"]["severity"] == "error"
+    assert by["RSEventServer"]["severity"] == "warning" and "start manually" in by["RSEventServer"]["detail"]
+    assert "stopped 2 times in the last 7 days" in by["MSSQL$SQL2022"]["detail"]
+    # A Manual service that hasn't run for over a day is just off.
+    assert "RSEventServer" not in {a["key"].split(":", 1)[1] for a in
+                                   rules.host_alerts({"services": seen.update(down, NOW + 2 * 86400)}, NOW + 2 * 86400)}
+
+
+def test_caches_are_warmed_after_starting(tmp_path, monkeypatch):
+    """The first page after a reboot shouldn't wait for PowerShell and TSC: they are read just after starting."""
+    import time
+
+    from ghostmap.web import app as webapp
+
+    monkeypatch.setattr(webapp, "WARM_S", 0.0)
+    with TestClient(create_app(str(tmp_path), demo=True)) as c:
+        app = c.app
+        for _ in range(100):
+            if app.state.hostmon.slow.get("at") and app.state.alerts.evaluated_at:
+                break
+            time.sleep(0.05)
+        assert app.state.hostmon.slow.get("at") and app.state.alerts.evaluated_at
