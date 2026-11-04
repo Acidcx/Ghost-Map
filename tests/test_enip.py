@@ -69,3 +69,34 @@ def test_truncated_reply_raises():
 def test_short_header():
     with pytest.raises(EnipError):
         parse_list_identity(b"\x63\x00")
+
+
+def test_rockwell_devices_seen_on_the_first_machine():
+    """Replays what the first real machine (2026-11) sent: Kinetix 5700 drives and power supplies report device
+    types that aren't in the ODVA list, and one Rockwell family sends a single letter as its product name."""
+    def ident(**kw):
+        base = dict(ip="10.10.0.5", vendor_id=1, revision=(14, 3), status=0x0060, serial=0x13E27427, state=3)
+        (i,) = parse_list_identity(build_list_identity_response(**{**base, **kw}))
+        return i
+
+    assert ident(device_type=0x2D, product_code=10, product_name="2198-D006-ERS3").device_type_name == "Servo Drive (Kinetix 5700)"
+    assert ident(device_type=0x30, product_code=1, product_name="2198-P031").device_type_name == "Servo Power Supply (Kinetix 5700)"
+    p = ident(device_type=0x8F, product_code=2192, product_name="P", revision=(20, 4))
+    assert p.product_name == 'Product code 2192 (sends "P" as its name)' and p.device_type_name == "Device type 0x8F"
+    # Once the catalog number is known it is shown instead.
+    cip_tables.PRODUCT_NAMES[(1, 0x8F, 2192)] = "Example product"
+    try:
+        assert ident(device_type=0x8F, product_code=2192, product_name="P").product_name == "Example product"
+    finally:
+        cip_tables.PRODUCT_NAMES.pop((1, 0x8F, 2192))
+    assert cip_tables.device_type_name(0x2D, vendor_id=99, product_name="2198-D006") == "Device type 0x2D"
+
+
+def test_identity_item_shorter_than_its_name():
+    """A device that states an item length too short for its product name still gets its whole name read."""
+    raw = bytearray(build_list_identity_response(ip="10.10.0.5", vendor_id=1, device_type=0x02, product_code=5,
+                                                 revision=(1, 1), status=0, serial=1, product_name="PowerFlex Test"))
+    item_len_at = 24 + 2 + 2  # header, item count, item type
+    struct.pack_into("<H", raw, item_len_at, struct.unpack_from("<H", raw, item_len_at)[0] - 14)
+    (i,) = parse_list_identity(bytes(raw))
+    assert i.product_name == "PowerFlex Test"

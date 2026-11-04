@@ -331,3 +331,16 @@ def test_caches_are_warmed_after_starting(tmp_path, monkeypatch):
                 break
             time.sleep(0.05)
         assert app.state.hostmon.slow.get("at") and app.state.alerts.evaluated_at
+
+
+def test_powershell_call_is_plain_text():
+    """No -EncodedCommand: the command line shows what Ghost Map runs (antivirus treats encoded PowerShell from an
+    unsigned exe as malware-like), and it is one line with single quotes only, so it needs no escaping."""
+    import inspect as pyinspect
+
+    from ghostmap.collectors import host
+
+    assert '"' not in host.PS_SCRIPT and "\n" not in host.PS_SCRIPT
+    assert "EncodedCommand" not in pyinspect.getsource(host.run_powershell)
+    assert all(cmd.split()[0].startswith(("$", "@{")) for cmd in host.PS_STATEMENTS)
+    assert "Set-" not in host.PS_SCRIPT and "Invoke-" not in host.PS_SCRIPT  # reads only

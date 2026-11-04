@@ -10,7 +10,6 @@ rest. ``analysis/alerts.py`` turns a snapshot into alerts.
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -37,17 +36,20 @@ SERVICES_FILE = "host-services.json"   # when each service was last seen running
 RUNNING_KEPT_S = 7 * 86400
 log = logging.getLogger("ghostmap.host")
 
-PS_SCRIPT = r"""
-$ErrorActionPreference = 'SilentlyContinue'
-$svc = @(Get-CimInstance Win32_Service | Where-Object { $_.DisplayName -match '%MATCH%' } |
-  Select-Object Name, DisplayName, State, StartMode)
-$since = (Get-Date).AddHours(-%HOURS%)
-$ev = @(Get-WinEvent -FilterHashtable @{LogName='System','Application'; Level=1,2; StartTime=$since} -MaxEvents 1000 |
-  Select-Object LogName, ProviderName, Id, Level,
-    @{n='At'; e={([DateTimeOffset]$_.TimeCreated).ToUnixTimeSeconds()}},
-    @{n='Msg'; e={ if ($_.Message) { ($_.Message -split "`r?`n")[0] } else { '' } }})
-@{services=$svc; events=$ev} | ConvertTo-Json -Depth 4 -Compress
-"""
+# Plain text on PowerShell's command line, no -EncodedCommand: anyone (and any antivirus) can read what it runs.
+# One statement per entry, joined with "; ". Single quotes only, so the command line needs no escaping.
+PS_STATEMENTS = (
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    "$svc = @(Get-CimInstance Win32_Service | Where-Object { $_.DisplayName -match '%MATCH%' } | "
+    "Select-Object Name, DisplayName, State, StartMode)",
+    "$since = (Get-Date).AddHours(-%HOURS%)",
+    "$ev = @(Get-WinEvent -FilterHashtable @{LogName='System','Application'; Level=1,2; StartTime=$since} -MaxEvents 1000 | "
+    "Select-Object LogName, ProviderName, Id, Level, "
+    "@{n='At'; e={([DateTimeOffset]$_.TimeCreated).ToUnixTimeSeconds()}}, "
+    "@{n='Msg'; e={ if ($_.Message) { ($_.Message -split '\\r?\\n')[0] } else { '' } }})",
+    "@{services=$svc; events=$ev} | ConvertTo-Json -Depth 4 -Compress",
+)
+PS_SCRIPT = "; ".join(PS_STATEMENTS)
 
 
 def disks(data_dir: Path) -> list[dict]:
@@ -173,8 +175,9 @@ def summarize_events(events: list[dict], top: int = 8) -> dict:
 
 def run_powershell(script: str, timeout: float = PS_TIMEOUT_S, running: Optional[set] = None) -> str:  # pragma: no cover - Windows only
     """``running``: the process is kept there while it runs, so stopping Ghost Map can end it."""
-    enc = base64.b64encode(script.encode("utf-16-le")).decode()
-    p = subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", enc],
+    if '"' in script or "\n" in script:
+        raise ValueError("PowerShell command must be one line with single quotes only")
+    p = subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, creationflags=0x08000000)  # CREATE_NO_WINDOW
     if running is not None:
         running.add(p)

@@ -98,6 +98,8 @@ class _Collector(asyncio.DatagramProtocol):
         try:
             for ident in parse_list_identity(data):
                 self.results.append(DiscoveredIdentity(source_ip=addr[0], identity=ident))
+                if ident.product_name.startswith("Product code "):  # no usable name: keep the reply for a bug report
+                    log.info("ListIdentity from %s has no usable product name; reply: %s", addr[0], data.hex())
         except EnipError as exc:
             self.errors.append(f"{addr[0]}: {exc}")
 

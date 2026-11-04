@@ -52,6 +52,10 @@ def parse_list_identity(data: bytes) -> list[CipIdentity]:
         item_type, item_len = struct.unpack_from("<HH", payload, offset)
         offset += 4
         item = payload[offset:offset + item_len]
+        if item_type == ITEM_CIP_IDENTITY and count == 1:
+            # A device that states a shorter item than it sends would lose the end of its product name: with one
+            # item, read on to the end of the reply.
+            item = data[_HEADER.size + offset:]
         offset += item_len
         if item_type == ITEM_CIP_IDENTITY:
             identities.append(_parse_identity_item(item))
@@ -77,13 +81,13 @@ def _parse_identity_item(item: bytes) -> CipIdentity:
         vendor_id=vendor,
         vendor_name=cip_tables.vendor_name(vendor),
         device_type=dtype,
-        device_type_name=cip_tables.device_type_name(dtype, vendor),
+        device_type_name=cip_tables.device_type_name(dtype, vendor, name.strip()),
         product_code=pcode,
         revision_major=rmaj,
         revision_minor=rmin,
         status=status,
         serial=serial,
-        product_name=name.strip(),
+        product_name=cip_tables.product_name(name, vendor, dtype, pcode),
         state=state,
         state_name=cip_tables.state_name(state),
         status_flags=flags,

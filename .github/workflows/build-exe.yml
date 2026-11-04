@@ -24,6 +24,10 @@ jobs:
         shell: pwsh
         run: |
           .\dist\GhostMap.exe --version
+          # Version information in the exe (Properties > Details), which IT and antivirus look at.
+          $vi = (Get-Item .\dist\GhostMap.exe).VersionInfo
+          Write-Host "exe version info: $($vi.ProductName) $($vi.ProductVersion) - $($vi.FileDescription)"
+          if ($vi.ProductName -ne "Ghost Map" -or -not $vi.ProductVersion) { throw "the exe has no version information" }
           $env:GHOSTMAP_DATA = "$env:RUNNER_TEMP\ghostmap"
           $p = Start-Process -FilePath .\dist\GhostMap.exe -ArgumentList "web","--demo" -PassThru
           $ok = $false
