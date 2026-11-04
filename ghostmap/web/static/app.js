@@ -210,17 +210,38 @@ function renderDevices() {
   $("#devTable").querySelectorAll("th").forEach((th) => th.addEventListener("click", () => {
     const k = th.dataset.k; if (!k) return;
     state.devSort = { key: k, dir: state.devSort.key === k ? -state.devSort.dir : 1 };
+    saveDevView();
     renderDevices();
   }));
   $("#devTable").querySelectorAll("tbody tr").forEach((tr) => tr.addEventListener("click", () => selectDevice(tr.dataset.key)));
   renderDeviceDetail();
 }
-$("#devFilter").addEventListener("input", renderDevices);
-$("#devCipOnly").addEventListener("change", renderDevices);
+// The filter, the EtherNet/IP-only box and the sort survive a reload, so refreshing the page doesn't lose your place.
+function saveDevView() {
+  try {
+    localStorage.setItem("gm.dev.view", JSON.stringify({ q: $("#devFilter").value, cip: $("#devCipOnly").checked, sort: state.devSort }));
+  } catch (_) { /* ignore */ }
+}
+(() => {
+  try {
+    const v = JSON.parse(localStorage.getItem("gm.dev.view") || "null");
+    if (!v) return;
+    $("#devFilter").value = v.q || "";
+    $("#devCipOnly").checked = !!v.cip;
+    if (v.sort && DEV_COLS.some((c) => c[0] === v.sort.key)) state.devSort = { key: v.sort.key, dir: v.sort.dir < 0 ? -1 : 1 };
+  } catch (_) { /* ignore */ }
+})();
+$("#devFilter").addEventListener("input", () => { saveDevView(); renderDevices(); });
+$("#devCipOnly").addEventListener("change", () => { saveDevView(); renderDevices(); });
 
+// Selecting a row only marks it and fills the side panel: rebuilding the whole table made the page jump.
 function selectDevice(key) {
   state.selDevice = state.selDevice === key ? null : key;
-  renderDevices();
+  $("#devTable").querySelectorAll("tbody tr").forEach((tr) => tr.classList.toggle("sel", tr.dataset.key === state.selDevice));
+  renderDeviceDetail();
+  const pane = $("#devDetail");
+  // Stacked under the table on a narrow screen: bring the details into view.
+  if (state.selDevice && getComputedStyle(pane).position !== "sticky") pane.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
 function renderDeviceDetail() {
