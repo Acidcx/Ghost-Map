@@ -61,6 +61,22 @@ DEVICE_TYPES: dict[int, str] = {
 }
 
 DEVICE_TYPE_MANAGED_SWITCH = 0x2C
+
+# Rockwell devices whose device type isn't in the list above (Kinetix 5700 drives report 0x2D, their power supplies
+# 0x30): named from the catalog number they send as their product name. Seen on the first real machine (2026-11).
+ROCKWELL_FAMILIES = (
+    ("2198-P", "Servo Power Supply (Kinetix 5700)"),
+    ("2198-D", "Servo Drive (Kinetix 5700)"),
+    ("2198-S", "Servo Drive (Kinetix 5700)"),
+    ("2198-H", "Servo Drive (Kinetix 5500)"),
+    ("2198-C", "Servo Drive (Kinetix 5300)"),
+    ("2198-E", "Servo Drive (Kinetix 5100)"),
+)
+# Products that send no useful name of their own, by (vendor, device type, product code). Some Rockwell devices
+# send a one-letter product name ("P" from device type 0x8F, product code 2192); add them here once the catalog
+# number is known from the device's label or the controller's I/O tree.
+PRODUCT_NAMES: dict[tuple[int, int, int], str] = {}
+SHORT_NAME = 2  # a product name this short is a device quirk, not a name
 VENDOR_ROCKWELL_SOFTWARE = 77  # RSLinx Classic / FactoryTalk Linx answering for a PC; product name = hostname
 
 # Identity attribute 8, "State".
@@ -120,10 +136,28 @@ def vendor_name(vendor_id: int) -> str:
     return _vendors().get(vendor_id, f"Vendor {vendor_id}")
 
 
-def device_type_name(device_type: int, vendor_id: int = 0) -> str:
+def device_type_name(device_type: int, vendor_id: int = 0, product_name: str = "") -> str:
     if vendor_id == VENDOR_ROCKWELL_SOFTWARE:
         return "Workstation (RSLinx / FactoryTalk Linx)"
-    return DEVICE_TYPES.get(device_type, f"Device type 0x{device_type:02X}")
+    if device_type in DEVICE_TYPES:
+        return DEVICE_TYPES[device_type]
+    if vendor_id == 1:
+        for prefix, family in ROCKWELL_FAMILIES:
+            if product_name.upper().startswith(prefix):
+                return family
+    return f"Device type 0x{device_type:02X}"
+
+
+def product_name(name: str, vendor_id: int, device_type: int, product_code: int) -> str:
+    """The name to show: the device's own, or from ``PRODUCT_NAMES``, or for a device that sends one letter, its
+    product code (so 18 devices called "P" are at least told apart from other products)."""
+    name = name.strip()
+    known = PRODUCT_NAMES.get((vendor_id, device_type, product_code))
+    if known:
+        return known
+    if len(name) <= SHORT_NAME:
+        return f"Product code {product_code}" + (f' (sends "{name}" as its name)' if name else " (sends no name)")
+    return name
 
 
 def state_name(state: int) -> str:
