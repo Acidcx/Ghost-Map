@@ -3,6 +3,23 @@
 Each version is a git tag (`v0.5.0`, ...). Pushing the tag builds `GhostMap.exe` and attaches it to a GitHub
 Release. `GhostMap.exe service status` and the top bar name the version and commit that are installed.
 
+## 0.5.1 (2026-11-05)
+
+Fixes from the first days on a real machine.
+
+- **Less like malware to Windows Defender.** Defender's machine-learning check (`Behavior:Win32/Execution.A!ml`)
+  deleted the exe on a work laptop. Ghost Map no longer starts PowerShell with a base64 `-EncodedCommand`: the
+  read-only service and event log query is plain text on the command line, where anyone can read it. The exe now
+  carries Windows version information (Properties > Details) and is built without UPX. Code signing remains the
+  real fix; until then, ask IT for an exception and report the false positive to Microsoft.
+- **Device labels.** Kinetix 5700 drives and power supplies are named from their catalog number ("Servo Drive
+  (Kinetix 5700)", "Servo Power Supply (Kinetix 5700)") instead of "Device type 0x2D/0x30". Devices that send a
+  one-letter product name show "Product code N (sends "P" as its name)", and the raw reply goes to the debug log.
+  A device that states too short an identity item no longer has its name cut off.
+- **Devices tab.** Clicking a device no longer rebuilds the table (the page jumped); the details panel stays in
+  view beside a long list (on a phone it scrolls into view); the filter, the EtherNet/IP-only box and the sort
+  survive a page reload.
+
 ## 0.5.0 (2026-10-29)
 
 Ready for the first test on a real machine.
