@@ -3,6 +3,19 @@
 Each version is a git tag (`v0.5.0`, ...). Pushing the tag builds `GhostMap.exe` and attaches it to a GitHub
 Release. `GhostMap.exe service status` and the top bar name the version and commit that are installed.
 
+## 0.5.3 (2026-11-05)
+
+For machines that don't read their switches over SNMP.
+
+- **Switch pages only when SNMP is in use.** Network > Switches and Traffic, the switch tiles on the Scan page, the
+  SNMP field in Probe and the Home card's "Switches" line only show once a stored scan has read a switch or the
+  traffic monitor is set up. The SNMP part of the New scan dialog is folded away under "Switches over SNMP
+  (optional)"; a scan that reads a switch turns the pages on. Nothing was removed: the SNMP code is unchanged.
+- **New scan could not start with its defaults.** Reply wait defaulted to 2 s with a step of 0.5 from 0.2, which
+  the browser counts as invalid, so Start scan only showed "Please enter a valid value" until the number was
+  changed. The step is now 0.1, and a test checks every number field's default.
+- **docs/SNMP-SETUP.md**: step-by-step read-only SNMP setup for a Stratix, for when a site wants the switch pages.
+
 ## 0.5.2 (2026-11-05)
 
 Security hygiene before the team uses Ghost Map on a machine.
