@@ -1,6 +1,6 @@
 """Ghost Map - read-only OT network mapper and commissioning/debug tool."""
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 
 try:  # written by packaging/build_exe.py into the exe; absent in a source checkout
     from ghostmap._build import BUILD  # type: ignore

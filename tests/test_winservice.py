@@ -170,3 +170,32 @@ def test_status_names_the_installed_version(monkeypatch):
     older = ws.version_line({**same, "version": "0.4.9", "commit": "0000000"})
     assert older.startswith("Version: 0.4.9 (0000000)") and f"This exe is {ghostmap.__version__} (abc1234567)" in older
     assert "before 0.5.0" in ws.version_line({"installed_at": "2026-10-01 08:00:00"})
+
+
+def test_network_service_gets_https_by_default(tmp_path, monkeypatch, capsys):
+    """0.5.2: a service open to the network serves HTTPS unless install says --http, also on an upgrade."""
+    from ghostmap import cli
+
+    monkeypatch.setenv("ProgramData", str(tmp_path))
+    (tmp_path / "GhostMap").mkdir()
+    seen = {}
+    monkeypatch.setattr(ws, "install", lambda host, port, allow, *a, **k: seen.update(host=host, https=k["https"]) or 0)
+    assert cli.main(["service", "install", "--ixon"]) == 0
+    assert seen == {"host": "0.0.0.0", "https": True}
+    assert cli.main(["service", "install", "--ixon", "--http"]) == 0
+    assert seen == {"host": "0.0.0.0", "https": False}
+    assert cli.main(["service", "install"]) == 0  # local only: plain HTTP for the HMI's own browser
+    assert seen == {"host": "127.0.0.1", "https": False}
+    # Upgrade of a service a 0.5.1 install opened to IXON over plain HTTP.
+    ws.write_marker(tmp_path / "GhostMap", {"host": "0.0.0.0", "port": 8470, "allow": ["10.187.0.0/16"], "https": False})
+    capsys.readouterr()
+    assert cli.main(["service", "install"]) == 0
+    assert seen == {"host": "0.0.0.0", "https": True} and "IXON" in capsys.readouterr().err
+    assert cli.main(["service", "install", "--http"]) == 0
+    assert seen == {"host": "0.0.0.0", "https": False}
+
+
+def test_service_args_record_plain_http_choice(tmp_path):
+    assert "--http" in ws.service_args(tmp_path, "0.0.0.0", 8470, ["10.187.0.0/16"])
+    assert "--http" not in ws.service_args(tmp_path, "0.0.0.0", 8470, ["10.187.0.0/16"], https=True)
+    assert "--http" not in ws.service_args(tmp_path, "127.0.0.1", 8470)

@@ -74,6 +74,50 @@ def client_allowed(host: Optional[str], allow: list) -> bool:
     return any(addr.version == net.version and addr in net for net in allow)
 
 
+def local_names() -> set[str]:
+    """Host names a browser on this PC may use for Ghost Map: localhost and the PC's own names (lower case)."""
+    import socket
+
+    names = {"localhost"}
+    try:
+        host = socket.gethostname()
+        names.update({host, host.split(".")[0]})
+        fqdn = socket.getfqdn()
+        if fqdn:
+            names.add(fqdn)
+    except OSError:
+        pass
+    return {n.lower().rstrip(".") for n in names if n}
+
+
+def host_ok(host_header: Optional[str], names: set[str]) -> bool:
+    """Whether a request from this PC itself named an address that really is Ghost Map.
+
+    A web page open in a browser on the HMI can point its own domain name at 127.0.0.1 ("DNS rebinding") and
+    then talk to Ghost Map as if it were a page of Ghost Map's, with the HMI's loopback trust (and, before any
+    login exists, as admin). The browser still sends that domain in the Host header, so a request from loopback
+    is only served when Host is an IP address, ``localhost`` or one of this PC's own names. Requests from other
+    addresses (IXON, the allow-list) need a login anyway and are not checked, so a proxy's Host can't lock them out.
+    """
+    host = (host_header or "").strip().lower()
+    if not host:
+        return False
+    if host.startswith("["):  # [::1]:8470
+        return "]" in host and _is_ip(host[1:host.index("]")])
+    if host.count(":") == 1:
+        host = host.rsplit(":", 1)[0]
+    host = host.rstrip(".")
+    return _is_ip(host) or host in names
+
+
+def _is_ip(text: str) -> bool:
+    try:
+        ipaddress.ip_address(text)
+        return True
+    except ValueError:
+        return False
+
+
 def _hash(password: str, salt: bytes, iterations: int) -> bytes:
     return hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
 

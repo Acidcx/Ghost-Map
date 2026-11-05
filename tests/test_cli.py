@@ -54,3 +54,16 @@ def test_web_refuses_network_exposure_without_allow_list_and_logins(tmp_path, mo
     assert cli.main(base + ["--allow", "bogus"]) == 2
     auth.UserStore(tmp_path).set("boss", "long-enough-pw", "admin")
     assert cli.main(base + ["--allow", "192.168.1.1"]) == 0
+    err = capsys.readouterr().err
+    assert (tmp_path / "tls" / "ghostmap.crt").is_file() and "SHA-256" in err  # HTTPS by default on the network
+    assert cli.main(base + ["--allow", "192.168.1.1", "--http"]) == 0
+    assert "plain HTTP" in capsys.readouterr().err
+    assert cli.main(base + ["--allow", "192.168.1.1", "--http", "--https"]) == 2
+
+
+def test_web_on_localhost_stays_http(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(cli, "_server", lambda args, allow, tls_info=None: seen.update(tls=tls_info) or
+                        type("S", (), {"run": lambda self: None})())
+    assert cli.main(["--data-dir", str(tmp_path), "web", "--port", "18472", "--no-listen"]) == 0
+    assert seen["tls"] is None and not (tmp_path / "tls").exists()
