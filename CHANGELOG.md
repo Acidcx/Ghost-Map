@@ -3,6 +3,22 @@
 Each version is a git tag (`v0.5.0`, ...). Pushing the tag builds `GhostMap.exe` and attaches it to a GitHub
 Release. `GhostMap.exe service status` and the top bar name the version and commit that are installed.
 
+## 0.5.4 (2026-11-05)
+
+After Ghost Map was seen using about 50% CPU on a Test HMI (killed and restarted before anything was captured).
+
+- **Ghost Map watches its own CPU.** A small thread samples Ghost Map's own CPU time every 5 s. If it keeps 60% of a
+  core busy for a minute, it writes what every thread is doing to the debug log (at most every 30 minutes) and the
+  alert list shows **hmi.ghostmap_busy**. One pinned core is only 50% in Task Manager on a two-core HMI, under the
+  existing 90% CPU alert, so this was invisible before. Settings > This PC shows "Ghost Map itself" under CPU.
+  If it happens again, download the debug bundle before restarting.
+- **Guard against a Windows asyncio spin.** asyncio's ProactorEventLoop wakes itself through a socket pair; when
+  something outside Python (a network filter driver or security software) shuts it down, the loop re-reads it
+  forever at 100% of a core until restarted (CPython gh-156333, not fixed upstream). Ghost Map now makes a new pair
+  and logs a warning instead. Unconfirmed as the cause on the HMI: the log line will say if it was.
+- **One PowerShell read at a time.** Pages opened together right after a restart (Home, the alert bar, the start-up
+  warm-up) each started their own services and event-log PowerShell read; they now share one.
+
 ## 0.5.3 (2026-11-05)
 
 For machines that don't read their switches over SNMP.

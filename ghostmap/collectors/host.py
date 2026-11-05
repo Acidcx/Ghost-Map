@@ -23,6 +23,8 @@ from collections import deque
 from pathlib import Path
 from typing import Optional
 
+from ghostmap.selfwatch import SelfWatch
+
 FAST_S = 60.0          # disk, memory, CPU, uptime
 SLOW_S = 300.0         # services and event log (one PowerShell call)
 FIRST_SLOW_S = 20.0    # ... the first time this long after starting, so starting up stays quick
@@ -242,12 +244,16 @@ class HostMonitor:
         self._task: Optional[asyncio.Task] = None
         self._running: set = set()  # a PowerShell process while one runs
         self.seen = ServiceHistory(self.data_dir / SERVICES_FILE)
+        self.selfwatch = SelfWatch()  # Ghost Map's own CPU use (a thread, so it still runs if the event loop spins)
+        self._windows_read: Optional[asyncio.Task] = None
 
     def start(self) -> None:
         if self._task is None:
             self._task = asyncio.create_task(self._loop(), name="ghostmap-host")
+        self.selfwatch.start()
 
     async def stop(self) -> None:
+        self.selfwatch.stop()
         if self._task:
             self._task.cancel()
             for p in list(self._running):
@@ -280,6 +286,13 @@ class HostMonitor:
         return self.fast
 
     async def read_windows(self) -> None:
+        """One PowerShell read at a time: a page opened while one runs (or several pages at once, right after a
+        restart) waits for it instead of starting its own PowerShell."""
+        if self._windows_read is None or self._windows_read.done():
+            self._windows_read = asyncio.ensure_future(self._read_windows())
+        await asyncio.shield(self._windows_read)
+
+    async def _read_windows(self) -> None:
         if self.demo:
             self.slow = {"at": time.time(), "error": None, **_demo_windows()}
             self.slow["services"] = self.seen.update(self.slow["services"], self.slow["at"])
@@ -309,7 +322,8 @@ class HostMonitor:
                         "avg_5m": round(sum(recent) / len(recent), 1) if recent else None,
                         "series": [{"at": t, "pct": p} for t, p in self.cpu]},
                 "services": self.slow.get("services"), "events": self.slow.get("events"),
-                "windows_read_at": self.slow.get("at"), "windows_error": self.slow.get("error")}
+                "windows_read_at": self.slow.get("at"), "windows_error": self.slow.get("error"),
+                "ghostmap": self.selfwatch.snapshot()}
 
 
 # --------------------------------------------------------------------------------------------- demo
