@@ -192,7 +192,8 @@ def test_first_admin_setup_from_ui(tmp_path):
         assert info["auth"] is False and info["local"] is False  # TestClient's peer isn't loopback
         r = c.post("/api/users/setup", json={"name": "boss", "password": "admin-password"})
         assert r.status_code == 403  # only from the machine itself
-    with TestClient(create_app(data_dir=str(tmp_path)), headers=H, client=("127.0.0.1", 5555)) as c:
+    with TestClient(create_app(data_dir=str(tmp_path)), headers=H, client=("127.0.0.1", 5555),
+                    base_url="http://127.0.0.1:8470") as c:
         assert c.post("/api/users/setup", json={"name": "boss", "password": "short"}).status_code == 400
         r = c.post("/api/users/setup", json={"name": "boss", "password": "admin-password"})
         assert r.json()["role"] == "admin" and "gm_session" in r.headers["set-cookie"]
@@ -211,3 +212,31 @@ def test_manage_users(secured, tmp_path):
     assert secured.delete("/api/users/op").status_code == 200
     assert secured.delete("/api/users/boss").status_code == 409  # last admin
     assert "user.set\ttech viewer" in (tmp_path / "audit.log").read_text()
+
+
+def test_loopback_refuses_foreign_host_names(tmp_path):
+    """DNS rebinding: a page on the HMI points its own domain at 127.0.0.1. Before any login exists loopback
+    is admin, so such a request must be refused by its Host header, while IXON / allow-listed clients are not
+    checked (they need a login anyway, and a proxy may send any Host)."""
+    app = create_app(data_dir=str(tmp_path), allow=[], demo_opcua=False, collect=False)
+    with TestClient(app, headers=H, client=("127.0.0.1", 5555), base_url="http://attacker.example:8470") as c:
+        assert c.get("/api/users").status_code == 403
+        assert c.post("/api/users/setup", json={"name": "evil", "password": "admin-password"}).status_code == 403
+        for base in ("http://127.0.0.1:8470", "http://localhost:8470", "http://[::1]:8470", "https://10.1.2.3"):
+            assert c.get(f"{base}/api/users").status_code == 200, base
+    app = create_app(data_dir=str(tmp_path / "ixon"), allow=parse_allow(["10.187.0.0/16"]), demo_opcua=False,
+                     collect=False)
+    with TestClient(app, headers=H, client=("10.187.4.5", 5555), base_url="http://ixon-proxy.example") as c:
+        assert c.get("/api/info").status_code == 200
+
+
+def test_host_ok():
+    from ghostmap.web.auth import host_ok
+
+    names = {"localhost", "hmi-leveler", "hmi-leveler.plant.local"}
+    for good in ("localhost", "LOCALHOST:8470", "127.0.0.1:8470", "[::1]:8470", "HMI-Leveler:8470",
+                 "hmi-leveler.plant.local.", "192.168.1.20"):
+        assert host_ok(good, names), good
+    for bad in ("", None, "attacker.example", "127.0.0.1.attacker.example:8470", "localhost.attacker.example",
+                "[::1", "hmi-leveler.evil.com"):
+        assert not host_ok(bad, names), bad

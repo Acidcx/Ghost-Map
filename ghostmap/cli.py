@@ -280,6 +280,17 @@ def _exposure(host: str, allow_args, data_dir, user_cmd: str = "ghostmap user ad
     return allow, None
 
 
+def _pick_https(args) -> Optional[str]:
+    """Settle ``args.https``: on by default when serving beyond localhost, off with ``--http``. Returns an error."""
+    if getattr(args, "http", False):
+        if args.https or getattr(args, "cert", None) or getattr(args, "key", None):
+            return "error: --http can't go with --https, --cert or --key"
+        return None
+    if args.host not in LOCAL_HOSTS:
+        args.https = True
+    return None
+
+
 def _tls(args) -> Optional[dict]:
     """The certificate to serve HTTPS with (made on first use), or None for plain HTTP."""
     if not getattr(args, "https", False):
@@ -319,6 +330,10 @@ def cmd_web(args) -> int:
     import threading
     import webbrowser
 
+    problem = _pick_https(args)
+    if problem:
+        print(problem, file=sys.stderr)
+        return 2
     https = args.https or (not args.data_dir and _service_https())
     url = f"{'https' if https else 'http'}://{'127.0.0.1' if args.host in ('0.0.0.0', '::') else args.host}:{args.port}"
     with socket.socket() as probe_sock:
@@ -347,7 +362,7 @@ def cmd_web(args) -> int:
     if args.host not in LOCAL_HOSTS:
         print(f"Serving on {args.host}; clients allowed: localhost, {', '.join(map(str, allow))}", file=sys.stderr)
         if not args.https:
-            print("Logins cross the network unencrypted; add --https to serve HTTPS.", file=sys.stderr)
+            print("Serving plain HTTP (--http): logins cross the network unencrypted.", file=sys.stderr)
     try:
         tls_info = _tls(args)
     except ValueError as exc:
@@ -372,10 +387,24 @@ def cmd_service(args) -> int:
         prev = ws.installed_info()  # an upgrade with no options keeps how the service was opened up
         if prev and prev.get("host"):
             args.host, args.port = prev["host"], prev.get("port", args.port)
-            args.allow, args.https = list(prev.get("allow") or []), bool(prev.get("https"))
+            args.allow = list(prev.get("allow") or [])
+            args.https = bool(prev.get("https"))
+            # Up to 0.5.1 a service open to the network served plain HTTP unless --https was given. It gets HTTPS
+            # now, unless --http asks to keep plain HTTP.
+            if args.host not in LOCAL_HOSTS and not args.https and not args.http:
+                print("This service was open to the network over plain HTTP; it now serves HTTPS (add --http to "
+                      "keep plain HTTP). Set the IXON HTTP service for Ghost Map to HTTPS, port "
+                      f"{args.port}.", file=sys.stderr)
             print(f"Keeping the current settings: --host {args.host} --port {args.port}"
-                  + "".join(f" --allow {a}" for a in args.allow) + (" --https" if args.https else ""), file=sys.stderr)
+                  + "".join(f" --allow {a}" for a in args.allow), file=sys.stderr)
     args.host = args.host or "127.0.0.1"
+    if args.action in ("install", "run"):
+        if args.action == "install" and args.ixon and args.host in LOCAL_HOSTS:
+            args.host = "0.0.0.0"
+        problem = _pick_https(args)
+        if problem:
+            print(problem, file=sys.stderr)
+            return 2
     if args.action == "run":
         allow, problem = _exposure(args.host, args.allow, args.data_dir or default_data_dir())
         if problem:
@@ -386,8 +415,6 @@ def cmd_service(args) -> int:
         if args.ixon:
             from ghostmap.web.auth import IXON_RANGE
 
-            if args.host in LOCAL_HOSTS:
-                args.host = "0.0.0.0"
             if IXON_RANGE not in args.allow:
                 args.allow.append(IXON_RANGE)
         def check(data_dir):
@@ -467,7 +494,10 @@ def cmd_simulate(args) -> int:
 
 def _https_args(s) -> None:
     s.add_argument("--https", action="store_true",
-                   help="serve HTTPS with a self-signed certificate Ghost Map makes in <data dir>/tls (or --cert/--key)")
+                   help="serve HTTPS with a self-signed certificate Ghost Map makes in <data dir>/tls (or --cert/--key). "
+                        "On by default when --host is not localhost")
+    s.add_argument("--http", action="store_true",
+                   help="serve plain HTTP even beyond localhost (logins then cross the network unencrypted)")
     s.add_argument("--cert", metavar="FILE", help="with --https: the plant CA's certificate (PEM) instead of the self-signed one")
     s.add_argument("--key", metavar="FILE", help="with --https: the private key (PEM) for --cert")
 

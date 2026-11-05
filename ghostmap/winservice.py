@@ -82,6 +82,8 @@ def service_args(data_dir: Path, host: str, port: int, allow: Sequence[str] = ()
         args.append("--https")
         if cert and key:
             args += ["--cert", str(Path(cert).resolve()), "--key", str(Path(key).resolve())]
+    elif host not in ("127.0.0.1", "localhost", "::1"):
+        args.append("--http")  # open to the network over plain HTTP only because install was told --http
     return args
 
 

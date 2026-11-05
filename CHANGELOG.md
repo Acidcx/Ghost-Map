@@ -3,6 +3,21 @@
 Each version is a git tag (`v0.5.0`, ...). Pushing the tag builds `GhostMap.exe` and attaches it to a GitHub
 Release. `GhostMap.exe service status` and the top bar name the version and commit that are installed.
 
+## 0.5.2 (2026-11-05)
+
+Security hygiene before the team uses Ghost Map on a machine.
+
+- **HTTPS by default on the network.** `web --host 0.0.0.0` and `service install --ixon` (or `--host`) serve HTTPS
+  with the self-signed certificate unless `--http` is given; localhost-only stays plain HTTP. Upgrading a service
+  that was open to the network over plain HTTP switches it to HTTPS and says so: set the IXON HTTP service for Ghost
+  Map to HTTPS, port 8470, and open `https://127.0.0.1:8470` on the HMI.
+- **No DNS rebinding.** A request from the HMI itself is refused unless it names Ghost Map by IP, `localhost` or
+  the PC's name. Before, a web page open on the HMI could point its own domain at 127.0.0.1 and use Ghost Map with
+  the HMI's local access (admin while no login exists).
+- **Exe checksum.** Every build and release has `GhostMap.exe.sha256`; compare it with `Get-FileHash GhostMap.exe`.
+- **Pinned CI actions.** The GitHub Actions the build uses are pinned to exact commits, so a moved tag can't
+  change what builds the exe.
+
 ## 0.5.1 (2026-11-05)
 
 Fixes from the first days on a real machine.

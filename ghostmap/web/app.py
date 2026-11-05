@@ -37,7 +37,7 @@ from ghostmap.protocols.snmp import SnmpCredentials
 from ghostmap.scanner import ScanRequest, run_scan
 from ghostmap.store import ScanStore, inventory_csv
 from ghostmap.ua_trust import CertificateChanged, CertTrust
-from ghostmap.web.auth import AuditLog, Lockout, Sessions, UserStore, client_allowed
+from ghostmap.web.auth import AuditLog, Lockout, Sessions, UserStore, client_allowed, host_ok, local_names
 from ghostmap.history import RETENTION_DAYS, History
 from ghostmap.prodhistory import ProductionHistory
 from ghostmap.collectors.passive import PassiveMonitor
@@ -456,6 +456,7 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
     def client_of(request: Request) -> str:
         return request.client.host if request.client else ""
 
+    own_names = local_names()  # Host names a browser on this PC may use (see auth.host_ok)
     refused: dict[str, dict] = {}  # addresses the allow-list turned away, for the audit log and the alert list
 
     def note_refused(client: str, path: str) -> None:
@@ -477,6 +478,10 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         if allow is not None and not client_allowed(client, allow):
             note_refused(client, request.url.path)
             return PlainTextResponse("Forbidden", status_code=403, headers=SECURITY_HEADERS)
+        if _is_loopback(client) and not host_ok(request.headers.get("host"), own_names):
+            log.warning("refused a request from this PC for host %r (not this PC's name)", request.headers.get("host"))
+            return PlainTextResponse("Forbidden: open Ghost Map as localhost, 127.0.0.1 or this PC's name",
+                                     status_code=403, headers=SECURITY_HEADERS)
         if request.method not in ("GET", "HEAD") and not request.headers.get(CSRF_HEADER):
             return JSONResponse({"detail": "missing X-Ghostmap header"}, status_code=403, headers=SECURITY_HEADERS)
         session = sessions.get(request.cookies.get(SESSION_COOKIE))
