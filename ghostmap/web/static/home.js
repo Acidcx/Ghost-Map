@@ -121,7 +121,7 @@ async function cardNetwork() {
   const st = swBad || lc.err ? "err" : swEvents || lc.warn || scan?.errors ? "warn" : live || sws.length || scan ? "ok" : "";
   return card({ title: "Network", icon, state: st, go: "live",
     big: live ? hNum(live.devices?.length) : scan ? hNum(scan.devices) : "-", bigSub: live ? "devices heard" : scan ? "devices in the last scan" : "",
-    body: kv([sws.length ? ["Switches", `${sws.length - swBad}/${sws.length} answering`, swBad ? "err" : ""] : ["Switches", "not watched"],
+    body: kv([sws.length ? ["Switches", `${sws.length - swBad}/${sws.length} answering`, swBad ? "err" : ""] : null,
       sws.length ? ["Switch events", hNum(swEvents), swEvents ? "warn" : ""] : null,
       live ? ["Live events", `${hNum(lc.err || 0)} err, ${hNum(lc.warn || 0)} warn`, lc.err ? "err" : lc.warn ? "warn" : ""] : null,
       scan ? ["Last scan", `${hNum(scan.errors)} err, ${hNum(scan.warnings)} warn <small class="muted">${esc(new Date(scan.started).toLocaleDateString([], { month: "short", day: "numeric" }))}</small>`, scan.errors ? "err" : scan.warnings ? "warn" : ""] : null]) });

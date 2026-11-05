@@ -87,19 +87,22 @@ document.querySelectorAll("#groups button").forEach((b) =>
 const SCANLESS_TABS = ["home", "opcua", "machine", "production", "tscconn", "tsclogs", "service", "counters", "hostpc", "probe", "live", "traffic"];  // tabs that work without any scan loaded
 const isViewer = () => document.body.classList.contains("viewer");
 const tabGroup = (name) => document.querySelector(`#tabs button[data-tab="${name}"]`)?.closest(".tabgroup")?.dataset.group;
+// A tab button can be hidden for a viewer (admin-only) or while no switch is read over SNMP (snmp-only).
+const usable = (b) => b && !(b.classList.contains("admin-only") && isViewer()) && !(b.classList.contains("snmp-only") && !document.body.classList.contains("snmp"));
+const firstUsable = (group) => [...document.querySelectorAll(`#tabs .tabgroup[data-group="${group}"] button`)].find(usable)?.dataset.tab;
 function showGroup(group) {
   let name = null;
   try { name = localStorage.getItem(`gm.tab.${group}`); } catch (_) { /* ignore */ }
-  const usable = (b) => b && !(b.classList.contains("admin-only") && isViewer());
   if (!usable(document.querySelector(`#tabs button[data-tab="${name}"]`)) || tabGroup(name) !== group) {
-    name = [...document.querySelectorAll(`#tabs .tabgroup[data-group="${group}"] button`)].find(usable)?.dataset.tab;
+    name = firstUsable(group);
   }
   showTab(name || "home");
 }
 function showTab(name) {
-  // A tab remembered from an admin login is hidden for a viewer: fall back to the first visible one.
+  // A tab remembered from an admin login (or from when switches were read) may be hidden now: fall back to the first
+  // visible one in its group.
   const btn = document.querySelector(`#tabs button[data-tab="${name}"]`);
-  if (!btn || (btn.classList.contains("admin-only") && isViewer())) name = "home";
+  if (!usable(btn)) name = (btn && firstUsable(tabGroup(name))) || "home";
   const group = tabGroup(name);
   const free = SCANLESS_TABS.includes(name);
   document.querySelectorAll("#groups button").forEach((b) => b.classList.toggle("active", b.dataset.group === group));
@@ -113,9 +116,24 @@ function showTab(name) {
   document.dispatchEvent(new CustomEvent("gm:tab", { detail: name }));
 }
 
+// ------------------------------------------------------------------ switch pages (SNMP)
+// Switches, Traffic and the SNMP bits of Probe only show once SNMP is in use: a stored scan read a switch, or the
+// traffic monitor is set up. Machines without switch SNMP don't get pages that can only ever be empty.
+async function updateSnmp() {
+  let nm = null;
+  try { nm = await api("api/netmon/status"); } catch (_) { /* ignore */ }
+  const on = (state.scans || []).some((s) => s.switches > 0) || !!nm?.configured;
+  const was = document.body.classList.contains("snmp");
+  document.body.classList.toggle("snmp", on);
+  const dlgSnmp = document.getElementById("scanSnmp");
+  if (dlgSnmp && on && !was) dlgSnmp.open = true;
+  return on;
+}
+
 // ------------------------------------------------------------------ scans
 async function refreshScans(selectId) {
   state.scans = await api("api/scans");
+  await updateSnmp();
   const opts = state.scans.map((s) => {
     const label = s.label ? ` - ${s.label}` : "";
     return `<option value="${esc(s.id)}">${esc(s.id)}${esc(label)} (${s.devices} dev, ${s.errors}E/${s.warnings}W)</option>`;
@@ -160,8 +178,8 @@ function renderOverview() {
   const count = (sev) => s.findings.filter((f) => f.severity === sev).length;
   const ports = s.switches.flatMap((sw) => sw.ports.filter((p) => [6, 117].includes(p.if_type)));
   const tiles = [
-    ["Devices", s.devices.length], ["EtherNet/IP", cip], ["Switches", s.switches.length],
-    ["Ports up", `${ports.filter((p) => p.oper_status === "up").length}/${ports.length}`],
+    ["Devices", s.devices.length], ["EtherNet/IP", cip],
+    ...(s.switches.length ? [["Switches", s.switches.length], ["Ports up", `${ports.filter((p) => p.oper_status === "up").length}/${ports.length}`]] : []),
     ["Errors", count("error"), "err"], ["Warnings", count("warning"), "warn"],
   ];
   $("#tiles").innerHTML = tiles.map(([l, n, c]) => `<div class="tile ${c || ""}"><div class="n">${esc(n)}</div><div class="l">${esc(l)}</div></div>`).join("");
@@ -415,6 +433,8 @@ function openScan() { $("#jobLog").classList.add("hidden"); $("#scanGo").disable
 $("#newScanBtn").addEventListener("click", openScan);
 $("#emptyScan").addEventListener("click", openScan);
 $("#scanCancel").addEventListener("click", () => dlg.close());
+// A field the browser refuses inside the folded SNMP section would block Start scan with no visible reason: unfold it.
+form.addEventListener("invalid", (e) => { const d = e.target.closest("details"); if (d) d.open = true; }, true);
 form.snmp_version.addEventListener("change", () => {
   const v3 = form.snmp_version.value === "3";
   form.querySelectorAll(".v3").forEach((el) => el.classList.toggle("hidden", !v3));

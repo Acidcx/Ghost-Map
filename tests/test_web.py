@@ -40,6 +40,33 @@ def test_index_and_static(client):
     assert client.get("/static/app.js").status_code == 200
 
 
+def test_switch_pages_only_with_snmp(client):
+    """Machines without switch SNMP don't get the Switches/Traffic pages: they are marked snmp-only, and the scan list
+    and traffic monitor status say whether SNMP is in use (a scan read a switch, or the monitor is set up)."""
+    html = client.get("/").text
+    assert 'data-tab="switches" class="snmp-only"' in html and 'data-tab="traffic" class="snmp-only"' in html
+    assert '<details id="scanSnmp">' in html
+    assert "switches" in client.get("/api/scans").json()[0]
+    assert "configured" in client.get("/api/netmon/status").json()
+
+
+def test_number_inputs_default_values_are_valid(client):
+    """A default the browser rejects (value 2 with min 0.2 and step 0.5) blocks Start scan with only a tooltip."""
+    import re
+    from decimal import Decimal
+
+    html = client.get("/").text
+    checked = 0
+    for tag in re.findall(r"<input[^>]*type=\"number\"[^>]*>", html):
+        attrs = dict(re.findall(r'(\w+)="([^"]*)"', tag))
+        if "value" not in attrs or attrs.get("step", "1") == "any":
+            continue
+        base, step, value = Decimal(attrs.get("min", "0")), Decimal(attrs.get("step", "1")), Decimal(attrs["value"])
+        assert (value - base) % step == 0, f"{attrs.get('name')}: {value} is not min {base} + n * step {step}"
+        checked += 1
+    assert checked >= 3
+
+
 def test_scans_api(client):
     scans = client.get("/api/scans").json()
     assert {s["id"] for s in scans} == {"demo-today", "demo-baseline"}

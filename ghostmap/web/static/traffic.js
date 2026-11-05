@@ -329,6 +329,7 @@ $("#nForm").addEventListener("submit", async (ev) => {
   try {
     await api("api/netmon/config", { method: "POST", body: JSON.stringify(netForm()) });
     $("#nTestOut").innerHTML = `<span class="oktext">Saved. The first rates appear after two polls.</span>`;
+    updateSnmp();
     netLoadSettings();
     netPoll();
   } catch (e) { $("#nErr").textContent = e.message; }
@@ -339,6 +340,7 @@ $("#nClear").addEventListener("click", async () => {
   try {
     await api("api/netmon/config", { method: "DELETE" });
     $("#nTestOut").innerHTML = "";
+    if (!(await updateSnmp())) { showTab("devices"); return; }
     netLoadSettings();
     netPoll();
   } catch (e) { $("#nErr").textContent = e.message; }

@@ -128,6 +128,7 @@ ghostmap discover 127.0.10.0/24
   - **Devices**: a sortable, filterable inventory. Click a device for its full CIP identity, decoded status word, related findings, and a one-click probe.
   - **Switches**: a port faceplate coloured by health, a port table, and per-port detail (counters, neighbours, MACs mapped to devices).
   - **Traffic**: the traffic monitor for the machine's switches (see below).
+  - **Switches** and **Traffic** only show once SNMP is in use: a scan has read a switch, or the traffic monitor is set up. A machine whose switches aren't set up for SNMP doesn't get pages that could only be empty. To turn them on, open **Switches over SNMP (optional)** in the New scan dialog (see [docs/SNMP-SETUP.md](docs/SNMP-SETUP.md)).
   - **Compare**: the diff of any two scans.
 - **System** (right of the groups; viewers see only This PC)
   - **This PC**: the health of the PC Ghost Map runs on (the HMI). Disk space, memory, CPU and uptime every minute; every 5 minutes the FactoryTalk and Rockwell services (one that is set to start automatically but isn't running is flagged) and the errors in the Windows System and Application logs over the last 24 hours, grouped by source. Ghost Map only looks: it never starts or stops a service.
