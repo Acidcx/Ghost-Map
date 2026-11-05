@@ -219,19 +219,24 @@ Ghost Map refuses to serve beyond localhost without `--allow` and at least one l
 
 ## Preparing a Stratix switch
 
-Ghost Map needs read-only SNMP. These are example IOS / IOS-XE settings (Stratix 5200/5400/5410/5700/5800, or the equivalent in Device Manager / the WebUI):
+Ghost Map needs read-only SNMP. **Step by step, with how to test it and what each error means: [docs/SNMP-SETUP.md](docs/SNMP-SETUP.md).** These are example IOS / IOS-XE settings (Stratix 5200/5400/5410/5700/5800, or the equivalent in Device Manager / the WebUI). The access list must hold every PC that reads the switch: the HMI running the service, plus the engineering laptop if you scan from it.
 
 ```
-! v2c, restricted to the engineering laptop
+! only these PCs may read (HMI, engineering laptop)
 access-list 10 permit host 192.168.1.250
-snmp-server community <ro-string> RO 10
+access-list 10 permit host 192.168.1.251
 
-! or v3 (preferred)
+! v3 (preferred); keys at least 8 characters
 snmp-server view GHOSTMAP iso included
-snmp-server group GHOSTMAP v3 priv read GHOSTMAP
-snmp-server group GHOSTMAP v3 priv context vlan- match prefix read GHOSTMAP
-snmp-server user ghostmap GHOSTMAP v3 auth sha <auth-key> priv aes 128 <priv-key>
+snmp-server group GHOSTMAP v3 priv read GHOSTMAP access 10
+snmp-server group GHOSTMAP v3 priv context vlan- match prefix read GHOSTMAP access 10
+snmp-server user ghostmap GHOSTMAP v3 auth sha <auth-key> priv aes 128 <priv-key> access 10
+
+! or v2c
+snmp-server community <ro-string> RO 10
 ```
+
+Finish with `write memory`, or the switch forgets it at the next power cycle. Test from the PC with `GhostMap.exe switch <switch-ip> --snmp-version 3 --v3-user ghostmap` before scanning.
 
 **Several switches on one machine** (e.g. a line of Stratix 5200s, which run IOS-XE): list them all under *Switch IPs*, or just give SNMP credentials and let discovery add every Stratix it finds. All switches are read with the same credentials and at the same time. Ghost Map works out which ports link switches together (from LLDP/CDP, or from the switches' own MAC addresses when both are off), so each device is placed on the switch port it is actually plugged into.
 
