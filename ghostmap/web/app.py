@@ -54,6 +54,7 @@ from ghostmap.web.tsc import TscService, error_text as tsc_error
 UA_IDLE_S = 600        # close OPC UA sessions nobody has used for 10 minutes (re-opened on next use)
 UA_FORGET_S = 8 * 3600  # forget them (and the login kept for re-opening) after 8 hours
 UA_MAX_SESSIONS = 4
+HEALTH_CACHE_S = 5.0   # Machine > Device health: one read per dashboard at most this often, whoever is looking
 DEMO_UA_PORT = 4899    # not 4990, so the demo never collides with a real FT Linx Gateway on the HMI
 
 CLIENT_LOG_PER_MIN = 30  # browser error reports accepted per client per minute
@@ -917,9 +918,10 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
         axis = next((x for a in dash["layout"]["areas"] for x in a.get("axes", []) if (x["base"] == base if base else x["name"] == name)), None)
         if axis is None:
             raise HTTPException(404, "no such axis")
-        prefix = axis["base"] + "."
-        members = {nid[len(prefix):]: (nid, typ) for _, nid, typ, _ in dashboards.load_tags(dash_id)
-                   if nid.startswith(prefix) and "." not in nid[len(prefix):]}
+        # From the cached index of the tag export, not the export itself: Details refreshes every 2 s while open,
+        # and parsing a whole controller's export each time kept a CPU core busy per open axis.
+        index = await asyncio.to_thread(dashboards.health_index, dash_id)
+        members = next((a["all"] for a in index["axes"] if a["base"] == axis["base"]), {})
         bits = [m for m, (_, typ) in members.items() if typ == "Boolean"
                 and _re.search(r"(Fault|Alarm|Inhibit|Status)$", m)]
         wanted = [m for group in AXIS_DETAIL.values() for m in group if m in members]
@@ -937,6 +939,49 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
                 "groups": {g: [{"name": m, "label": humanize(m), "value": val[m]} for m in ms if m in members]
                            for g, ms in AXIS_DETAIL.items() if any(m in members for m in ms)},
                 "at": time.time()}
+
+    health_cache: dict[str, dict] = {}
+    health_locks: dict[str, asyncio.Lock] = {}
+
+    @app.get("/api/dashboards/{dash_id}/devhealth")
+    async def dashboard_device_health(dash_id: str):
+        """Machine > Device health: each axis's thermal model and thermal bits, I/O module fault words, produced/
+        consumed connections and FT Linx's controller diagnostics, read once (read-only) and shared by every
+        viewer for ``HEALTH_CACHE_S``."""
+        from ghostmap.analysis.devhealth import evaluate, read_list
+
+        dash = load_dashboard(dash_id)
+        async with health_locks.setdefault(dash_id, asyncio.Lock()):
+            hit = health_cache.get(dash_id)
+            if hit and time.time() - hit["at"] < HEALTH_CACHE_S:
+                return hit
+            index = await asyncio.to_thread(dashboards.health_index, dash_id)
+            ids = read_list(index)
+            if not ids:
+                out = {"ok": True, "error": None, "at": time.time(), "tags": 0, **evaluate(index, {}, [])}
+            else:
+                r = await live.read_once(dash, ids)
+                out = {"ok": r["ok"], "error": r["error"], "at": time.time(), "tags": len(ids),
+                       **evaluate(index, r["values"] if r["ok"] else {}, r["bad"] if r["ok"] else [])}
+            health_cache[dash_id] = out
+            return out
+
+    @app.get("/api/devhealth/devices")
+    def device_health(scan: str = ""):
+        """Machine > Device health: every EtherNet/IP device in a scan (the newest by default) with its health."""
+        from ghostmap.analysis.devhealth import device_rows
+
+        metas = sorted(store.list(), key=lambda x: x.get("started") or "", reverse=True)
+        sid = scan or (metas[0]["id"] if metas else "")
+        if not sid:
+            return {"scan": None, "devices": [], "other": 0}
+        try:
+            res = store.load(sid)
+        except KeyError:
+            raise HTTPException(404, "scan not found")
+        rows = device_rows(res)
+        return {"scan": {"id": res.id, "started": res.started, "finished": res.finished}, "devices": rows,
+                "other": sum(1 for d in res.devices if d.identity is None)}
 
     @app.post("/api/dashboards/{dash_id}/rebuild")
     def rebuild_dashboard(dash_id: str, request: Request):
