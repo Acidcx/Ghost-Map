@@ -12,6 +12,8 @@ import typing
 from dataclasses import dataclass, field
 from typing import Any, Optional, Union
 
+from ghostmap.protocols.cip_tables import VENDOR_ROCKWELL_SOFTWARE
+
 
 @dataclass
 class CipIdentity:
@@ -220,6 +222,10 @@ class Device:
     def key(self) -> str:
         """Stable identity used to track a device across scans."""
         if self.identity is not None:
+            if self.identity.vendor_id == VENDOR_ROCKWELL_SOFTWARE and self.identity.product_name.strip():
+                # RSLinx / FT Linx on a PC: the serial comes from the install, so PCs cloned from one disk image share
+                # it. The product name is the PC's hostname, which is unique on the network.
+                return f"cip:{VENDOR_ROCKWELL_SOFTWARE}:host:{self.identity.product_name.strip().lower()}"
             return f"cip:{self.identity.vendor_id}:{self.identity.serial_hex}"
         if self.mac:
             return f"mac:{self.mac}"
