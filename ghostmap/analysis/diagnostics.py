@@ -196,13 +196,33 @@ def run_diagnostics(
                         "Duplicate IP address. Disconnect devices one at a time or check rotary switches/BOOTP."))
 
     serial_ips: dict[tuple[int, int], set[str]] = defaultdict(set)
+    serial_names: dict[tuple[int, int], set[str]] = defaultdict(set)
     for d in identities:
         serial_ips[(d.identity.vendor_id, d.identity.serial)].add(d.source_ip)
+        serial_names[(d.identity.vendor_id, d.identity.serial)].add(d.identity.product_name.strip().lower())
     for (vendor, serial), ips in serial_ips.items():
-        if len(ips) > 1 and serial != 0:
-            add(Finding("info", "device.multi_ip", ", ".join(sorted(ips)),
-                        f"Device serial {serial:08X} answers on {len(ips)} IPs.",
+        if len(ips) < 2 or serial == 0:
+            continue
+        where = ", ".join(sorted(ips))
+        if len(serial_names[(vendor, serial)]) < 2:
+            # One device answering on several IPs (dual-IP adapter, a PC with two NICs on the network).
+            add(Finding("info", "device.multi_ip", where, f"Device serial {serial:08X} answers on {len(ips)} IPs.",
                         "Normal for multi-port modules (e.g. dual-IP adapters); otherwise check for cloned serials."))
+        elif vendor == cip_tables.VENDOR_ROCKWELL_SOFTWARE:
+            # Seen on site: two HMIs imaged from one disk answered with the same FT Linx serial and kept knocking each
+            # other's PLC connections off (the serial is part of the ID of every connection the PC opens).
+            add(Finding("error", "device.cloned_serial", where,
+                        f"{len(ips)} PCs share the RSLinx / FactoryTalk Linx serial {serial:08X} (likely cloned from one "
+                        "disk image).",
+                        "A PLC can treat their connections as one and drop them in turn: the HMIs take turns losing "
+                        "communication. Give one PC a new serial: back up its Linx configuration, then repair or "
+                        "reinstall FactoryTalk Linx (ask Rockwell TechConnect for their procedure for cloned PCs) and "
+                        "rescan. Until then, run one of them at a time."))
+        else:
+            add(Finding("error", "device.cloned_serial", where,
+                        f"{len(ips)} different devices share the serial {serial:08X}.",
+                        "Serials should be unique per vendor. Check the devices' labels; a cloned or mis-programmed "
+                        "identity can make a controller confuse their connections."))
 
     # ---------------------------------------------------------- CIP device health
     for dev in devices:

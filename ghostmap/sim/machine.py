@@ -112,6 +112,13 @@ def demo_machine(variant: str = "today", chain: bool = False) -> tuple[list[SimD
                                                                      status=0x0025 if today else 0x0065, serial=0x0BADF00E)),
         SimDevice("192.168.1.40", "00:00:bc:dd:00:40", "Fa1/6", _cip("PanelView 5510", device_type=0x18, product_code=300,
                                                                      revision=(6, 11), status=0x0030, serial=0x00FACADE)),
+        # Two HMI PCs running FactoryTalk Linx, which answers ListIdentity as vendor 77 with the hostname as its
+        # product name. Today the second was re-imaged from the first's disk and shares its serial (seen on site).
+        SimDevice("192.168.1.45", "18:66:da:00:01:45", "Fa1/6", _cip("HMI-01", vendor_id=77, product_code=2,
+                                                                     revision=(6, 40), status=0x0030, serial=0x118D5DE1)),
+        SimDevice("192.168.1.46", "18:66:da:00:01:46", "Fa1/6", _cip("HMI-02", vendor_id=77, product_code=2,
+                                                                     revision=(6, 40), status=0x0030,
+                                                                     serial=0x118D5DE1 if today else 0x2A7C0B13)),
     ]
     if today:
         devices += [
