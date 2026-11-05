@@ -179,7 +179,9 @@ def test_dashboard_from_simulated_leveler(ua):
     assert areas["Hydraulics"]["timers"] and areas["Production"]["counters"]
     axis = areas["Motion axes"]["axes"][0]
     assert axis["name"] == "Ax_Leveler_Roll" and "CIPAxisState" in axis["members"]
-    assert L["summary"]["excluded"] == 101  # Local:1:I and the Recipe_Length array
+    # I/O module tags (Local:1:I.Data and four module fault words), the Recipe_Length array and FT Linx's
+    # Diagnostic Items are left out of the layout.
+    assert L["summary"]["excluded"] == 113
     assert not any("Recipe" in a["id"] for a in L["areas"])
     assert c.get("/api/dashboards").json()[0]["id"] == dash["id"]
     assert L["machine"]["running"][0].endswith("Production.Line_Running")  # not Auto_Batch_Runout
@@ -197,8 +199,24 @@ def test_dashboard_from_simulated_leveler(ua):
     estop = next(a for a in areas["General"]["alarms"] if a["name"] == "E_Stop_Flt")
     assert estop["node_id"] in vals["values"] and axis["members"]["ActualPosition"] in vals["values"]
     detail = c.get(f"/api/dashboards/{dash['id']}/axis", params={"name": "Ax_Leveler_Roll"}).json()
-    assert detail["ok"] and detail["checked"] == 6
+    assert detail["ok"] and detail["checked"] == 10
     assert "ActualPosition" in [m["name"] for m in detail["groups"]["Motion"]] and "Fault words" in detail["groups"]
+
+    # Device health: both axes' thermal model, the module fault words, the consumed tag and FT Linx's diagnostics.
+    h = c.get(f"/api/dashboards/{dash['id']}/devhealth").json()
+    assert h["ok"], h
+    drives = {x["name"]: x for x in h["drives"]}
+    assert set(drives) == {"Ax_Leveler_Roll", "Ax_Uncoiler"}
+    assert set(drives["Ax_Uncoiler"]["capacity"]) == {"MotorCapacity", "InverterCapacity", "ConverterCapacity", "BusRegulatorCapacity"}
+    assert drives["Ax_Uncoiler"]["capacity"]["MotorCapacity"] is not None and drives["Ax_Uncoiler"]["thermal_checked"] == 4
+    assert drives["Ax_Leveler_Roll"]["values"]["DCBusVoltage"] == 650.0
+    io = {x["name"]: x for x in h["io"]}
+    assert io["Exit_Rem:2"]["level"] == "error" and io["Exit_Rem:2"]["issues"][0]["code"] == "module.connection_lost"
+    assert io["Local:1"]["level"] == "ok" and io["Exit_Line_Data"]["level"] == "ok"
+    ctl = h["controllers"][0]
+    assert ctl["items"]["Mode"] == "Remote Run" and [i["code"] for i in ctl["issues"]] == ["gateway.drops"]
+    assert h["summary"]["io_faulted"] == 1 and h["tags"] > 20
+    assert c.get(f"/api/dashboards/{dash['id']}/devhealth").json()["at"] == h["at"]  # shared for a few seconds
 
     # Editing: tags are picked from the dashboard's own export, not typed in.
     found = c.get(f"/api/dashboards/{dash['id']}/tags", params={"q": "coil count"}).json()

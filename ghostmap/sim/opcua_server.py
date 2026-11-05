@@ -23,6 +23,7 @@ certificate, like a reinstalled gateway.
 from __future__ import annotations
 
 import asyncio
+import math
 import random
 import socket
 from pathlib import Path
@@ -75,6 +76,21 @@ LEVELER_AXIS = {"CIPAxisState": 4, "AxisFault": 0, "CIPAxisFaults": 0, "CIPAxisA
                 "MotorCapacity": 0.0, "TorqueLimitPositive": 200.0, "VelocityLoopBandwidth": 13.5,
                 "BusUndervoltageFault": False, "BusUndervoltageAlarm": False, "MotorOvertemperatureFault": False,
                 "ExcessivePositionErrorFault": False, "FeedbackSignalLossFLFault": False, "EnableInputDeactivatedAlarm": False}
+# Thermal model, power values and over-temperature / overload bits (Machine > Device health). Kinetix publishes
+# no temperatures: the capacities (% of rated) are its thermal model.
+LEVELER_AXIS.update({"InverterCapacity": 0.0, "ConverterCapacity": 0.0, "BusRegulatorCapacity": 0.0,
+                     "OutputCurrent": 0.0, "OutputPower": 0.0,
+                     "MotorThermalOverloadULAlarm": False, "MotorThermalOverloadFLFault": False,
+                     "InverterOvertemperatureFLAlarm": False, "InverterThermalOverloadULAlarm": False})
+# A second axis whose motor runs warm: its capacity creeps past 80 % and its thermal alarm comes on.
+UNCOILER_AXIS = {k: v for k, v in LEVELER_AXIS.items() if k != "MotorOvertemperatureFault"}
+UNCOILER_AXIS.update({"DCBusVoltage": 648.0, "TorqueLimitPositive": 150.0})
+# I/O module fault words (0 = fine, all ones = no connection), a consumed tag's connection status, and FT Linx's
+# Diagnostic Items for the controller.
+LEVELER_MODULES = {"Local:1:I": 0, "Local:2:I": 0, "Exit_Rem:1:I": 0, "Exit_Rem:2:I": -1}
+LEVELER_DIAG = {"@Mode": "Remote Run", "@Revision": "Revision: 33.11", "@Status": "OK", "@ConnectionsDropped": 2,
+                "@LastConnectionDropTime": "11/04/2026  6:12:09.104 am", "@AveragePacketResponse": 9,
+                "@CLXPresentScanTime": 120, "@CLXMaxScanTime": 310}
 LEVELER_PRODUCTION = {"Auto_Batch_Runout": False, "Line_Running": True, "Auto_Mode": True, "Line_Speed_FPM": 120.0,
                       "Coil_Length_Ft": 0.0, "Footage_Count": 3_481_220, "Coil_Count": 1_874}
 
@@ -187,12 +203,25 @@ class SimUaServer:
         axis_nodes = {}
         for name, v in LEVELER_AXIS.items():
             axis_nodes[name] = await self._var(axis, ns, f"{sc}Ax_Leveler_Roll.{name}", name, v)
-        mod = await obj(folder, f"{sc}Local:1:I", "Local:1:I")
-        await self._var(mod, ns, f"{sc}Local:1:I.Data", "Data", 0)
+        unc = await obj(folder, f"{sc}Ax_Uncoiler", "Ax_Uncoiler")
+        unc_nodes = {}
+        for name, v in UNCOILER_AXIS.items():
+            unc_nodes[name] = await self._var(unc, ns, f"{sc}Ax_Uncoiler.{name}", name, v)
+        for mname, fault in LEVELER_MODULES.items():
+            mod = await obj(folder, f"{sc}{mname}", mname)
+            if mname == "Local:1:I":
+                await self._var(mod, ns, f"{sc}{mname}.Data", "Data", 0)
+            await self._var(mod, ns, f"{sc}{mname}.Fault", "Fault", fault)
+        consumed = await obj(folder, f"{sc}Exit_Line_Data", "Exit_Line_Data")
+        cstat = await obj(consumed, f"{sc}Exit_Line_Data.Connection_Status", "Connection_Status")
+        await self._var(cstat, ns, f"{sc}Exit_Line_Data.Connection_Status.ConnectionFaulted", "ConnectionFaulted", False)
+        diag = await obj(folder, f"{sc}Diagnostic Items", "Diagnostic Items")
+        for name, v in LEVELER_DIAG.items():
+            await self._var(diag, ns, f"{sc}{name}", name, v)
         recipe = await obj(prod, f"{base}.Production.Recipe_Length", "Recipe_Length")
         for i in range(100):
             await self._var(recipe, ns, f"{base}.Production.Recipe_Length[{i}]", f"Recipe_Length[{i}]", 0.0)
-        self._lev = {"axis": axis_nodes, "bits": bits, "prod": nodes, "active": None, "ft": float(LEVELER_PRODUCTION["Footage_Count"]),
+        self._lev = {"axis": axis_nodes, "uncoiler": unc_nodes, "bits": bits, "prod": nodes, "active": None, "ft": float(LEVELER_PRODUCTION["Footage_Count"]),
                      "coil_ft": 0.0, "coils": LEVELER_PRODUCTION["Coil_Count"], "hb": hb}
 
     async def _tick_leveler(self, n: int):
@@ -241,7 +270,25 @@ class SimUaServer:
         lev["pos"] = (lev["pos"] + vel) % 360
         await ax["ActualVelocity"].write_value(ua.Variant(vel, ua.VariantType.Float))
         await ax["ActualPosition"].write_value(ua.Variant(lev["pos"], ua.VariantType.Float))
-        await ax["MotorCapacity"].write_value(ua.Variant(35.0 + random.uniform(-2, 2) if vel else 0.0, ua.VariantType.Float))
+        # A thermal model cools slowly, so capacity doesn't drop to zero the moment the axis stops.
+        await ax["MotorCapacity"].write_value(ua.Variant(35.0 + random.uniform(-2, 2), ua.VariantType.Float))
+        await self._drive_load(ax, 1.0 if vel else 0.3, 0.0)
+        # The uncoiler's motor warms up over ten minutes and cools again: 72 % to about 92 %, starting warm.
+        warm = 84.0 + 8.0 * math.sin(2 * math.pi * n / 600)
+        await self._drive_load(lev["uncoiler"], 1.0 if running else 0.3, warm)
+
+    async def _drive_load(self, ax: dict, load: float, motor_pct: float) -> None:
+        """Thermal model and power values for one simulated axis (``motor_pct`` 0 = leave MotorCapacity alone)."""
+        F, B = ua.VariantType.Float, ua.VariantType.Boolean
+        if motor_pct:
+            await ax["MotorCapacity"].write_value(ua.Variant(motor_pct + random.uniform(-1, 1), F))
+        inv = (40.0 if motor_pct < 1 else motor_pct * 0.75) * load + random.uniform(0, 2)
+        await ax["InverterCapacity"].write_value(ua.Variant(inv, F))
+        await ax["ConverterCapacity"].write_value(ua.Variant(28.0 * load + random.uniform(0, 2), F))
+        await ax["BusRegulatorCapacity"].write_value(ua.Variant(4.0 * load + random.uniform(0, 1), F))
+        await ax["OutputCurrent"].write_value(ua.Variant(round(12.5 * load * (1 + motor_pct / 100) + random.uniform(-0.3, 0.3), 2), F))
+        await ax["OutputPower"].write_value(ua.Variant(round(4.1 * load * (1 + motor_pct / 100), 2), F))
+        await ax["MotorThermalOverloadULAlarm"].write_value(ua.Variant(motor_pct >= 85.0, B))
 
     async def _tick(self):
         counts = {node: start for node, start in self._counters}

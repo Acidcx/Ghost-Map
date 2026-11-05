@@ -41,7 +41,8 @@
     <span class="tabgroup" data-group="home">
       <button data-tab="home" class="active">Overview</button></span>
     <span class="tabgroup hidden" data-group="machine">
-      <button data-tab="machine">Dashboard</button></span>
+      <button data-tab="machine">Dashboard</button>
+      <button data-tab="health">Device health</button></span>
     <span class="tabgroup hidden" data-group="production">
       <button data-tab="production">Line</button></span>
     <span class="tabgroup hidden" data-group="maintenance">
@@ -103,6 +104,22 @@
       <div class="tiles" id="mTiles"></div>
       <nav class="mnav" id="mNav"></nav>
       <div id="mAreas"></div>
+    </section>
+
+    <section id="tab-health" class="tab hidden">
+      <div class="panel">
+        <div class="toolbar">
+          <label id="dhDashWrap">Machine <select id="dhDash"></select></label>
+          <span id="dhLive" class="small muted"></span>
+          <span class="grow"></span>
+          <label class="small"><input type="checkbox" id="dhOnly"> Only problems</label>
+        </div>
+        <p class="small muted">Read-only. Drives, I/O modules and the controller are read from the PLC through FactoryTalk Linx Gateway (OPC UA)
+          every 10 s while this page is open. Network devices are from the last scan. Each problem says what to check.</p>
+        <div id="dhNote"></div>
+      </div>
+      <div class="tiles" id="dhTiles"></div>
+      <div id="dhBody"></div>
     </section>
 
     <section id="tab-production" class="tab hidden">
@@ -619,6 +636,7 @@
   <script src="static/app.js"></script>
   <script src="static/opcua.js"></script>
   <script src="static/machine.js"></script>
+  <script src="static/health.js"></script>
   <script src="static/production.js"></script>
   <script src="static/home.js"></script>
   <script src="static/tsclogs.js"></script>
