@@ -16,6 +16,10 @@ After Ghost Map was seen using about 50% CPU on a Test HMI (killed and restarted
   something outside Python (a network filter driver or security software) shuts it down, the loop re-reads it
   forever at 100% of a core until restarted (CPython gh-156333, not fixed upstream). Ghost Map now makes a new pair
   and logs a warning instead. Unconfirmed as the cause on the HMI: the log line will say if it was.
+- **No more "CPU 100% busy for 5 minutes" right after a reboot.** Seen on the Test HMI: the service started two
+  minutes after boot, its first CPU sample covered the one second since it started (100% while Windows and
+  FactoryTalk were still starting), and the alert fired 12 s later. A CPU sample now spans at least 20 s and the
+  5-minute average needs four samples.
 - **One PowerShell read at a time.** Pages opened together right after a restart (Home, the alert bar, the start-up
   warm-up) each started their own services and event-log PowerShell read; they now share one.
 

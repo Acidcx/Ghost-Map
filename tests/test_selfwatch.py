@@ -210,3 +210,38 @@ def test_proactor_survives_a_shut_down_self_pipe():  # pragma: no cover - runs o
     finally:
         BaseProactorEventLoop._loop_self_reading = original
         loop.close()
+
+
+def test_cpu_alert_needs_minutes_not_one_boot_second(tmp_path, monkeypatch):
+    """Seen on the Test HMI (2026-11-06): the service started 2 min after boot, the first CPU sample covered the
+    one second since it started (100% while Windows and FactoryTalk were still starting) and the alert list said
+    "CPU 100% busy for 5 minutes" 12 s later. Every sample now spans at least 20 s, and the 5-minute average
+    needs four of them."""
+    from ghostmap.collectors import host
+
+    t = {"mono": 1000.0, "busy": 0.0, "total": 0.0}
+    monkeypatch.setattr(host.time, "monotonic", lambda: t["mono"])
+    monkeypatch.setattr(host.time, "time", lambda: 1_790_000_000 + t["mono"])
+    monkeypatch.setattr(host, "cpu_times", lambda: (t["busy"], t["total"]))
+
+    def run(seconds, pct):
+        t["mono"] += seconds
+        t["total"] += seconds
+        t["busy"] += seconds * pct / 100
+
+    mon = host.HostMonitor(tmp_path)
+    run(1, 100)  # boot: everything starting at once
+    mon.sample()
+    snap = mon.snapshot()
+    assert snap["cpu"]["now"] is None and snap["cpu"]["avg_5m"] is None
+    assert not [a for a in host_alerts(snap) if a["code"] == "hmi.cpu_high"]
+    for _ in range(4):  # then the normal 5-12% the HMI ran at
+        run(60, 7)
+        mon.sample()
+    snap = mon.snapshot()
+    assert 7 <= snap["cpu"]["avg_5m"] < 20  # the boot second is folded into the first minute
+    assert not [a for a in host_alerts(snap) if a["code"] == "hmi.cpu_high"]
+    for _ in range(6):  # really busy for 5 minutes still alerts
+        run(60, 97)
+        mon.sample()
+    assert [a for a in host_alerts(mon.snapshot()) if a["code"] == "hmi.cpu_high"]
