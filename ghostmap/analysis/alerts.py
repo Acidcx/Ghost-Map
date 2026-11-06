@@ -87,6 +87,15 @@ def host_alerts(snap: dict, now: Optional[float] = None) -> list[dict]:
                          "The HMI may respond slowly and screens update late.",
                          "Open Task Manager > Details and sort by CPU. Antivirus scans and Windows Update are the usual "
                          "suspects; schedule them outside production.", link))
+    gm = snap.get("ghostmap") or {}
+    if gm.get("busy"):
+        out.append(alert("hmi.ghostmap_busy", "hmi.ghostmap_busy", WARNING, "hmi",
+                         f"Ghost Map itself is using {_pct(gm.get('now_core'))} of a CPU core",
+                         f"For over a minute ({_pct(gm.get('now'))} of this PC's {gm.get('cores')} cores). It has "
+                         "written what it was doing to its debug log.",
+                         "Download the debug bundle (Settings > Debug log) and send it in so the cause can be fixed. "
+                         "Restarting the Ghost Map service brings it back down; the HMI's own screens are not affected "
+                         "unless the PC runs out of CPU.", link))
     for s in snap.get("services") or []:
         if (s.get("state") or "").lower() != "running" and _expected_running(s, now):
             name = s.get("display") or s.get("name")
