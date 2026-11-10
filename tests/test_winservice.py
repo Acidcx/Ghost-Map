@@ -199,3 +199,43 @@ def test_service_args_record_plain_http_choice(tmp_path):
     assert "--http" in ws.service_args(tmp_path, "0.0.0.0", 8470, ["10.187.0.0/16"])
     assert "--http" not in ws.service_args(tmp_path, "0.0.0.0", 8470, ["10.187.0.0/16"], https=True)
     assert "--http" not in ws.service_args(tmp_path, "127.0.0.1", 8470)
+
+
+def _fake_build(root, unpacked):
+    root.mkdir(parents=True)
+    (root / "GhostMap.exe").write_bytes(b"exe-" + root.name.encode())
+    if unpacked:
+        (root / ws.INTERNAL / "lib").mkdir(parents=True)
+        (root / ws.INTERNAL / "lib" / "new.pyd").write_bytes(b"new")
+    return root / "GhostMap.exe"
+
+
+def test_unpacked_build_is_copied_with_its_libraries_and_replaces_stale_ones(tmp_path):
+    target = tmp_path / "Program Files" / "GhostMap"
+    (target / ws.INTERNAL).mkdir(parents=True)
+    (target / ws.INTERNAL / "old.pyd").write_bytes(b"old")  # from an earlier version
+    exe = _fake_build(tmp_path / "download", unpacked=True)
+    assert ws.copy_program(exe, target, unpacked=True) == target / "GhostMap.exe"
+    assert (target / "GhostMap.exe").read_bytes() == b"exe-download"
+    assert (target / ws.INTERNAL / "lib" / "new.pyd").exists()
+    assert not (target / ws.INTERNAL / "old.pyd").exists()
+
+
+def test_single_file_exe_over_an_unpacked_install_removes_its_libraries(tmp_path):
+    target = tmp_path / "GhostMap"
+    _fake_build(target, unpacked=True)
+    exe = _fake_build(tmp_path / "onefile", unpacked=False)
+    ws.copy_program(exe, target, unpacked=False)
+    assert (target / "GhostMap.exe").read_bytes() == b"exe-onefile"
+    assert not (target / ws.INTERNAL).exists()
+
+
+def test_setup_installed_program_is_used_where_it_is(tmp_path):
+    target = tmp_path / "GhostMap"
+    exe = _fake_build(target, unpacked=True)
+    assert ws.copy_program(exe, target, unpacked=True) == exe
+    assert (target / ws.INTERNAL / "lib" / "new.pyd").exists()
+
+
+def test_plain_python_is_not_the_unpacked_build():
+    assert ws.is_unpacked() is False

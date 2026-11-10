@@ -144,16 +144,76 @@ jobs:
           if (-not (Test-Path "C:\ProgramData\GhostMap\history.db")) { throw "uninstall should keep the data" }
           Write-Host "Windows service: install, data carried over, restart after a crash, HTTPS upgrade, stop and uninstall OK"
 
+      - name: Build the unpacked exe and GhostMap-Setup.exe
+        shell: pwsh
+        env:
+          SIGN_PFX: ${{ secrets.GHOSTMAP_SIGN_PFX }}
+          SIGN_PFX_PASSWORD: ${{ secrets.GHOSTMAP_SIGN_PFX_PASSWORD }}
+        run: |
+          # The unpacked build (GhostMap.exe + _internal) starts without unpacking itself to %TEMP% each time.
+          python packaging/build_exe.py --onedir
+          if ($LASTEXITCODE -ne 0) { throw "unpacked build failed" }
+          .\dist\onedir\GhostMap\GhostMap.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "the unpacked exe does not start" }
+          if ($env:SIGN_PFX) {
+            .\packaging\sign_exe.ps1 -Path dist\onedir\GhostMap\GhostMap.exe -PfxBase64 $env:SIGN_PFX -PfxPassword $env:SIGN_PFX_PASSWORD
+          }
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; if ($LASTEXITCODE -ne 0) { throw "could not install Inno Setup" } }
+          $v = python -c "import ghostmap; print(ghostmap.__version__)"
+          & $iscc /Q "/DAppVersion=$v" packaging\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed ($LASTEXITCODE)" }
+          if ($env:SIGN_PFX) {
+            .\packaging\sign_exe.ps1 -Path dist\GhostMap-Setup.exe -PfxBase64 $env:SIGN_PFX -PfxPassword $env:SIGN_PFX_PASSWORD
+          }
+          Write-Host "GhostMap-Setup.exe $v, $([math]::Round((Get-Item dist\GhostMap-Setup.exe).Length / 1MB, 1)) MB"
+
+      - name: Setup smoke test (install, upgrade keeps settings, uninstall keeps data)
+        shell: pwsh
+        run: |
+          $pf = "C:\Program Files\GhostMap"
+          function Run-Setup($exe, $log) {
+            $p = Start-Process $exe -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/LOG=$log" -Wait -PassThru
+            if ($p.ExitCode -ne 0) {
+              Get-Content $log -Tail 40 -ErrorAction SilentlyContinue
+              Get-Content C:\ProgramData\GhostMap\logs\setup-service.log -ErrorAction SilentlyContinue
+              throw "$exe exited with $($p.ExitCode)"
+            }
+          }
+          Run-Setup .\dist\GhostMap-Setup.exe "$env:RUNNER_TEMP\setup1.log"
+          Get-Content C:\ProgramData\GhostMap\logs\setup-service.log
+          $svc = Get-CimInstance Win32_Service -Filter "Name='GhostMap'"
+          Write-Host "service: $($svc.State), $($svc.StartName), $($svc.PathName)"
+          if ($svc.State -ne "Running" -or $svc.PathName -notlike "*$pf\GhostMap.exe*") { throw "the service is not running from $pf" }
+          if (-not (Test-Path "$pf\_internal")) { throw "the unpacked build was not installed" }
+          $info = Invoke-RestMethod http://127.0.0.1:8470/api/info
+          Write-Host "running $($info.version) from $pf, data $($info.data_dir)"
+          if ($info.data_dir -ne "C:\ProgramData\GhostMap") { throw "the service uses $($info.data_dir)" }
+          # Switch the installed service to HTTPS, then run Setup again: an upgrade must keep that.
+          & "$pf\GhostMap.exe" service install --https
+          if ($LASTEXITCODE -ne 0) { throw "service install --https from Program Files failed" }
+          Run-Setup .\dist\GhostMap-Setup.exe "$env:RUNNER_TEMP\setup2.log"
+          $tls = Invoke-RestMethod https://127.0.0.1:8470/api/info -SkipCertificateCheck
+          if (-not $tls.https) { throw "Setup's upgrade did not keep HTTPS" }
+          # Uninstall: service and program gone, data kept.
+          $p = Start-Process "$pf\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait -PassThru
+          foreach ($i in 1..60) { if (-not (Test-Path "$pf\GhostMap.exe")) { break }; Start-Sleep -Seconds 1 }
+          if (Get-Service GhostMap -ErrorAction SilentlyContinue) { throw "the service is still registered after uninstall" }
+          if (Test-Path "$pf\GhostMap.exe") { throw "the program is still in $pf after uninstall" }
+          if (-not (Test-Path "C:\ProgramData\GhostMap\history.db")) { throw "uninstall should keep the data" }
+          Write-Host "Setup: install, upgrade keeping HTTPS, uninstall keeping the data OK"
+
       - name: SHA-256 checksum
         shell: pwsh
         run: |
-          # Published next to the exe so whoever copies it to an HMI can check it is the file CI built:
-          # Get-FileHash GhostMap.exe in PowerShell must print the same hash. Taken after signing (signing changes it).
-          $s = Get-AuthenticodeSignature .\dist\GhostMap.exe
-          Write-Host "GhostMap.exe signature: $($s.Status) $($s.SignerCertificate.Subject)"
-          $h =(Get-FileHash .\dist\GhostMap.exe -Algorithm SHA256).Hash
-          "$h  GhostMap.exe" | Set-Content -Encoding ascii .\dist\GhostMap.exe.sha256
-          Write-Host "GhostMap.exe SHA-256 $h"
+          # Published next to each file so whoever copies it to an HMI can check it is the file CI built:
+          # Get-FileHash in PowerShell must print the same hash. Taken after signing (signing changes it).
+          foreach ($f in "GhostMap.exe", "GhostMap-Setup.exe") {
+            $s = Get-AuthenticodeSignature .\dist\$f
+            $h = (Get-FileHash .\dist\$f -Algorithm SHA256).Hash
+            "$h  $f" | Set-Content -Encoding ascii .\dist\$f.sha256
+            Write-Host "$f signature: $($s.Status) $($s.SignerCertificate.Subject); SHA-256 $h"
+          }
 
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6.0.0
         with:
@@ -161,6 +221,8 @@ jobs:
           path: |
             dist/GhostMap.exe
             dist/GhostMap.exe.sha256
+            dist/GhostMap-Setup.exe
+            dist/GhostMap-Setup.exe.sha256
 
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -169,3 +231,5 @@ jobs:
           files: |
             dist/GhostMap.exe
             dist/GhostMap.exe.sha256
+            dist/GhostMap-Setup.exe
+            dist/GhostMap-Setup.exe.sha256

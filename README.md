@@ -25,7 +25,11 @@ There are three ways to run Ghost Map. Each one opens the web UI in your browser
 
 ### On the machine's HMI: as a Windows service
 
-So Ghost Map runs from boot, records history whether or not anyone is logged on, and comes back by itself after a crash, install it as a service. From a Command Prompt opened with **Run as administrator**, in the folder with the downloaded exe:
+So Ghost Map runs from boot, records history whether or not anyone is logged on, and comes back by itself after a crash, install it as a service.
+
+**With Setup (recommended for HMIs).** Download **GhostMap-Setup.exe** from the same Actions run or Release and run it as an administrator. It installs the unpacked build in `C:\Program Files\GhostMap` and runs `service install` for you, so everything below applies. The unpacked build starts without unpacking itself to `%TEMP%` on every start, which is what made antivirus rescan the single-file exe each time (and it starts one process instead of two). A newer Setup upgrades in place and keeps the data and the service options; **Settings > Apps > Ghost Map > Uninstall** removes the service and the program and keeps the data. For several PCs: `GhostMap-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES` (add `/SERVICEARGS="--ixon"` for IXON access); exit code 10 means the service didn't start, see `C:\ProgramData\GhostMap\logs\setup-service.log`. Afterwards, the `service` commands below are run from `C:\Program Files\GhostMap\GhostMap.exe`.
+
+**With the single-file exe.** From a Command Prompt opened with **Run as administrator**, in the folder with the downloaded exe:
 
 ```bat
 GhostMap.exe service install

@@ -3,7 +3,8 @@
 ``GhostMap.exe service install`` (from an elevated prompt):
 
 - copies the exe to ``C:\\Program Files\\GhostMap`` (only administrators can replace it there; a service running
-  as LocalSystem must not start an exe that any user can overwrite),
+  as LocalSystem must not start an exe that any user can overwrite); for the unpacked build that GhostMap-Setup.exe
+  installs, the exe's ``_internal`` folder goes with it, and when Setup already put it there nothing is copied,
 - moves the data to ``C:\\ProgramData\\GhostMap``: the installing user's ``~/.ghostmap`` is copied there the first
   time, and the folder is limited to SYSTEM and Administrators (it holds the logins and saved passwords),
 - registers the service ``GhostMap`` (LocalSystem, delayed automatic start so the network and FactoryTalk
@@ -42,6 +43,7 @@ EXE_NAME = "GhostMap.exe"
 RESTART_DELAYS_MS = (10_000, 30_000, 60_000)  # after the 1st, 2nd and later failures
 RESET_FAILURES_S = 86_400         # the failure count goes back to 0 after a day without one
 NOT_COPIED = {"logs", MARKER}     # left behind when the data moves to the shared folder
+INTERNAL = "_internal"            # the unpacked (PyInstaller onedir) build keeps its libraries here, next to the exe
 log = logging.getLogger("ghostmap.service")
 
 
@@ -193,6 +195,38 @@ def program() -> list[str]:
     return [sys.executable, "-m", "ghostmap"]
 
 
+def is_unpacked() -> bool:
+    """True for the unpacked build (GhostMap.exe + ``_internal``), False for the single-file exe or plain Python.
+    The single-file exe unpacks itself to a temporary folder on every start instead."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not getattr(sys, "frozen", False) or not meipass:
+        return False
+    return Path(meipass).resolve() == (Path(sys.executable).resolve().parent / INTERNAL).resolve()
+
+
+def copy_program(exe: Path, target_dir: Path, unpacked: bool, tries: int = 20) -> Path:
+    """Put the program in ``target_dir`` and return the exe there. The unpacked build brings its ``_internal`` folder
+    (an older one is replaced whole, so no stale library is left); the single-file exe removes one left by an
+    unpacked install. Nothing is copied when ``exe`` already is the one in ``target_dir`` (installed by Setup)."""
+    target = target_dir / EXE_NAME
+    if exe.resolve() == target.resolve():
+        return target
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(tries):  # the stopped service's process can take a moment to let go of its files
+        try:
+            if (target_dir / INTERNAL).exists() and not remove_tree(target_dir / INTERNAL, tries=1):
+                raise PermissionError(f"{target_dir / INTERNAL} is in use")
+            if unpacked:
+                shutil.copytree(exe.parent / INTERNAL, target_dir / INTERNAL)
+            shutil.copy2(exe, target)
+            return target
+        except PermissionError:
+            if i == tries - 1:
+                raise
+            time.sleep(0.5)
+    return target
+
+
 def install(host: str, port: int, allow: Sequence[str], no_listen: bool, check_exposure: Callable[[Path], Optional[str]],
             out=print, https: bool = False, cert: Optional[str] = None, key: Optional[str] = None) -> int:  # pragma: no cover - Windows only (run by the Windows CI job)
     _need_windows()
@@ -220,18 +254,7 @@ def install(host: str, port: int, allow: Sequence[str], no_listen: bool, check_e
             return 1
     prog = program()
     if getattr(sys, "frozen", False):
-        target = install_dir() / EXE_NAME
-        if Path(sys.executable).resolve() != target.resolve():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            for i in range(20):  # the stopped service's process can take a moment to let go of the file
-                try:
-                    shutil.copy2(sys.executable, target)
-                    break
-                except PermissionError:
-                    if i == 19:
-                        raise
-                    time.sleep(0.5)
-        prog = [str(target)]
+        prog = [str(copy_program(Path(sys.executable), install_dir(), is_unpacked()))]
     else:
         out(f"note: the service will run this Python ({sys.executable}). Install GhostMap.exe for a plant PC.")
     tls_info = None
@@ -359,6 +382,7 @@ def uninstall(out=print, purge: bool = False) -> int:  # pragma: no cover - Wind
             pass
     if exe.exists() and Path(sys.executable).resolve() != exe.resolve():
         try:
+            remove_tree(exe.parent / INTERNAL)
             exe.unlink()
             exe.parent.rmdir()
         except OSError:
