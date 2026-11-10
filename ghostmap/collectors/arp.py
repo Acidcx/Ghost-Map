@@ -7,10 +7,20 @@ even when the switch is an L2-only Stratix without a useful ARP table.
 
 from __future__ import annotations
 
+import logging
 import re
+import socket
+import struct
 import subprocess
 import sys
 from pathlib import Path
+
+log = logging.getLogger(__name__)
+
+# ARP entry types from the Windows IP helper API (MIB_IPNET_TYPE): 2 is "invalid", the rest (other/dynamic/static)
+# are real neighbours.
+_ARP_INVALID = 2
+_SKIP_MACS = ("ff:ff:ff:ff:ff:ff", "00:00:00:00:00:00")
 
 _MAC_RE = re.compile(r"([0-9a-fA-F]{1,2}[:-]){5}[0-9a-fA-F]{1,2}")
 _IP_RE = re.compile(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b")
@@ -50,14 +60,57 @@ def parse_arp_a(text: str) -> dict[str, str]:
     return out
 
 
+def _decode_ipnet_rows(rows: "list[tuple[int, bytes, int]]") -> dict[str, str]:
+    """Turn raw ``(ipv4_as_little_endian_dword, mac_bytes, type)`` rows from the Windows ARP table into
+    ``{ip: mac}``. Kept pure (no ctypes) so it can be tested off Windows."""
+    out = {}
+    for addr, mac, typ in rows:
+        if typ == _ARP_INVALID or len(mac) != 6:
+            continue
+        m = normalize_mac(mac)
+        if m in _SKIP_MACS or m.startswith("01:00:5e"):  # broadcast, empty, IPv4 multicast
+            continue
+        out[socket.inet_ntoa(struct.pack("<I", addr))] = m  # dwAddr holds the 4 address bytes in network order
+    return out
+
+
+def read_arp_windows() -> dict[str, str]:  # pragma: no cover - Windows only
+    """Read this PC's ARP table through the IP helper API (``GetIpNetTable``), with no child process: ``arp.exe``
+    was spawned every poll, which flashed a console and, as a repeated process launch by a service, looked like
+    malware to Windows Defender's behaviour heuristics."""
+    import ctypes
+    from ctypes import wintypes
+
+    class MIB_IPNETROW(ctypes.Structure):
+        _fields_ = [("dwIndex", wintypes.DWORD), ("dwPhysAddrLen", wintypes.DWORD),
+                    ("bPhysAddr", ctypes.c_ubyte * 8), ("dwAddr", wintypes.DWORD), ("dwType", wintypes.DWORD)]
+
+    iphlpapi = ctypes.WinDLL("iphlpapi")
+    size = wintypes.ULONG(0)
+    iphlpapi.GetIpNetTable(None, ctypes.byref(size), False)  # first call just sizes the buffer
+    if not size.value:
+        return {}
+    buf = (ctypes.c_byte * size.value)()
+    if iphlpapi.GetIpNetTable(buf, ctypes.byref(size), False) != 0:  # 0 == NO_ERROR
+        return {}
+    num = ctypes.cast(buf, ctypes.POINTER(wintypes.DWORD)).contents.value
+    table = ctypes.cast(ctypes.byref(buf, ctypes.sizeof(wintypes.DWORD)), ctypes.POINTER(MIB_IPNETROW * num)).contents
+    rows = [(r.dwAddr, bytes(r.bPhysAddr[:r.dwPhysAddrLen]), r.dwType) for r in table]
+    return _decode_ipnet_rows(rows)
+
+
 def read_arp_cache() -> dict[str, str]:
     proc = Path("/proc/net/arp")
     if proc.is_file():
         return parse_proc_net_arp(proc.read_text())
-    try:
-        args = ["arp", "-a"] if sys.platform.startswith("win") else ["arp", "-an"]
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)  # Windows: no console window flashing up every read
-        text = subprocess.run(args, capture_output=True, text=True, timeout=10, creationflags=flags).stdout
+    if sys.platform.startswith("win"):
+        try:
+            return read_arp_windows()
+        except Exception:  # never spawn arp.exe as a fallback: a failed read is better than the behaviour we removed
+            log.debug("reading the Windows ARP table failed", exc_info=True)
+            return {}
+    try:  # macOS / BSD: no /proc and no IP helper API
+        text = subprocess.run(["arp", "-an"], capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
         return {}
     return parse_arp_a(text)

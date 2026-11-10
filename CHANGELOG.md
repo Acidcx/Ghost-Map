@@ -3,8 +3,12 @@
 Each version is a git tag (`v0.5.0`, ...). Pushing the tag builds `GhostMap.exe` and attaches it to a GitHub
 Release. `GhostMap.exe service status` and the top bar name the version and commit that are installed.
 
-## Unreleased
+## 0.5.5 (2026-11-10)
 
+- **No more `arp.exe` every few seconds.** The passive ARP read shelled out to `arp.exe` every 10 s, which flashed
+  a console and, as a service launching the same process over and over, looked like malware to Windows Defender's
+  behaviour heuristics (and cost a process spawn each time). It now reads the ARP table through the Windows IP
+  helper API directly, with no child process. On Linux it still reads `/proc/net/arp`; macOS/BSD still use `arp`.
 - **Cloned PC serials are flagged.** Two PCs imaged from one disk answer as RSLinx / FactoryTalk Linx (vendor 77)
   with the same CIP serial, and a PLC can then drop their connections in turn. A scan now reports this as an error,
   `device.cloned_serial`, with the fix in its hint. Two different devices sharing a serial get the same error;
