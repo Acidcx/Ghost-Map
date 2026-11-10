@@ -3,6 +3,18 @@
 Each version is a git tag (`v0.5.0`, ...). Pushing the tag builds `GhostMap.exe` and attaches it to a GitHub
 Release. `GhostMap.exe service status` and the top bar name the version and commit that are installed.
 
+## 0.5.5 (2026-11-10)
+
+- **No more `arp.exe` every few seconds.** The passive ARP read shelled out to `arp.exe` every 10 s, which flashed
+  a console and, as a service launching the same process over and over, looked like malware to Windows Defender's
+  behaviour heuristics (and cost a process spawn each time). It now reads the ARP table through the Windows IP
+  helper API directly, with no child process. On Linux it still reads `/proc/net/arp`; macOS/BSD still use `arp`.
+- **No more `powershell.exe` for host health.** The This PC page read the FactoryTalk/Rockwell/SQL/TSC services and
+  the Windows event-log errors by launching `powershell.exe` every 5 minutes — the other repeated child process
+  that read as malware-like and that Defender's real-time protection re-scanned each time. Ghost Map now reads them
+  in-process through the Windows service-control and event-log APIs (read-only: it enumerates and queries, never
+  starts, stops or changes a service or clears a log). The page shows exactly what it did before. Off Windows these
+  are no-ops, as they were.
 ## Unreleased
 
 - **GhostMap-Setup.exe.** An installer next to the single-file exe: it puts an unpacked build (GhostMap.exe +

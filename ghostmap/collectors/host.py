@@ -2,9 +2,9 @@
 and Rockwell services and the errors in the Windows event log.
 
 Read-only like everything else: it looks at the PC, never starts, stops or changes anything. Disk, memory, CPU
-and uptime come from the OS directly (every ``FAST_S``). Services and the event log come from one PowerShell
-call made of ``Get-`` commands only (every ``SLOW_S``), so a PC where PowerShell is locked down still shows the
-rest. ``analysis/alerts.py`` turns a snapshot into alerts.
+and uptime come from the OS directly (every ``FAST_S``). Services and the event log come from the Windows APIs
+in ``winhealth.py`` (every ``SLOW_S``), read in-process with no child process. ``analysis/alerts.py`` turns a
+snapshot into alerts.
 """
 
 from __future__ import annotations
@@ -16,44 +16,28 @@ import os
 import platform
 import shutil
 import socket
-import subprocess
 import sys
 import time
 from collections import deque
 from pathlib import Path
 from typing import Optional
 
+from ghostmap.collectors import winhealth
 from ghostmap.selfwatch import SelfWatch
 
 FAST_S = 60.0          # disk, memory, CPU, uptime
-SLOW_S = 300.0         # services and event log (one PowerShell call)
+SLOW_S = 300.0         # services and event log (read through winhealth.py)
 FIRST_SLOW_S = 20.0    # ... the first time this long after starting, so starting up stays quick
 CPU_KEPT = 15          # one-minute CPU samples kept (the CPU alert looks at the average)
 CPU_MIN_SPAN_S = 20.0  # a CPU sample covers at least this long (the first one after starting was over ~1 s)
 CPU_AVG_SAMPLES = 4    # the 5-minute average needs this many samples, so one busy minute isn't "5 minutes"
 EVENT_WINDOW_H = 24
-PS_TIMEOUT_S = 90
 # Services whose display name matches are listed (FactoryTalk Linx, Linx Gateway, View SE, Activation, ...), plus
 # the SQL Server engine ("SQL Server (SQL2022)", not its Agent or Browser) and TSC, which production data comes from.
 SERVICE_MATCH = r"FactoryTalk|Rockwell|RSLinx|RSView|FT Linx|^SQL Server \(|\bTSC\b|Bradbury"
 SERVICES_FILE = "host-services.json"   # when each service was last seen running, and when it stopped
 RUNNING_KEPT_S = 7 * 86400
 log = logging.getLogger("ghostmap.host")
-
-# Plain text on PowerShell's command line, no -EncodedCommand: anyone (and any antivirus) can read what it runs.
-# One statement per entry, joined with "; ". Single quotes only, so the command line needs no escaping.
-PS_STATEMENTS = (
-    "$ErrorActionPreference = 'SilentlyContinue'",
-    "$svc = @(Get-CimInstance Win32_Service | Where-Object { $_.DisplayName -match '%MATCH%' } | "
-    "Select-Object Name, DisplayName, State, StartMode)",
-    "$since = (Get-Date).AddHours(-%HOURS%)",
-    "$ev = @(Get-WinEvent -FilterHashtable @{LogName='System','Application'; Level=1,2; StartTime=$since} -MaxEvents 1000 | "
-    "Select-Object LogName, ProviderName, Id, Level, "
-    "@{n='At'; e={([DateTimeOffset]$_.TimeCreated).ToUnixTimeSeconds()}}, "
-    "@{n='Msg'; e={ if ($_.Message) { ($_.Message -split '\\r?\\n')[0] } else { '' } }})",
-    "@{services=$svc; events=$ev} | ConvertTo-Json -Depth 4 -Compress",
-)
-PS_SCRIPT = "; ".join(PS_STATEMENTS)
 
 
 def disks(data_dir: Path) -> list[dict]:
@@ -145,21 +129,6 @@ def cpu_times() -> Optional[tuple[float, float]]:
         return None
 
 
-def parse_powershell(out: str) -> dict:
-    """Services and event-log errors from the PowerShell call's JSON."""
-    data = json.loads(out or "{}")
-
-    def listify(x):
-        return [] if x is None else x if isinstance(x, list) else [x]
-
-    services = [{"name": s.get("Name"), "display": s.get("DisplayName"), "state": s.get("State"),
-                 "start_mode": s.get("StartMode")} for s in listify(data.get("services"))]
-    events = [{"log": e.get("LogName"), "source": e.get("ProviderName"), "id": e.get("Id"),
-               "level": "critical" if e.get("Level") == 1 else "error", "at": e.get("At"), "message": e.get("Msg") or ""}
-              for e in listify(data.get("events"))]
-    return {"services": sorted(services, key=lambda s: (s["display"] or "").lower()), "events": events}
-
-
 def summarize_events(events: list[dict], top: int = 8) -> dict:
     """Counts by level, and the sources with the most errors (each with its latest message)."""
     by: dict[tuple, dict] = {}
@@ -175,28 +144,6 @@ def summarize_events(events: list[dict], top: int = 8) -> dict:
     groups = sorted(by.values(), key=lambda g: (g["level"] != "critical", -g["count"], -g["last"]))
     return {"window_h": EVENT_WINDOW_H, "errors": sum(1 for e in events if e["level"] == "error"),
             "critical": sum(1 for e in events if e["level"] == "critical"), "top": groups[:top]}
-
-
-def run_powershell(script: str, timeout: float = PS_TIMEOUT_S, running: Optional[set] = None) -> str:  # pragma: no cover - Windows only
-    """``running``: the process is kept there while it runs, so stopping Ghost Map can end it."""
-    if '"' in script or "\n" in script:
-        raise ValueError("PowerShell command must be one line with single quotes only")
-    p = subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, creationflags=0x08000000)  # CREATE_NO_WINDOW
-    if running is not None:
-        running.add(p)
-    try:
-        out, err = p.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        p.kill()
-        p.communicate()
-        raise
-    finally:
-        if running is not None:
-            running.discard(p)
-    if p.returncode != 0 and not out.strip():
-        raise RuntimeError((err.strip().splitlines() or [f"exit code {p.returncode}"])[-1])
-    return out
 
 
 class ServiceHistory:
@@ -245,7 +192,6 @@ class HostMonitor:
         self.fast: dict = {}
         self.slow: dict = {"at": None, "services": None, "events": None, "error": None}
         self._task: Optional[asyncio.Task] = None
-        self._running: set = set()  # a PowerShell process while one runs
         self.seen = ServiceHistory(self.data_dir / SERVICES_FILE)
         self.selfwatch = SelfWatch()  # Ghost Map's own CPU use (a thread, so it still runs if the event loop spins)
         self._windows_read: Optional[asyncio.Task] = None
@@ -259,8 +205,6 @@ class HostMonitor:
         self.selfwatch.stop()
         if self._task:
             self._task.cancel()
-            for p in list(self._running):
-                p.kill()
             await asyncio.gather(self._task, return_exceptions=True)
             self._task = None
 
@@ -293,8 +237,8 @@ class HostMonitor:
         return self.fast
 
     async def read_windows(self) -> None:
-        """One PowerShell read at a time: a page opened while one runs (or several pages at once, right after a
-        restart) waits for it instead of starting its own PowerShell."""
+        """One read at a time: a page opened while one runs (or several pages at once, right after a restart)
+        waits for it instead of starting its own."""
         if self._windows_read is None or self._windows_read.done():
             self._windows_read = asyncio.ensure_future(self._read_windows())
         await asyncio.shield(self._windows_read)
@@ -306,13 +250,13 @@ class HostMonitor:
             return
         if sys.platform != "win32":
             return
-        script = PS_SCRIPT.replace("%MATCH%", SERVICE_MATCH).replace("%HOURS%", str(EVENT_WINDOW_H))
         try:
-            got = parse_powershell(await asyncio.to_thread(run_powershell, script, PS_TIMEOUT_S, self._running))
+            # In a thread: the ctypes service enumeration and event-log reads are blocking OS calls.
+            got = await asyncio.to_thread(winhealth.read_windows, SERVICE_MATCH, EVENT_WINDOW_H)
             now = time.time()
             self.slow = {"at": now, "error": None, "services": self.seen.update(got["services"], now),
                          "events": summarize_events(got["events"])}
-        except Exception as exc:  # PowerShell blocked or slow: the rest of the page still works
+        except Exception as exc:  # a locked-down or unexpected API result: the rest of the page still works
             self.slow = {**self.slow, "at": time.time(), "error": f"{type(exc).__name__}: {exc}"}
             log.warning("host health: services and event log not read: %s", self.slow["error"])
 

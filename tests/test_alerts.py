@@ -5,6 +5,7 @@ import asyncio
 import io
 import json
 import sys
+import re
 import zipfile
 
 import pytest
@@ -12,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from ghostmap import winevent
 from ghostmap.analysis import alerts as rules
-from ghostmap.collectors.host import HostMonitor, parse_powershell, summarize_events
+from ghostmap.collectors.host import HostMonitor, summarize_events
 from ghostmap.web.alerts import AlertCenter
 from ghostmap.web.app import create_app
 
@@ -162,20 +163,28 @@ def test_alert_center_reports_raised_and_cleared():
     assert len(run(NOW + 120)) == 1
 
 
-def test_powershell_output():
-    """Services and event-log errors as PowerShell's ConvertTo-Json writes them: a single result is an object,
-    not a list, and none at all is null."""
-    out = json.dumps({"services": {"Name": "FTLinxGW", "DisplayName": "FactoryTalk Linx Gateway", "State": "Running",
-                                   "StartMode": "Auto"},
-                      "events": [{"LogName": "System", "ProviderName": "Kernel-Power", "Id": 41, "Level": 1, "At": 100, "Msg": "a"},
-                                 {"LogName": "Application", "ProviderName": "FT", "Id": 3, "Level": 2, "At": 200, "Msg": "b"},
-                                 {"LogName": "Application", "ProviderName": "FT", "Id": 3, "Level": 2, "At": 300, "Msg": "c"}]})
-    got = parse_powershell(out)
-    assert got["services"] == [{"name": "FTLinxGW", "display": "FactoryTalk Linx Gateway", "state": "Running", "start_mode": "Auto"}]
-    summary = summarize_events(got["events"])
+def test_event_xml_parse_and_summary():
+    """The Windows event-log reader renders each event to XML; parse it into the shape summarize_events wants."""
+    from ghostmap.collectors.winhealth import _event_from_xml, _iso_to_unix
+
+    def evt(channel, provider, eid, level, systime):
+        return ('<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System>'
+                f'<Provider Name="{provider}"/><EventID>{eid}</EventID><Level>{level}</Level>'
+                f'<TimeCreated SystemTime="{systime}"/><Channel>{channel}</Channel></System></Event>')
+
+    kp = _event_from_xml(evt("System", "Kernel-Power", 41, 1, "2026-11-06T09:00:00.0000000Z"), "a\r\nsecond line")
+    assert kp == {"log": "System", "source": "Kernel-Power", "id": 41, "level": "critical",
+                  "at": _iso_to_unix("2026-11-06T09:00:00Z"), "message": "a"}
+    events = [kp,
+              _event_from_xml(evt("Application", "FT", 3, 2, "2026-11-06T09:00:02Z"), "b"),
+              _event_from_xml(evt("Application", "FT", 3, 2, "2026-11-06T09:00:03Z"), "c")]
+    summary = summarize_events(events)
     assert (summary["critical"], summary["errors"]) == (1, 2)
     assert [(g["source"], g["count"], g["message"]) for g in summary["top"]] == [("Kernel-Power", 1, "a"), ("FT", 2, "c")]
-    assert parse_powershell('{"services": null, "events": null}') == {"services": [], "events": []}
+    # A missing message, bad XML, and the 7-digit .NET fraction are all handled without raising.
+    assert _event_from_xml(evt("System", "P", 1, 2, "2026-11-06T09:00:04.1234567Z"))["message"] == ""
+    assert _event_from_xml("<not-an-event/>") is None
+    assert _iso_to_unix(None) is None and _iso_to_unix("2026-11-06T09:00:00Z") == 1793955600
 
 
 def test_host_and_alerts_api_in_the_demo(tmp_path):
@@ -203,9 +212,10 @@ def test_windows_event_log():
     assert ok or not winservice.is_admin()  # an administrator (the CI runner) registers the source and writes
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="PowerShell and the event log on Windows")
+@pytest.mark.skipif(sys.platform != "win32", reason="the service-control and event-log APIs are Windows-only")
 def test_reading_this_windows_pc(tmp_path):
-    """The real PowerShell call: services (none from Rockwell on a CI runner) and the event log's errors."""
+    """The real native read: services (none from Rockwell on a CI runner) and the event log's errors. This runs
+    the actual ctypes calls in winhealth.py, so it catches signature mistakes (e.g. a truncated 64-bit handle)."""
     mon = HostMonitor(tmp_path)
     asyncio.run(mon.read_windows())
     snap = mon.snapshot()
@@ -333,14 +343,19 @@ def test_caches_are_warmed_after_starting(tmp_path, monkeypatch):
         assert app.state.hostmon.slow.get("at") and app.state.alerts.evaluated_at
 
 
-def test_powershell_call_is_plain_text():
-    """No -EncodedCommand: the command line shows what Ghost Map runs (antivirus treats encoded PowerShell from an
-    unsigned exe as malware-like), and it is one line with single quotes only, so it needs no escaping."""
+def test_host_health_spawns_no_child_process_and_only_reads():
+    """Host health is read through the OS APIs in winhealth.py, not a child process: a service repeatedly launching
+    powershell.exe looked like malware to Defender. Guard that no spawn creeps back and that the service-control
+    calls are read-only (no Start/Stop/Control/Change/Delete/Create)."""
     import inspect as pyinspect
 
-    from ghostmap.collectors import host
+    from ghostmap.collectors import host, winhealth
 
-    assert '"' not in host.PS_SCRIPT and "\n" not in host.PS_SCRIPT
-    assert "EncodedCommand" not in pyinspect.getsource(host.run_powershell)
-    assert all(cmd.split()[0].startswith(("$", "@{")) for cmd in host.PS_STATEMENTS)
-    assert "Set-" not in host.PS_SCRIPT and "Invoke-" not in host.PS_SCRIPT  # reads only
+    host_src, win_src = pyinspect.getsource(host), pyinspect.getsource(winhealth)
+    assert "subprocess" not in host_src and "powershell" not in host_src.lower()
+    assert "import subprocess" not in win_src
+    # Only read-only service-control and event-log APIs are used.
+    assert {"OpenSCManagerW", "EnumServicesStatusExW", "QueryServiceConfigW", "EvtQuery"} <= set(re.findall(r"\w+", win_src))
+    for forbidden in ("StartService", "ControlService", "ChangeServiceConfig", "DeleteService", "CreateService",
+                      "EvtClearLog"):
+        assert forbidden not in win_src

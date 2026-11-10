@@ -1,3 +1,6 @@
+import socket
+import struct
+
 import pytest
 
 from ghostmap.analysis.diagnostics import run_diagnostics
@@ -86,6 +89,21 @@ def test_arp_parsers():
     mac = "? (192.168.1.11) at 0:0:bc:aa:0:11 on en0 ifscope [ethernet]"
     assert parse_arp_a(mac) == {"192.168.1.11": "00:00:bc:aa:00:11"}
     assert normalize_mac("0000.bcaa.0010") == "00:00:bc:aa:00:10"
+
+
+def test_windows_arp_table_decode():
+    from ghostmap.collectors.arp import _decode_ipnet_rows
+
+    le = lambda ip: struct.unpack("<I", socket.inet_aton(ip))[0]  # noqa: E731 - as GetIpNetTable stores dwAddr
+    rows = [
+        (le("192.168.1.10"), b"\x00\x00\xbc\xaa\x00\x10", 3),   # dynamic: kept
+        (le("192.168.1.20"), b"\x00\x00\xbc\xaa\x00\x20", 4),   # static: kept
+        (le("192.168.1.99"), b"\x00\x00\xbc\xaa\x00\x99", 2),   # invalid: dropped
+        (le("192.168.1.255"), b"\xff\xff\xff\xff\xff\xff", 4),  # broadcast: dropped
+        (le("224.0.0.1"), b"\x01\x00\x5e\x00\x00\x01", 3),      # multicast: dropped
+        (le("192.168.1.5"), b"\x00\x00\xbc", 1),                # short MAC: dropped
+    ]
+    assert _decode_ipnet_rows(rows) == {"192.168.1.10": "00:00:bc:aa:00:10", "192.168.1.20": "00:00:bc:aa:00:20"}
     assert normalize_mac(b"\x00\x00\xbc\xaa\x00\x10") == "00:00:bc:aa:00:10"
 
 
