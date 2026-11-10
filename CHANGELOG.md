@@ -5,6 +5,15 @@ Release. `GhostMap.exe service status` and the top bar name the version and comm
 
 ## Unreleased
 
+- **GhostMap-Setup.exe.** An installer next to the single-file exe: it puts an unpacked build (GhostMap.exe +
+  `_internal`) in `C:\Program Files\GhostMap` and sets up the service, upgrades in place keeping the data and the
+  service options, and uninstalls from Settings > Apps keeping the data. The unpacked build doesn't unpack itself to
+  `%TEMP%` on every start, so antivirus checks its files once instead of each time, and it runs as one process
+  instead of two. Silent install for several PCs: `/VERYSILENT /SUPPRESSMSGBOXES [/SERVICEARGS="--ixon"]`.
+  `service install` from the unpacked build copies its libraries too. CI installs, upgrades and uninstalls it.
+- **Code signing, ready for a certificate.** `packaging/sign_exe.ps1` signs and timestamps GhostMap.exe, and the
+  exe build signs it when the `GHOSTMAP_SIGN_PFX` secret is set (unsigned with a notice otherwise; a throwaway copy
+  is signed on every build to test the script). `docs/CODE-SIGNING.md` compares the certificate options.
 - **Cloned PC serials are flagged.** Two PCs imaged from one disk answer as RSLinx / FactoryTalk Linx (vendor 77)
   with the same CIP serial, and a PLC can then drop their connections in turn. A scan now reports this as an error,
   `device.cloned_serial`, with the fix in its hint. Two different devices sharing a serial get the same error;

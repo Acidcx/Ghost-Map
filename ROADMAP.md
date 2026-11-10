@@ -113,7 +113,9 @@ Then the service:
 - [x] Upgrades keep dashboards, history and settings (schema numbers on history and config)
 - [x] Versioned releases: tags (`v0.5.0`), the exe's dependencies pinned (`packaging/exe-constraints.txt`), `service status` names the installed build, release notes in `CHANGELOG.md`
 - [x] Site trial checklist (`docs/SITE-TRIAL.md`)
-- [ ] Signed installer
+- [ ] Code-signed exe: signing step in the build, waiting on a certificate (`docs/CODE-SIGNING.md`)
+- [x] Installer: `GhostMap-Setup.exe` (Inno Setup) with the unpacked build, service set up, upgrade and uninstall
+- [ ] Signed installer (waits on a certificate)
 
 ## Phase 5: cross-layer correlation ("the brain")
 
