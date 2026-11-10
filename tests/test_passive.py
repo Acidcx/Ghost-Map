@@ -131,3 +131,15 @@ def test_listeners_are_off_unless_asked(tmp_path):
     with TestClient(create_app(data_dir=str(tmp_path), demo=True, demo_opcua=False), headers=H) as c:
         d = c.get("/api/live").json()
         assert not d["listen"] and not d["running"] and d["events"] == []
+
+
+def test_passive_packets_before_any_scan(tmp_path):
+    """Seen on a fresh v0.5.5 install: with no scan saved yet, every syslog/trap/BOOTP datagram raised
+    KeyError: 'labels' in the app's known-devices lookup instead of being recorded."""
+    app = create_app(data_dir=str(tmp_path), demo=False, demo_opcua=False, collect=False)
+    passive = app.state.passive
+    ev = passive.feed("syslog", build_syslog("%LINK-3-UPDOWN: Interface Fa1/1, changed state to down"), "10.0.0.2")
+    assert ev and ev["code"] == "passive.link_down" and ev["source"] == "10.0.0.2"
+    ev = passive.feed("bootp", build_bootp_request(RA_MAC), "0.0.0.0")
+    assert ev and ev["code"] == "passive.bootp"
+    passive.arp_update({"10.0.0.2": RA_MAC})
