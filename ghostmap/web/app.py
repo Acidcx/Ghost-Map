@@ -375,7 +375,9 @@ def create_app(data_dir: Optional[str] = None, demo: bool = False, snmp_factory=
 
     netmon = NetMonitor(store.root, demo=demo, snmp_factory=snmp_factory, devices=scan_device_names)
     maint = MaintenanceStore(store.root)
-    known_cache: dict = {}
+    # "id" starts as a sentinel no scan id can equal: with no scans yet the newest id is None, and a cache keyed
+    # on None would look already filled and raise KeyError on every passive datagram (seen on a fresh install).
+    known_cache: dict = {"id": object()}
 
     def known_devices() -> tuple[dict, dict, dict]:
         """MAC -> label, MAC -> IP and IP -> name from the newest scan, for the passive listeners' events."""
