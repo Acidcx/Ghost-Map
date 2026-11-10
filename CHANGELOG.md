@@ -3,6 +3,25 @@
 Each version is a git tag (`v0.5.0`, ...). Pushing the tag builds `GhostMap.exe` and attaches it to a GitHub
 Release. `GhostMap.exe service status` and the top bar name the version and commit that are installed.
 
+## 0.5.4 (2026-11-05)
+
+After Ghost Map was seen using about 50% CPU on a Test HMI (killed and restarted before anything was captured).
+
+- **Ghost Map watches its own CPU.** A small thread samples Ghost Map's own CPU time every 5 s. If it keeps 60% of a
+  core busy for a minute, it writes what every thread is doing to the debug log (at most every 30 minutes) and the
+  alert list shows **hmi.ghostmap_busy**. One pinned core is only 50% in Task Manager on a two-core HMI, under the
+  existing 90% CPU alert, so this was invisible before. Settings > This PC shows "Ghost Map itself" under CPU.
+  If it happens again, download the debug bundle before restarting.
+- **Guard against a Windows asyncio spin.** asyncio's ProactorEventLoop wakes itself through a socket pair; when
+  something outside Python (a network filter driver or security software) shuts it down, the loop re-reads it
+  forever at 100% of a core until restarted (CPython gh-156333, not fixed upstream). Ghost Map now makes a new pair
+  and logs a warning instead. Unconfirmed as the cause on the HMI: the log line will say if it was.
+- **No more "CPU 100% busy for 5 minutes" right after a reboot.** Seen on the Test HMI: the service started two
+  minutes after boot, its first CPU sample covered the one second since it started (100% while Windows and
+  FactoryTalk were still starting), and the alert fired 12 s later. A CPU sample now spans at least 20 s and the
+  5-minute average needs four samples.
+- **One PowerShell read at a time.** Pages opened together right after a restart (Home, the alert bar, the start-up
+  warm-up) each started their own services and event-log PowerShell read; they now share one.
 ## Unreleased
 
 - **Machine > Device health.** One page with everything Ghost Map can already read about each drive and device, worst

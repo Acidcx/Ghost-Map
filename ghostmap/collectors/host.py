@@ -23,10 +23,14 @@ from collections import deque
 from pathlib import Path
 from typing import Optional
 
+from ghostmap.selfwatch import SelfWatch
+
 FAST_S = 60.0          # disk, memory, CPU, uptime
 SLOW_S = 300.0         # services and event log (one PowerShell call)
 FIRST_SLOW_S = 20.0    # ... the first time this long after starting, so starting up stays quick
 CPU_KEPT = 15          # one-minute CPU samples kept (the CPU alert looks at the average)
+CPU_MIN_SPAN_S = 20.0  # a CPU sample covers at least this long (the first one after starting was over ~1 s)
+CPU_AVG_SAMPLES = 4    # the 5-minute average needs this many samples, so one busy minute isn't "5 minutes"
 EVENT_WINDOW_H = 24
 PS_TIMEOUT_S = 90
 # Services whose display name matches are listed (FactoryTalk Linx, Linx Gateway, View SE, Activation, ...), plus
@@ -237,17 +241,22 @@ class HostMonitor:
         self.demo = demo
         self.cpu: deque = deque(maxlen=CPU_KEPT)  # (time, percent)
         self._last_cpu = cpu_times()
+        self._last_cpu_at = time.monotonic()
         self.fast: dict = {}
         self.slow: dict = {"at": None, "services": None, "events": None, "error": None}
         self._task: Optional[asyncio.Task] = None
         self._running: set = set()  # a PowerShell process while one runs
         self.seen = ServiceHistory(self.data_dir / SERVICES_FILE)
+        self.selfwatch = SelfWatch()  # Ghost Map's own CPU use (a thread, so it still runs if the event loop spins)
+        self._windows_read: Optional[asyncio.Task] = None
 
     def start(self) -> None:
         if self._task is None:
             self._task = asyncio.create_task(self._loop(), name="ghostmap-host")
+        self.selfwatch.start()
 
     async def stop(self) -> None:
+        self.selfwatch.stop()
         if self._task:
             self._task.cancel()
             for p in list(self._running):
@@ -269,17 +278,28 @@ class HostMonitor:
 
     def sample(self) -> dict:
         now = time.time()
-        cur = cpu_times()
-        if cur and self._last_cpu and cur[1] > self._last_cpu[1]:
-            pct = (cur[0] - self._last_cpu[0]) / (cur[1] - self._last_cpu[1]) * 100
-            self.cpu.append((now, round(max(0.0, min(pct, 100.0)), 1)))
-        self._last_cpu = cur or self._last_cpu
+        cur, mono = cpu_times(), time.monotonic()
+        # Seen on the Test HMI: the first sample, taken a second after the service started during boot, read 100%
+        # and raised "CPU 100% busy for 5 minutes" 12 s later. A sample now spans at least CPU_MIN_SPAN_S.
+        if mono - self._last_cpu_at >= CPU_MIN_SPAN_S or self._last_cpu is None:
+            if cur and self._last_cpu and cur[1] > self._last_cpu[1]:
+                pct = (cur[0] - self._last_cpu[0]) / (cur[1] - self._last_cpu[1]) * 100
+                self.cpu.append((now, round(max(0.0, min(pct, 100.0)), 1)))
+            if cur:
+                self._last_cpu, self._last_cpu_at = cur, mono
         up = uptime_s()
         self.fast = {"at": now, "disks": disks(self.data_dir), "memory": memory(), "uptime_s": up,
                      "boot_at": now - up if up else None}
         return self.fast
 
     async def read_windows(self) -> None:
+        """One PowerShell read at a time: a page opened while one runs (or several pages at once, right after a
+        restart) waits for it instead of starting its own PowerShell."""
+        if self._windows_read is None or self._windows_read.done():
+            self._windows_read = asyncio.ensure_future(self._read_windows())
+        await asyncio.shield(self._windows_read)
+
+    async def _read_windows(self) -> None:
         if self.demo:
             self.slow = {"at": time.time(), "error": None, **_demo_windows()}
             self.slow["services"] = self.seen.update(self.slow["services"], self.slow["at"])
@@ -306,10 +326,11 @@ class HostMonitor:
         return {"host": socket.gethostname(), "os": f"{platform.system()} {platform.release()} ({platform.version()})",
                 "windows": sys.platform == "win32" or self.demo, **fast,
                 "cpu": {"now": self.cpu[-1][1] if self.cpu else None,
-                        "avg_5m": round(sum(recent) / len(recent), 1) if recent else None,
+                        "avg_5m": round(sum(recent) / len(recent), 1) if len(recent) >= CPU_AVG_SAMPLES else None,
                         "series": [{"at": t, "pct": p} for t, p in self.cpu]},
                 "services": self.slow.get("services"), "events": self.slow.get("events"),
-                "windows_read_at": self.slow.get("at"), "windows_error": self.slow.get("error")}
+                "windows_read_at": self.slow.get("at"), "windows_error": self.slow.get("error"),
+                "ghostmap": self.selfwatch.snapshot()}
 
 
 # --------------------------------------------------------------------------------------------- demo
