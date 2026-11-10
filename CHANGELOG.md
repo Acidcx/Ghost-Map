@@ -9,6 +9,12 @@ Release. `GhostMap.exe service status` and the top bar name the version and comm
   a console and, as a service launching the same process over and over, looked like malware to Windows Defender's
   behaviour heuristics (and cost a process spawn each time). It now reads the ARP table through the Windows IP
   helper API directly, with no child process. On Linux it still reads `/proc/net/arp`; macOS/BSD still use `arp`.
+- **No more `powershell.exe` for host health.** The This PC page read the FactoryTalk/Rockwell/SQL/TSC services and
+  the Windows event-log errors by launching `powershell.exe` every 5 minutes — the other repeated child process
+  that read as malware-like and that Defender's real-time protection re-scanned each time. Ghost Map now reads them
+  in-process through the Windows service-control and event-log APIs (read-only: it enumerates and queries, never
+  starts, stops or changes a service or clears a log). The page shows exactly what it did before. Off Windows these
+  are no-ops, as they were.
 - **Cloned PC serials are flagged.** Two PCs imaged from one disk answer as RSLinx / FactoryTalk Linx (vendor 77)
   with the same CIP serial, and a PLC can then drop their connections in turn. A scan now reports this as an error,
   `device.cloned_serial`, with the fix in its hint. Two different devices sharing a serial get the same error;
