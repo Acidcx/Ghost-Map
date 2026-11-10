@@ -12,6 +12,44 @@ Release. `GhostMap.exe service status` and the top bar name the version and comm
 - **Cloned PCs are no longer merged.** Devices were tracked by vendor + serial, so two cloned PCs shared one key:
   Compare could drop one and clicking one in Devices could open the other. Linx PCs are now tracked by hostname.
 - The demo machine has two HMI PCs, cloned in the "today" scan.
+## 0.5.4 (2026-11-05)
+
+After Ghost Map was seen using about 50% CPU on a Test HMI (killed and restarted before anything was captured).
+
+- **Ghost Map watches its own CPU.** A small thread samples Ghost Map's own CPU time every 5 s. If it keeps 60% of a
+  core busy for a minute, it writes what every thread is doing to the debug log (at most every 30 minutes) and the
+  alert list shows **hmi.ghostmap_busy**. One pinned core is only 50% in Task Manager on a two-core HMI, under the
+  existing 90% CPU alert, so this was invisible before. Settings > This PC shows "Ghost Map itself" under CPU.
+  If it happens again, download the debug bundle before restarting.
+- **Guard against a Windows asyncio spin.** asyncio's ProactorEventLoop wakes itself through a socket pair; when
+  something outside Python (a network filter driver or security software) shuts it down, the loop re-reads it
+  forever at 100% of a core until restarted (CPython gh-156333, not fixed upstream). Ghost Map now makes a new pair
+  and logs a warning instead. Unconfirmed as the cause on the HMI: the log line will say if it was.
+- **No more "CPU 100% busy for 5 minutes" right after a reboot.** Seen on the Test HMI: the service started two
+  minutes after boot, its first CPU sample covered the one second since it started (100% while Windows and
+  FactoryTalk were still starting), and the alert fired 12 s later. A CPU sample now spans at least 20 s and the
+  5-minute average needs four samples.
+- **One PowerShell read at a time.** Pages opened together right after a restart (Home, the alert bar, the start-up
+  warm-up) each started their own services and event-log PowerShell read; they now share one.
+## Unreleased
+
+- **Machine > Device health.** One page with everything Ghost Map can already read about each drive and device, worst
+  first, each problem with a dotted code and what to check:
+  - **Drives** (Kinetix / CIP Motion axes, through FT Linx): the drive's thermal model for the motor, inverter,
+    converter and bus regulator (% of rated; over 80 % warns, 100 % is an error), DC bus voltage, output current and
+    power, axis state, and the over-temperature and thermal-overload alarm and fault bits that are on. Kinetix drives
+    don't send temperatures over the network: capacity is the closest reading.
+  - **Controller** from FT Linx's Diagnostic Items: mode (warns when not in Run), firmware, Linx status and connection
+    drops. **I/O modules**: each module's `:I.Fault` word (all ones = no connection) and produced/consumed tags'
+    `ConnectionFaulted`.
+  - **Network devices** from the last scan: CIP fault and I/O connection status, firmware that differs from the other
+    devices of the same product (or the baseline), and a serial that answers from more than one address (an error
+    for FactoryTalk Linx PCs from a cloned image).
+  Read-only, only while the page is open, one read per machine every 5 s at most however many people watch.
+- **CPU fix: a drive's Details panel parsed the whole tag export on every refresh.** Machine > Dashboard > Drives
+  > Details refreshes every 2 s, and each refresh re-read the dashboard's stored tag export (about 30 MB for a whole
+  controller, ~0.5-1 s of CPU). A few open Details panels kept Ghost Map's CPU high. The export is now indexed once
+  and kept until it changes.
 
 ## 0.5.3 (2026-11-05)
 

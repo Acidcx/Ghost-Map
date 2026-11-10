@@ -184,10 +184,11 @@ function hostRender(h) {
     tiles.push(`<div class="tile ${cls}"><div class="n">${Math.round(m.used_pct)}%</div><div class="l">Memory</div>${bar(m.used_pct, cls)}
       <div class="s small muted">${fmtGb(m.available)} free of ${fmtGb(m.total)}</div></div>`);
   }
-  const cpu = h.cpu || {};
+  const cpu = h.cpu || {}, gm = h.ghostmap || {};
   const cpuCls = pctCls(cpu.avg_5m, 90, 101);
   tiles.push(`<div class="tile ${cpuCls}"><div class="n">${cpu.now == null ? "-" : `${Math.round(cpu.now)}%`}</div><div class="l">CPU</div>
-    ${bar(cpu.now, cpuCls)}<div class="s small muted">${cpu.avg_5m == null ? "Measuring..." : `5 min average ${Math.round(cpu.avg_5m)}%`}</div></div>`);
+    ${bar(cpu.now, cpuCls)}<div class="s small muted">${cpu.avg_5m == null ? "Measuring..." : `5 min average ${Math.round(cpu.avg_5m)}%`}</div>
+    ${gm.now == null ? "" : `<div class="s small ${gm.busy ? "errtext" : "muted"}">Ghost Map itself ${Math.round(gm.now)}%${gm.busy ? " (busy, see alerts)" : ""}</div>`}</div>`);
   if (h.uptime_s != null) {
     tiles.push(`<div class="tile"><div class="n">${esc(fmtUptime(h.uptime_s))}</div><div class="l">Uptime</div>
       <div class="s small muted">${h.boot_at ? `Started ${esc(alertClock(h.boot_at))}` : ""}</div></div>`);

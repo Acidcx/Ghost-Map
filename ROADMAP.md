@@ -33,6 +33,7 @@ It can't see traffic between other devices (e.g. PLC ↔ drive I/O). Per-port er
 - [x] Device inspector (Probe): open ports, connect-time latency and jitter with a live trace, ListServices, switch port path, history across scans, verdict with hints
 - [ ] SNMP identification of non-CIP hosts (sysDescr: model / firmware of Moxa, Netgear, IT switches)
 - [ ] Device-side Ethernet diagnostics (CIP Ethernet Link object: speed, duplex, error counters)
+- [x] Device health page (Machine > Device health): drive thermal model and thermal bits, I/O module faults, controller mode, and per-device CIP status, firmware mismatch and shared serials from the scan
 - [ ] Fill in the scanner PC's own MAC address
 - [ ] Topology diagram; PDF commissioning report
 - [ ] PROFINET DCP discovery for Siemens machines

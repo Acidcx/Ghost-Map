@@ -309,8 +309,10 @@ def _server(args, allow, tls_info: Optional[dict] = None):
 
     import uvicorn
 
+    from ghostmap.selfwatch import guard_self_pipe
     from ghostmap.web.app import create_app
 
+    guard_self_pipe()  # Windows: before uvicorn makes its event loop (see selfwatch.py)
     app = create_app(data_dir=args.data_dir, demo=getattr(args, "demo", False), allow=allow,
                      collect=not getattr(args, "no_collect", False), listen=not args.no_listen, tls=tls_info)
     extra = {}
