@@ -3,6 +3,13 @@
 Each version is a git tag (`v0.5.0`, ...). Pushing the tag builds `GhostMap.exe` and attaches it to a GitHub
 Release. `GhostMap.exe service status` and the top bar name the version and commit that are installed.
 
+## 0.5.6 (2026-11-10)
+
+- **Fix: Network > Live dropped every packet on a PC with no scan yet.** With no saved scan, the lookup that names
+  the devices a syslog message, SNMP trap or BOOTP request came from never filled its cache, so every datagram the
+  passive listeners heard raised `KeyError: 'labels'` in the log and was thrown away. Seen on a fresh install on an
+  engineering PC. Live now records those packets before the first scan too.
+
 ## 0.5.5 (2026-11-10)
 
 - **No more `arp.exe` every few seconds.** The passive ARP read shelled out to `arp.exe` every 10 s, which flashed
