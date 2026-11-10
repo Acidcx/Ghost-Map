@@ -80,6 +80,18 @@ def read_services(match: str) -> list[dict]:  # pragma: no cover - Windows only
     SC_MANAGER_ENUMERATE_SERVICE, SERVICE_QUERY_CONFIG = 0x0004, 0x0001
     SERVICE_WIN32, SERVICE_STATE_ALL, SC_ENUM_PROCESS_INFO = 0x30, 0x03, 0
     ERROR_MORE_DATA = 234
+    HANDLE, DWORD, BOOL, LPCWSTR = wintypes.HANDLE, wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR
+    LPDWORD, LPVOID = ctypes.POINTER(DWORD), ctypes.c_void_p
+    # Declare the signatures: without them ctypes treats a returned 64-bit HANDLE as a 32-bit int and truncates it,
+    # so the next call gets "the handle is invalid" (WinError 6) on 64-bit Windows.
+    advapi.OpenSCManagerW.restype, advapi.OpenSCManagerW.argtypes = HANDLE, [LPCWSTR, LPCWSTR, DWORD]
+    advapi.OpenServiceW.restype, advapi.OpenServiceW.argtypes = HANDLE, [HANDLE, LPCWSTR, DWORD]
+    advapi.CloseServiceHandle.restype, advapi.CloseServiceHandle.argtypes = BOOL, [HANDLE]
+    advapi.EnumServicesStatusExW.restype = BOOL
+    advapi.EnumServicesStatusExW.argtypes = [HANDLE, ctypes.c_int, DWORD, DWORD, LPVOID, DWORD,
+                                             LPDWORD, LPDWORD, LPDWORD, LPCWSTR]
+    advapi.QueryServiceConfigW.restype = BOOL
+    advapi.QueryServiceConfigW.argtypes = [HANDLE, LPVOID, DWORD, LPDWORD]
 
     class SERVICE_STATUS_PROCESS(ctypes.Structure):
         _fields_ = [("dwServiceType", wintypes.DWORD), ("dwCurrentState", wintypes.DWORD),
@@ -160,19 +172,29 @@ def read_events(hours: int, levels=(1, 2), channels=("System", "Application"), c
     EvtRenderEventXml = 1
     EvtFormatMessageEvent = 1
     ERROR_INSUFFICIENT_BUFFER = 122
+    HANDLE, DWORD, BOOL, LPCWSTR = wintypes.HANDLE, wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR
+    LPDWORD, LPVOID, PHANDLE = ctypes.POINTER(DWORD), ctypes.c_void_p, ctypes.POINTER(wintypes.HANDLE)
+    # Signatures: a returned event or query HANDLE is 64-bit, so it must not come back through ctypes' default int.
+    wevt.EvtQuery.restype, wevt.EvtQuery.argtypes = HANDLE, [HANDLE, LPCWSTR, LPCWSTR, DWORD]
+    wevt.EvtNext.restype, wevt.EvtNext.argtypes = BOOL, [HANDLE, DWORD, PHANDLE, DWORD, DWORD, LPDWORD]
+    wevt.EvtRender.restype, wevt.EvtRender.argtypes = BOOL, [HANDLE, HANDLE, DWORD, DWORD, LPVOID, LPDWORD, LPDWORD]
+    wevt.EvtClose.restype, wevt.EvtClose.argtypes = BOOL, [HANDLE]
+    wevt.EvtOpenPublisherMetadata.restype = HANDLE
+    wevt.EvtOpenPublisherMetadata.argtypes = [HANDLE, LPCWSTR, LPCWSTR, DWORD, DWORD]
+    wevt.EvtFormatMessage.restype = BOOL
+    wevt.EvtFormatMessage.argtypes = [HANDLE, HANDLE, DWORD, DWORD, LPVOID, DWORD, DWORD, LPVOID, LPDWORD]
 
     level_test = " or ".join(f"Level={n}" for n in levels)
     ms = int(hours) * 3600 * 1000
     query = f"*[System[({level_test}) and TimeCreated[timediff(@SystemTime) <= {ms}]]]"
 
     def render_xml(event) -> str:
-        size, used, props = wintypes.DWORD(), wintypes.DWORD(), wintypes.DWORD()
+        used, props = wintypes.DWORD(), wintypes.DWORD()
         wevt.EvtRender(None, event, EvtRenderEventXml, 0, None, ctypes.byref(used), ctypes.byref(props))
-        if ctypes.get_last_error() not in (ERROR_INSUFFICIENT_BUFFER, 0):
+        if ctypes.get_last_error() not in (ERROR_INSUFFICIENT_BUFFER, 0) or not used.value:
             return ""
         buf = ctypes.create_string_buffer(used.value)
-        size = wintypes.DWORD(used.value)
-        if not wevt.EvtRender(None, event, EvtRenderEventXml, size, buf, ctypes.byref(used), ctypes.byref(props)):
+        if not wevt.EvtRender(None, event, EvtRenderEventXml, used.value, buf, ctypes.byref(used), ctypes.byref(props)):
             return ""
         return buf.raw[:used.value].decode("utf-16-le", "replace").rstrip("\x00")
 

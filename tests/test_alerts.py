@@ -212,9 +212,10 @@ def test_windows_event_log():
     assert ok or not winservice.is_admin()  # an administrator (the CI runner) registers the source and writes
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="PowerShell and the event log on Windows")
+@pytest.mark.skipif(sys.platform != "win32", reason="the service-control and event-log APIs are Windows-only")
 def test_reading_this_windows_pc(tmp_path):
-    """The real PowerShell call: services (none from Rockwell on a CI runner) and the event log's errors."""
+    """The real native read: services (none from Rockwell on a CI runner) and the event log's errors. This runs
+    the actual ctypes calls in winhealth.py, so it catches signature mistakes (e.g. a truncated 64-bit handle)."""
     mon = HostMonitor(tmp_path)
     asyncio.run(mon.read_windows())
     snap = mon.snapshot()
