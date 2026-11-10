@@ -22,6 +22,25 @@ After Ghost Map was seen using about 50% CPU on a Test HMI (killed and restarted
   5-minute average needs four samples.
 - **One PowerShell read at a time.** Pages opened together right after a restart (Home, the alert bar, the start-up
   warm-up) each started their own services and event-log PowerShell read; they now share one.
+## Unreleased
+
+- **Machine > Device health.** One page with everything Ghost Map can already read about each drive and device, worst
+  first, each problem with a dotted code and what to check:
+  - **Drives** (Kinetix / CIP Motion axes, through FT Linx): the drive's thermal model for the motor, inverter,
+    converter and bus regulator (% of rated; over 80 % warns, 100 % is an error), DC bus voltage, output current and
+    power, axis state, and the over-temperature and thermal-overload alarm and fault bits that are on. Kinetix drives
+    don't send temperatures over the network: capacity is the closest reading.
+  - **Controller** from FT Linx's Diagnostic Items: mode (warns when not in Run), firmware, Linx status and connection
+    drops. **I/O modules**: each module's `:I.Fault` word (all ones = no connection) and produced/consumed tags'
+    `ConnectionFaulted`.
+  - **Network devices** from the last scan: CIP fault and I/O connection status, firmware that differs from the other
+    devices of the same product (or the baseline), and a serial that answers from more than one address (an error
+    for FactoryTalk Linx PCs from a cloned image).
+  Read-only, only while the page is open, one read per machine every 5 s at most however many people watch.
+- **CPU fix: a drive's Details panel parsed the whole tag export on every refresh.** Machine > Dashboard > Drives
+  > Details refreshes every 2 s, and each refresh re-read the dashboard's stored tag export (about 30 MB for a whole
+  controller, ~0.5-1 s of CPU). A few open Details panels kept Ghost Map's CPU high. The export is now indexed once
+  and kept until it changes.
 
 ## 0.5.3 (2026-11-05)
 

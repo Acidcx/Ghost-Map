@@ -75,6 +75,7 @@ def _replace(src: Path, dst: Path, tries: int = 40) -> None:
 class DashboardStore:
     def __init__(self, root: Path):
         self.dir = Path(root) / "dashboards"
+        self._index: dict[str, tuple] = {}  # dash id -> ((mtime, size) of its tag export, health index)
 
     def _path(self, dash_id: str) -> Path:
         if not _ID_RE.match(dash_id):
@@ -120,6 +121,25 @@ class DashboardStore:
             return []
         return json.loads(p.read_text(encoding="utf-8"))
 
+    def health_index(self, dash_id: str) -> dict:
+        """The drive, I/O module and controller tags in the dashboard's tag export (``analysis/devhealth.tag_index``),
+        kept until the export changes. A whole-controller export is ~30 MB of JSON: parsing it costs about a second
+        of CPU, so it must not happen on every page refresh."""
+        from ghostmap.analysis.devhealth import tag_index
+
+        p = self._path(dash_id).with_suffix(".tags.json")
+        try:
+            st = p.stat()
+            key = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            key = None
+        hit = self._index.get(dash_id)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        idx = tag_index(self.load_tags(dash_id) if key else [])
+        self._index[dash_id] = (key, idx)
+        return idx
+
     def create(self, name: str, endpoint: str, source: str, layout: dict) -> dict:
         slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40] or "machine"
         dash = {"id": f"{slug}-{secrets.token_hex(3)}", "name": name, "endpoint": endpoint, "source": source,
@@ -134,6 +154,7 @@ class DashboardStore:
             raise KeyError(dash_id)
         p.unlink()
         p.with_suffix(".tags.json").unlink(missing_ok=True)
+        self._index.pop(dash_id, None)
 
 
 def endpoint_key(endpoint: str) -> str:
