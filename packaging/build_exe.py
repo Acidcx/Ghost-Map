@@ -1,12 +1,15 @@
 """Build a single-file Ghost Map executable with PyInstaller.
 
     pip install -c packaging/exe-constraints.txt . pyinstaller   # the pinned versions, as the CI build does
-    python packaging/build_exe.py
+    python packaging/build_exe.py            # single file: dist/GhostMap.exe (dist/GhostMap elsewhere)
+    python packaging/build_exe.py --onedir   # unpacked: dist/onedir/GhostMap/GhostMap.exe + _internal, for Setup
 
-Output: dist/GhostMap.exe on Windows (dist/GhostMap elsewhere).
+The unpacked build is what GhostMap-Setup.exe (packaging/installer.iss) installs: it starts without unpacking
+itself to %TEMP% first, so antivirus checks its files once instead of on every start.
 """
 
 import os
+import sys
 import subprocess
 import tempfile
 import time
@@ -55,9 +58,13 @@ version_file.write_text(f"""VSVersionInfo(
 )
 """, encoding="utf-8")
 
+onedir = "--onedir" in sys.argv[1:]
+out = ROOT / "dist" / "onedir" if onedir else ROOT / "dist"
+work = ROOT / "build" / "onedir" if onedir else ROOT / "build"
+
 PyInstaller.__main__.run([
     str(ROOT / "packaging" / "ghostmap_exe.py"),
-    "--onefile",
+    *(["--onedir", "--contents-directory", "_internal"] if onedir else ["--onefile"]),
     "--console",  # keep the console: it shows the URL and is how you stop the server
     "--name", "GhostMap",
     "--noconfirm",
@@ -74,7 +81,7 @@ PyInstaller.__main__.run([
     "--collect-data", "asyncua",
     "--collect-submodules", "pytds",  # TSC SQL link
     "--hidden-import", "OpenSSL.SSL",
-    "--distpath", str(ROOT / "dist"),
-    "--workpath", str(ROOT / "build"),
-    "--specpath", str(ROOT / "build"),
+    "--distpath", str(out),
+    "--workpath", str(work),
+    "--specpath", str(work),
 ])
