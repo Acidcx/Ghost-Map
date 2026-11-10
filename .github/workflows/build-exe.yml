@@ -20,6 +20,31 @@ jobs:
       - run: pip install -c packaging/exe-constraints.txt . pyinstaller
       - run: python packaging/build_exe.py
 
+      - name: Signing script self-test (throwaway certificate, on a copy)
+        shell: pwsh
+        run: |
+          # Exercises packaging/sign_exe.ps1 on every build without a real certificate. Only a copy is signed:
+          # the exe that is published stays as it is unless the step below signs it with the real certificate.
+          New-Item -ItemType Directory -Force dist\sign-test | Out-Null
+          Copy-Item dist\GhostMap.exe dist\sign-test\GhostMap.exe
+          $c = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=Ghost Map CI self-test (not trusted)" `
+            -CertStoreLocation Cert:\CurrentUser\My -NotAfter (Get-Date).AddDays(1)
+          try { .\packaging\sign_exe.ps1 -Path dist\sign-test\GhostMap.exe -Thumbprint $c.Thumbprint }
+          finally { Remove-Item "Cert:\CurrentUser\My\$($c.Thumbprint)" -DeleteKey; Remove-Item -Recurse dist\sign-test }
+
+      - name: Sign the exe (when a signing certificate is configured)
+        shell: pwsh
+        env:
+          # Repository secrets (Settings > Secrets and variables > Actions). See docs/CODE-SIGNING.md.
+          SIGN_PFX: ${{ secrets.GHOSTMAP_SIGN_PFX }}
+          SIGN_PFX_PASSWORD: ${{ secrets.GHOSTMAP_SIGN_PFX_PASSWORD }}
+        run: |
+          if (-not $env:SIGN_PFX) {
+            Write-Host "::notice::GhostMap.exe is NOT signed: the GHOSTMAP_SIGN_PFX secret is not set (docs/CODE-SIGNING.md)"
+            exit 0
+          }
+          .\packaging\sign_exe.ps1 -Path dist\GhostMap.exe -PfxBase64 $env:SIGN_PFX -PfxPassword $env:SIGN_PFX_PASSWORD
+
       - name: Smoke test
         shell: pwsh
         run: |
@@ -123,8 +148,10 @@ jobs:
         shell: pwsh
         run: |
           # Published next to the exe so whoever copies it to an HMI can check it is the file CI built:
-          # Get-FileHash GhostMap.exe in PowerShell must print the same hash.
-          $h = (Get-FileHash .\dist\GhostMap.exe -Algorithm SHA256).Hash
+          # Get-FileHash GhostMap.exe in PowerShell must print the same hash. Taken after signing (signing changes it).
+          $s = Get-AuthenticodeSignature .\dist\GhostMap.exe
+          Write-Host "GhostMap.exe signature: $($s.Status) $($s.SignerCertificate.Subject)"
+          $h =(Get-FileHash .\dist\GhostMap.exe -Algorithm SHA256).Hash
           "$h  GhostMap.exe" | Set-Content -Encoding ascii .\dist\GhostMap.exe.sha256
           Write-Host "GhostMap.exe SHA-256 $h"
 

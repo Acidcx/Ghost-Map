@@ -19,7 +19,7 @@ There are three ways to run Ghost Map. Each one opens the web UI in your browser
 
 1. On GitHub, open the **Actions** tab, click the latest green **Build Windows exe** run, and download **GhostMap-windows** under *Artifacts*. Tagged versions (`v0.1.0`, ...) also attach `GhostMap.exe` to a **Release**.
 2. Unzip it and double-click `GhostMap.exe`.
-   - Windows SmartScreen may say "Windows protected your PC" because the exe isn't code-signed yet. Click **More info**, then **Run anyway**.
+   - Windows SmartScreen may say "Windows protected your PC" because the exe isn't code-signed yet. Click **More info**, then **Run anyway**. Signing is set up in [docs/CODE-SIGNING.md](docs/CODE-SIGNING.md).
    - If Windows Firewall asks, allow it on **Private** networks.
 3. A console window opens and your browser shows Ghost Map. **Closing the console window stops Ghost Map.**
 
