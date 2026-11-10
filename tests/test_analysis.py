@@ -230,3 +230,45 @@ def test_storm_reads_once_at_its_source():
     assert f["SW1 Fa1/1"].severity == "error" and "the 2 devices on this port" in f["SW1 Fa1/1"].message
     assert f["SW2 Gi1/1"].severity == "info"
     assert "from SW1 Gi1/3" in f["SW2 Gi1/1"].message and "Same storm as SW1 Fa1/1" in f["SW2 Gi1/1"].message
+
+
+def linx(ip, serial, host):
+    raw = build_list_identity_response(ip=ip, vendor_id=77, device_type=0x0C, product_code=2, revision=(6, 40),
+                                       status=0x0030, serial=serial, product_name=host, state=3)
+    return DiscoveredIdentity(source_ip=ip, identity=parse_list_identity(raw)[0])
+
+
+def test_cloned_linx_serial_is_flagged_and_pcs_kept_apart():
+    # Seen on site: two HMIs imaged from one disk both answered as FT Linx (vendor 77) with serial 118D5DE1, and
+    # took turns losing their PLC connections.
+    ids = [linx("10.0.0.76", 0x118D5DE1, "HMI-A"), linx("10.0.0.77", 0x118D5DE1, "HMI-B")]
+    devices = build_inventory(ids, [], {})
+    assert len({d.key for d in devices}) == 2
+    f = run_diagnostics(ids, devices, [])
+    clone = [x for x in f if x.code == "device.cloned_serial"]
+    assert len(clone) == 1 and clone[0].severity == "error" and clone[0].target == "10.0.0.76, 10.0.0.77"
+    assert "118D5DE1" in clone[0].message and "FactoryTalk Linx" in clone[0].hint
+    assert "device.multi_ip" not in codes(f)
+    # Compare keeps both PCs: re-imaging one (new serial) is not reported as a change, and neither PC is dropped.
+    old = ScanResult(id="a", started="", devices=devices)
+    ids2 = [linx("10.0.0.76", 0x118D5DE1, "HMI-A"), linx("10.0.0.77", 0x2A7C0B13, "HMI-B")]
+    d = diff_scans(old, ScanResult(id="b", started="", devices=build_inventory(ids2, [], {})))
+    assert not (d["added"] or d["removed"] or d["replaced"])
+
+
+def test_same_serial_same_name_is_one_device_on_two_ips():
+    ids = [linx("10.0.0.10", 0x1234, "ENG-PC"), linx("10.0.1.10", 0x1234, "ENG-PC"),
+           ident("10.0.0.20", 0x55, name="1756-EN4TR/A"), ident("10.0.0.21", 0x55, name="1756-EN4TR/A")]
+    f = run_diagnostics(ids, build_inventory(ids, [], {}), [])
+    assert "device.cloned_serial" not in codes(f)
+    assert [x.target for x in f if x.code == "device.multi_ip"] == ["10.0.0.10, 10.0.1.10", "10.0.0.20, 10.0.0.21"]
+
+
+def test_different_products_sharing_a_serial_are_flagged():
+    ids = [ident("10.0.0.30", 0x99, name="1734-AENTR/B"), ident("10.0.0.31", 0x99, name="1769-L33ER/A")]
+    f = run_diagnostics(ids, build_inventory(ids, [], {}), [])
+    assert next(x for x in f if x.code == "device.cloned_serial").severity == "error"
+
+
+def test_demo_has_cloned_hmi_serial():
+    assert "device.cloned_serial" in codes(build_demo_scan("today").findings)

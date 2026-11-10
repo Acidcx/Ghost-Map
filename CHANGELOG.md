@@ -3,6 +3,15 @@
 Each version is a git tag (`v0.5.0`, ...). Pushing the tag builds `GhostMap.exe` and attaches it to a GitHub
 Release. `GhostMap.exe service status` and the top bar name the version and commit that are installed.
 
+## Unreleased
+
+- **Cloned PC serials are flagged.** Two PCs imaged from one disk answer as RSLinx / FactoryTalk Linx (vendor 77)
+  with the same CIP serial, and a PLC can then drop their connections in turn. A scan now reports this as an error,
+  `device.cloned_serial`, with the fix in its hint. Two different devices sharing a serial get the same error;
+  one device answering on two IPs is still the `device.multi_ip` info.
+- **Cloned PCs are no longer merged.** Devices were tracked by vendor + serial, so two cloned PCs shared one key:
+  Compare could drop one and clicking one in Devices could open the other. Linx PCs are now tracked by hostname.
+- The demo machine has two HMI PCs, cloned in the "today" scan.
 ## 0.5.4 (2026-11-05)
 
 After Ghost Map was seen using about 50% CPU on a Test HMI (killed and restarted before anything was captured).
